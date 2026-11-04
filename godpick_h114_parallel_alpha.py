@@ -100,6 +100,9 @@ def analyze_history(hist: pd.DataFrame | None, *, asof: Any = None) -> dict[str,
         "H114前日收盤價": None, "H114前次交易日": "", "H114當日漲跌幅%": None,
         "H114當前5日漲跌幅%": None,
         "H114同型歷史樣本數": 0, "H114同型樣本隔日上漲率%": None,
+        "H114黃金交叉": "未驗證", "H114箱型狀態": "未驗證",
+        "H114箱頂": None, "H114箱底": None, "H114MA20": None, "H114MA60": None,
+        "H114技術失效條件": "未驗證",
     }
     if not isinstance(hist, pd.DataFrame) or hist.empty:
         return base
@@ -144,6 +147,40 @@ def analyze_history(hist: pd.DataFrame | None, *, asof: Any = None) -> dict[str,
     if limit and (limit - df["day"].iloc[-1]).days > 5:
         base["H114K線資料狀態"] = "STALE_DAILY_K"
         return base
+    # H153: compute crossover using only complete bars through the study date;
+    # box boundaries come from PRIOR 20 sessions, never tomorrow's candle.
+    if volume_col and len(df) >= 60 and df["lots"].iloc[-21:].notna().all():
+        close_series=df["close"]
+        ma5=close_series.rolling(5).mean()
+        ma20=close_series.rolling(20).mean()
+        ma60=close_series.rolling(60).mean()
+        base["H114MA20"]=round(float(ma20.iloc[-1]),3)
+        base["H114MA60"]=round(float(ma60.iloc[-1]),3)
+        c5=(ma5.iloc[-2] <= ma20.iloc[-2] and ma5.iloc[-1] > ma20.iloc[-1]
+            and ma20.iloc[-1]>=ma20.iloc[-2])
+        c20=(ma20.iloc[-2] <= ma60.iloc[-2] and ma20.iloc[-1] > ma60.iloc[-1])
+        base["H114黃金交叉"] = ('確認｜MA20上穿MA60' if c20 else
+                               '確認｜MA5上穿MA20' if c5 else '均線交叉未確認')
+        previous20=df.iloc[-21:-1]
+        ceiling=float(previous20["high"].max())
+        floor=float(previous20["low"].min())
+        base["H114箱頂"]=round(ceiling,3)
+        base["H114箱底"]=round(floor,3)
+        narrow=(floor>0 and (ceiling-floor)/floor<=.18)
+        close=float(df["close"].iloc[-1]); peak=float(df["high"].iloc[-1])
+        avg_vol=float(previous20["lots"].mean());day_vol=float(df["lots"].iloc[-1])
+        if narrow:
+            if close>=ceiling*1.005 and avg_vol>0 and day_vol/avg_vol>=1.2:
+                base["H114箱型狀態"]='確認突破｜箱頂放量站上（需後續確認）'
+            elif peak>ceiling and close<=ceiling:
+                base["H114箱型狀態"]='假突破風險｜站不穩箱頂'
+            elif ceiling*.95<=close<=ceiling:
+                base["H114箱型狀態"]='接近箱頂｜尚未突破'
+            else:
+                base["H114箱型狀態"]='箱內整理｜待確認'
+        else:
+            base["H114箱型狀態"]='未形成可信窄幅箱型'
+        base["H114技術失效條件"]=(f'跌破整理區低點{floor:.3f}或MA20 {float(ma20.iloc[-1]):.3f}需重審；非自動停損價')
     last, prior = df.iloc[-1], df.iloc[-2]
     body_prev = prior["open"]-prior["close"]
     body_curr = last["close"]-last["open"]

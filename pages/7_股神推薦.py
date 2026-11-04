@@ -17368,7 +17368,42 @@ def _build_excel_bytes_fast_h85(
             lambda x: _h1521_by_code.get(x, {}).get('潛力型態', '非已驗證預發動潛力'))
         h152_opportunities['H152.1預發動反證'] = h152_opportunities['股票代號'].astype(str).map(
             lambda x: _h1521_by_code.get(x, {}).get('預發動風險反證', '無符合預發動條件的同日證據'))
-    h152_research_summary = pd.concat([h1483_summary, h152_summary, h1521_summary], ignore_index=True)
+    # H153: evidence-ranked, NOT trading-authorized, high-growth / technical
+    # pre-ignition research.  H115 PIT ledger is strictly as-of the H128 day.
+    # Do not fetch prices, revenue or future observations during Excel creation.
+    from godpick_h153_growth_setup_rank import (build_growth_setup_ranking as _h153_rank,
+        attach_rank_to_research as _h153_attach_research,
+        build_ranked_five_plans as _h153_five_plans)
+    # PIT-only: use H115 publication-availability ledger. Never borrow a
+    # legacy present-day fundamentals JSON for a historical study date.
+    from godpick_h115_pit_evidence import build_h114_evidence as _h153_pit_evidence
+    try:
+        _h153_ledger = _h153_pit_evidence(_h152_root, _h148_research_day)
+        _h153_pit_status = 'H115_PIT_READ_OK'
+    except (OSError, ValueError, TypeError):
+        _h153_ledger = {}
+        _h153_pit_status = 'H115_PIT_INVALID_OR_UNAVAILABLE'  # fail closed
+
+    h153_ranked, h153_summary, h153_meta = _h153_rank(
+        diagnosis_frame=_h1483_source, research_frame=h152_named_research,
+        research_day=_h148_research_day, verified_fundamentals=_h153_ledger,
+        limit=30)
+    h153_summary = pd.concat([h153_summary, pd.DataFrame([{
+        '檢查項目':'H153官方基本面PIT帳本讀取', '結果':_h153_pit_status,
+        '說明':'缺H115已公告來源則基本面不加分，禁止借用今日資料回填歷史'}])], ignore_index=True)
+    h153_meta['fundamental_source'] = _h153_pit_status
+    # Existing research candidates are preserved BELOW verified ranked rows,
+    # without a synthetic rank for missing evidence or old H110=52 ties.
+    h152_named_research = _h153_attach_research(h152_named_research, h153_ranked)
+    h152_opportunities = _h153_five_plans(ranked=h153_ranked,
+        diagnosis_frame=_h1483_source, previous_plans=h152_opportunities,
+        research_day=_h148_research_day, limit=5)
+    if 'st' in globals() and '_k' in globals():
+        st.session_state[_k('h153_ranked_research')] = h153_ranked.copy(deep=True)
+        st.session_state[_k('h153_rank_meta')] = dict(h153_meta)
+    h152_research_summary = pd.concat([h1483_summary, h152_summary, h1521_summary,
+                                       h153_summary], ignore_index=True)
+
     if 'st' in globals() and '_k' in globals():
         st.session_state[_k('h152_resilience_observations')] = h152_resilience.copy(deep=True)
         st.session_state[_k('h152_resilience_meta')] = dict(h152_meta)
@@ -17440,6 +17475,16 @@ def _build_excel_bytes_fast_h85(
             # H148.1 summary: transparent numbers instead of filling a false top12.
             ws.cell(6,2,str(ws.cell(6,2).value or '') +
                 f"｜H148.1強勢研究入榜{h1481_meta['eligible']}檔、隔離{h1481_meta['quarantine']}檔、H113漏接研究線索{h1481_meta['h113_missed_strong_research_count']}檔。")
+            # H153: display first verified research ranks while preserving the
+            # original H148.1 strict manager ranking and H126 second worksheet.
+            _h153_top = locals().get('h153_ranked', pd.DataFrame())
+            if isinstance(_h153_top,pd.DataFrame) and not _h153_top.empty:
+                _h153_names = '、'.join(f"{r['研究排名']}:{r['股票代號']}" for r in _h153_top.head(5).to_dict('records'))
+                ws.cell(6,2,str(ws.cell(6,2).value or '') +
+                    '｜H153成長／技術研究排名前五（非買進）' + _h153_names)
+            else:
+                ws.cell(6,2,str(ws.cell(6,2).value or '') +
+                    '｜H153缺可信同日量價／官方基本面，暫無可驗證研究排名。')
             ws.cell(1,1,'H148.1｜量價主流優先研究榜（非交易推薦）')
             ws.cell(1,2,'入榜需同日完整K線、量能、內部族群跨期雙指標及無H109否決；不以H110同分或代號補滿12檔。')
             ws.row_dimensions[6].height = 75
