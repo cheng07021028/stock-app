@@ -16,8 +16,9 @@ from typing import Any, Mapping
 import pandas as pd
 from godpick_h147_five_gate_review import _code, _day, _s
 from godpick_h114_parallel_alpha import evaluate as evaluate_h114
+from godpick_h1531_quality_repair import classify_h109, liquidity_reasons, source_coverage
 
-VERSION = 'V191-H153-GROWTH-TECH-PIT-RANK'
+VERSION = 'V191-H153.1-GROWTH-TECH-PIT-QUALITY'
 RANK_COLUMNS = (
     '研究排名', '排名等級', '研究證據分', '研究主題', '股票代號', '股票名稱', '產業',
     '行情證據日', '技術型態', '黃金交叉', '箱型型態', '本益比', '近四季EPS',
@@ -25,6 +26,9 @@ RANK_COLUMNS = (
     '基本面來源狀態', '下月營收模型情境(百萬)', '營收預估創高判定', '預估資料限制',
     '技術來源狀態', '量能驗證', '法人／大戶', 'H109風控',
     '研究成立理由', '反證與待補', '研究聲明',
+    'H109證據分類','原始PE_EPS狀態','已公告營收月數',
+    '當日成交額百萬','20日均成交額百萬','成交量張','量比','近5日漲幅%',
+    '3日相對抗跌pp','5日相對抗跌pp','多日抗跌來源狀態',
 )
 WATCH_ONLY = '研究名次僅為已驗證資訊的相對優先序；非明日上漲機率、非H126買進授權'
 
@@ -141,11 +145,13 @@ def build_growth_setup_ranking(*, diagnosis_frame: Any, research_frame: Any,
         avg=_n(r,'H113二十日均成交額百萬','20日均成交額百萬')
         lots=_n(r,'H114當日成交量張')
         ratio=_n(r,'H114K線量比')
-        # Both data and thresholds must be satisfied; never mix volume units.
-        if amount is None or avg is None or lots is None or ratio is None:
-            counts['成交額／張數／量比缺來源']+=1;continue
-        if min(amount,avg)<150 or lots<500 or ratio<0.55:
-            counts['流動性不足或過低量比']+=1;continue
+        # H153.1: an independently auditable reason per missing or failing
+        # field. Do not call a missing official observation "low liquidity".
+        failed=liquidity_reasons(amount=amount,average=avg,lots=lots,ratio=ratio)
+        if failed:
+            counts['流動性／量能未完成研究門檻（不重複股票數）']+=1
+            for why in failed:counts[why]+=1  # reasons can overlap
+            continue
         ret5=_n(r,'H114當前5日漲跌幅%')
         today=_n(r,'H114當日漲跌幅%')
         if ret5 is None or today is None:
@@ -184,8 +190,23 @@ def build_growth_setup_ranking(*, diagnosis_frame: Any, research_frame: Any,
         yoy=_num(f.get('H114營收年增率%'))
         yoy3=_num(f.get('H114三月累計年增率%'))
         discount=_num(f.get('H114相對本益比折價%'))
-        eps=_n(enriched,'H114近四季EPS實值','近四季EPS_官方') if value_verified else None
-        pe=_n(enriched,'H114本益比實值','本益比_官方') if value_verified else None
+        # Official single-name PE/EPS do not require enough comparable firms.
+        # But both must come from the separate H115 PIT ledger, not arbitrary
+        # stock-pool fields or a post-decision price quote.
+        value_day=_day(independent.get('H114估值資料日期'))
+        value_source=_s(independent.get('H114估值資料來源')).upper()
+        pe_raw=_n(independent,'H114本益比實值')
+        eps_raw=_n(independent,'H114近四季EPS實值')
+        raw_valuation_ok=bool(day and value_day and 0 <= (day-value_day).days<=14
+            and value_source in {'TWSE','TPEX','MOPS','OFFICIAL_VERIFIED'}
+            and pe_raw is not None and pe_raw>0 and eps_raw is not None and eps_raw>0)
+        pe=pe_raw if raw_valuation_ok else None
+        eps=eps_raw if raw_valuation_ok else None
+        raw_valuation_state=('官方同日可得PE/EPS，缺同業比較不等於缺原始資料'
+            if raw_valuation_ok and not value_verified else
+            '官方PE/EPS及同業比較均已核' if raw_valuation_ok else '原始PE/EPS待來源或時點驗證')
+        history=independent.get('H114月營收歷史')
+        history_count=len({str(x.get('year_month')) for x in history if isinstance(x,Mapping) and x.get('year_month')}) if isinstance(history,list) else 0
         growth=bool(revenue_verified and yoy is not None and yoy>=15 and yoy3 is not None and yoy3>=12)
         cheap=bool(value_verified and discount is not None and discount>=15)
         # Score is an explicit evidence-weighted research index, NOT odds.
@@ -213,15 +234,25 @@ def build_growth_setup_ranking(*, diagnosis_frame: Any, research_frame: Any,
         elif breakout:theme='箱型突破／防追高'
         elif resilience:theme='相對抗跌／等待資金確認'
         else:theme='技術蓄勢研究'
-        # H109 veto remains visible, and watchlist rank is *not* an H126 override.
-        veto=risk not in {'ALLOW','PASS','NONE','RESEARCH_ELIGIBLE'}
+        # H153.1: UNKNOWN is NOT a veto, but is also NOT a pass.
+        h109_class=classify_h109(risk)
+        veto=h109_class in {'EXPLICIT_VETO','EVIDENCE_CONFLICT'}
         if veto:score=max(0,score-12)
         score=min(100,score)
-        tier='A｜成長與技術交叉研究' if growth and (pre or box_ready or golden) and not veto else ('B｜量價技術研究' if not veto else 'C｜風控否決／反證觀察')
+        if veto:
+            tier='C｜明確否決／來源衝突隔離'
+        elif growth and (pre or box_ready or golden) and h109_class=='RESEARCH_ALLOWED':
+            tier='A｜成長與技術交叉研究'
+        elif h109_class=='PENDING_EVIDENCE':
+            tier='B｜研究證據待補（不得交易）'
+        else:
+            tier='B｜量價技術研究'
         missing=['H126未授權，研究名次不得下單']
-        if veto:missing.append('H109:'+risk+' 否決／未解')
+        if veto:missing.append('H109:'+risk+' 已明確否決／來源衝突，禁止混入可用研究')
+        elif h109_class=='PENDING_EVIDENCE':missing.append('H109:'+risk+' 狀態待核，不是已否決亦非已授權')
         if not revenue_verified:missing.append('官方逐月營收公告證據不足')
-        if not value_verified:missing.append('官方EPS／同日同業PE證據不足')
+        if not raw_valuation_ok:missing.append('官方原始PE／EPS證據不足')
+        elif not value_verified:missing.append('同日同業PE樣本不足；原始PE／EPS仍可研究')
         if not growth and revenue_verified:missing.append('營收成長尚未滿足研究假設')
         if inst!='PROVEN_FLOW':missing.append('H123法人待證')
         if tdcc!='VERIFIED_RISING':missing.append('H124集保週增待證')
@@ -236,7 +267,7 @@ def build_growth_setup_ranking(*, diagnosis_frame: Any, research_frame: Any,
             '三月營收年增率%':yoy3 if revenue_verified else None,
             '營收創高':f.get('H114營收創高') if revenue_verified else '未驗證',
             '相對同業PE折價%':discount if value_verified else None,
-            '基本面來源狀態':f"營收:{f.get('H114營收資料狀態')}；估值:{f.get('H114估值資料狀態')}",
+            '基本面來源狀態':f"營收:{f.get('H114營收資料狀態')}；原始估值:{raw_valuation_state}；同業:{f.get('H114估值資料狀態')}",
             '下月營收模型情境(百萬)':scenario['estimate_m'],
             '營收預估創高判定':scenario['record_state'],
             '預估資料限制':scenario['note'],
@@ -244,30 +275,40 @@ def build_growth_setup_ranking(*, diagnosis_frame: Any, research_frame: Any,
             '法人／大戶':inst+'／'+tdcc,'H109風控':risk,
             '研究成立理由':'；'.join(evidence) or '已核對量價',
             '反證與待補':'；'.join(missing),'研究聲明':WATCH_ONLY,
+            'H109證據分類':h109_class,'原始PE_EPS狀態':raw_valuation_state,
+            '已公告營收月數':history_count,
+            '當日成交額百萬':amount,'20日均成交額百萬':avg,
+            '成交量張':lots,'量比':ratio,'近5日漲幅%':ret5,
         })
-    # Tier first prevents an H109-veto stock winning because of raw price momentum.
+    # Verified research clearance ranks ahead of unknown; formal H126 stays untouched.
     tier_num=lambda x:int({'A':0,'B':1,'C':2}.get(str(x['排名等級'])[:1],3))
-    rows.sort(key=lambda x:(tier_num(x),-x['研究證據分'],x['股票代號']))
+    risk_num=lambda x:0 if x.get('H109證據分類')=='RESEARCH_ALLOWED' else (1 if x.get('H109證據分類')=='PENDING_EVIDENCE' else 2)
+    rows.sort(key=lambda x:(tier_num(x),risk_num(x),-x['研究證據分'],x['股票代號']))
     previous=None; ordinal=0;rank=0
     for row in rows:
         ordinal+=1
-        key=(tier_num(row),row['研究證據分'])
+        key=(tier_num(row),risk_num(row),row['研究證據分'])
         if key!=previous:rank=ordinal;previous=key
         row['研究排名']=rank # 1,1,3 competition ranks; stable ticker NOT a tie breaker
     cap=max(1,min(int(limit),50))
     top=rows[:cap]
+    coverage=source_coverage(facts)
     summary=[
         {'檢查項目':'H153有效診斷池','結果':len(raw),'說明':'不是證交所全市場母體保證'},
+        {'檢查項目':'H153.1 H109研究待補證','結果':sum(r['H109證據分類']=='PENDING_EVIDENCE' for r in rows),'說明':'不再誤判為風控否決；H126仍禁止未授權買進'},
+        {'檢查項目':'H153.1 H109明確否決／來源衝突','結果':sum(r['H109證據分類'] in {'EXPLICIT_VETO','EVIDENCE_CONFLICT'} for r in rows),'說明':'保留隔離，不讓否決股擠入正常研究榜'},
+        {'檢查項目':'H153.1有官方原始PE/EPS排名股','結果':sum(r['本益比'] is not None and r['近四季EPS'] is not None for r in rows),'說明':'不依賴同業樣本；同業折價須另有官方可比證據'},
+
         {'檢查項目':'H153研究證據排名候選','結果':len(rows),'說明':'排名按等級與有來源證據分，同分並列；不是預測漲幅'},
         {'檢查項目':'H153已揭露名單','結果':len(top),'說明':'完整候選可稽核；不以資料缺失股票湊榜'},
         {'檢查項目':'H153營收與技術交叉A級','結果':sum(r['排名等級'].startswith('A') for r in rows),'說明':'已公告營收／技術型態共同驗證，仍非買進資格'},
         {'檢查項目':'H153剔除重複代號','結果':len(dupes),'說明':'同代號多列不挑對排名有利的一列'},
         {'檢查項目':'H153禁止誤稱預測機率','結果':'T+1/T+5/T+10/T+20 待樣本外驗證','說明':'研究證據分並非上漲機率或獲利機率'},
-    ]+[{'檢查項目':'H153排除-'+k,'結果':v,'說明':'僅本輪證據或條件缺口，不等於股票未來必跌'} for k,v in counts.most_common()]
+    ]+[{'檢查項目':'H153.1基本面覆蓋-'+k,'結果':v,'說明':'只反映H115已可讀PIT帳本，不代表全市場覆蓋'} for k,v in sorted(coverage.items())] + [{'檢查項目':'H153排除-'+k,'結果':v,'說明':'原因可能重疊，非股票不佳或必跌'} for k,v in counts.most_common()]
     meta={'version':VERSION,'research_day':str(day) if day else '未驗證',
           'total':len(rows),'shown':len(top),'duplicate':len(dupes),
-          'reasons':dict(counts),'formal_h126_modified':False,
-          'ranking_rule':'先A/B/C等級、再研究證據分；完全相同同分並列；股票代碼只做穩定顯示',
+          'reasons':dict(counts),'h115_coverage':coverage,'formal_h126_modified':False,
+          'ranking_rule':'先A/B/C級、H109已驗證／待核、再研究證據分；同級同狀態同分並列；代碼只供穩定顯示',
           'warning':WATCH_ONLY}
     return pd.DataFrame(top,columns=RANK_COLUMNS),pd.DataFrame(summary),meta
 
@@ -292,7 +333,27 @@ def attach_rank_to_research(research_frame: Any, ranked: Any) -> pd.DataFrame:
         seen.add(code)
         info=ordered.get(code)
         if info:
+            old_fields=dict(x)
             x.update({key:info.get(key) for key in RANK_COLUMNS if key not in ('股票代號','股票名稱','產業')})
+            # H153.1: old H148.3 columns must not be empty while SAME dated
+            # H153 evidence exists. Detect conflicts rather than hiding them.
+            aliases={'H114行情日期':'行情證據日',
+                     '當日成交額百萬':'當日成交額百萬',
+                     '20日均成交額百萬':'20日均成交額百萬',
+                     '成交量張':'成交量張','量比':'量比',
+                     '近5日漲幅%':'近5日漲幅%'}
+            conflicts=[]
+            for legacy,verified in aliases.items():
+                trusted=info.get(verified)
+                if trusted is None:continue
+                prior=old_fields.get(legacy)
+                if prior is not None and not pd.isna(prior) and str(prior).strip() not in {'','未核實','未驗證'}:
+                    a=_num(prior); b=_num(trusted)
+                    difference=abs(a-b)>0.001 if a is not None and b is not None else str(prior)!=str(trusted)
+                    if difference:conflicts.append(f'{legacy}原值={prior}')
+                x[legacy]=trusted
+            x['H153.1欄位對齊']='已按同股同日H114核實資料填入' if not conflicts else '同股資料衝突，採本輪同日證據'
+            x['H153.1原值差異']='；'.join(conflicts)
             x.update({'H153成長與技術主題':info['研究主題'],'H153來源與反證':info['反證與待補']})
         else:
             x.update({'研究排名':None,'排名等級':'待核｜原研究線索',
@@ -302,7 +363,10 @@ def attach_rank_to_research(research_frame: Any, ranked: Any) -> pd.DataFrame:
     # Include newly found technical+growth candidates outside old H113/H148 research.
     for code,info in ordered.items():
         if code not in seen:
-            rows.append({**info,'研究層級':info['排名等級'],
+            rows.append({**info,'H114行情日期':info.get('行情證據日'),
+                         'H153.1欄位對齊':'已按同股同日H114核實資料填入',
+                         'H153.1原值差異':'',
+                         '研究層級':info['排名等級'],
                          'H153成長與技術主題':info['研究主題'],
                          'H153來源與反證':info['反證與待補'],
                          '來源證據':'H153當輪技術／官方基本面研究；非H126交易',
@@ -310,7 +374,8 @@ def attach_rank_to_research(research_frame: Any, ranked: Any) -> pd.DataFrame:
     # ensure the chief's four rank columns precede old wide pool detail
     priority=['研究排名','排名等級','研究證據分','股票代號','股票名稱',
               '研究主題','本益比','近四季EPS','營收年增率%','營收創高',
-              '黃金交叉','箱型型態','反證與待補','H153成長與技術主題','H153來源與反證']
+              '黃金交叉','箱型型態','H109證據分類','反證與待補',
+              'H153.1欄位對齊','H153.1原值差異','H153成長與技術主題','H153來源與反證']
     result=pd.DataFrame(rows)
     result['__rank_tier']=result['排名等級'].astype(str).str[:1].map({'A':0,'B':1,'C':2}).fillna(3)
     result['__rank_sort']=pd.to_numeric(result['研究排名'],errors='coerce').fillna(999999)
@@ -346,7 +411,16 @@ def build_ranked_five_plans(*, ranked: Any, diagnosis_frame: Any,
     """
     rank=_frame(ranked)
     plans=_frame(previous_plans)
-    if rank.empty:return attach_rank_to_plans(plans,rank,limit=limit)
+    # C = explicit H109 veto or source conflict, and must never be used to
+    # fill an otherwise-empty manager five-stock research opportunity list.
+    # This changes only the research *presentation*, not H126 permissions.
+    if rank.empty:
+        return pd.DataFrame(columns=['研究排名','研究優先序','H153研究證據分',
+                                      '股票代號','股票名稱','研究機會','反證／失效條件','交易資格'])
+    rank=rank[rank['排名等級'].astype(str).str.startswith(('A','B'))].copy()
+    if rank.empty:
+        return pd.DataFrame(columns=['研究排名','研究優先序','H153研究證據分',
+                                      '股票代號','股票名稱','研究機會','反證／失效條件','交易資格'])
     raw,_,_=_index(_frame(diagnosis_frame))
     old,_dup,_invalid=_index(plans)
     day=_day(research_day)
@@ -357,7 +431,10 @@ def build_ranked_five_plans(*, ranked: Any, diagnosis_frame: Any,
         code=ref['股票代號']
         o=dict(old.get(code,{}))
         price,support,resistance,rr,note=_valid_close_levels(raw.get(code,{}),day)
-        o.update({'研究優先序':f"同分並列第{ref['研究排名']}名（H153研究非買進）",
+        o.update({'3日相對抗跌pp':ref.get('3日相對抗跌pp'),
+                  '5日相對抗跌pp':ref.get('5日相對抗跌pp'),
+                  '多日抗跌來源狀態':ref.get('多日抗跌來源狀態'),
+                  '研究優先序':f"同分並列第{ref['研究排名']}名（H153研究非買進）",
                   '研究排名':ref['研究排名'], 'H153研究證據分':ref['研究證據分'],
                   'H153高成長／技術證據':ref['研究主題'],
                   '股票代號':code,'股票名稱':ref['股票名稱'],

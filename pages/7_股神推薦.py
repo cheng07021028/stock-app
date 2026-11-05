@@ -17388,10 +17388,37 @@ def _build_excel_bytes_fast_h85(
         diagnosis_frame=_h1483_source, research_frame=h152_named_research,
         research_day=_h148_research_day, verified_fundamentals=_h153_ledger,
         limit=30)
-    h153_summary = pd.concat([h153_summary, pd.DataFrame([{
-        '檢查項目':'H153官方基本面PIT帳本讀取', '結果':_h153_pit_status,
-        '說明':'缺H115已公告來源則基本面不加分，禁止借用今日資料回填歷史'}])], ignore_index=True)
+    # H153.1: optional 3/5-session resilience. ONLY SHA-verified H117 TAIEX,
+    # with exact per-stock reference session. Missing source yields blanks,
+    # not a claimed rising probability or fabricated "抗跌" signal.
+    from godpick_h1531_multiday_resilience import enrich_multiday_resilience as _h1531_multi
+    h153_ranked, _h1531_multi_summary, _h1531_multi_meta = _h1531_multi(
+        h153_ranked, _h1483_source, research_day=_h148_research_day,
+        root=_h152_root/'data'/'h117'/'daily')
+    h153_summary = pd.concat([h153_summary,_h1531_multi_summary],ignore_index=True)
+    h153_meta['multiday_research'] = _h1531_multi_meta
+    # H153.1: a successful file read is NOT evidence of fundamentals coverage.
+    # Expose the authoritative ledger's actual monthly/PE row counts in the
+    # existing statistics sheet rather than implying the sources are complete.
+    from godpick_h115_pit_evidence import evidence_digest as _h1531_pit_digest
+    try:
+        _h1531_ledger_digest = _h1531_pit_digest(_h152_root)
+        _h1531_rev = _h1531_ledger_digest['files']['revenue.jsonl'].get('rows',0)
+        _h1531_val = _h1531_ledger_digest['files']['valuations.jsonl'].get('rows',0)
+    except (OSError,ValueError,TypeError,KeyError):
+        _h1531_rev = _h1531_val = 0
+    _h1531_revenue_status = ('帳本缺歷史或未成功同步' if not _h1531_rev else '須看每股12/24月覆蓋，不等於資料齊全')
+    _h1531_valuation_status = ('原始官方PE/EPS帳本缺失｜不可宣稱基本面已核' if not _h1531_val else '原始PE/EPS與同業折價分開認證')
+    h153_summary = pd.concat([h153_summary, pd.DataFrame([
+        {'檢查項目':'H153官方基本面PIT帳本讀取','結果':_h153_pit_status,
+         '說明':'READ_OK僅代表程式可讀；不代表EPS/營收足夠或已完成全市場回補'},
+        {'檢查項目':'H153.1 H115月營收帳本實際列數','結果':_h1531_rev,
+         '說明':_h1531_revenue_status},
+        {'檢查項目':'H153.1 H115原始PE/EPS帳本實際列數','結果':_h1531_val,
+         '說明':_h1531_valuation_status},
+    ])], ignore_index=True)
     h153_meta['fundamental_source'] = _h153_pit_status
+    h153_meta['h115_ledger_rows'] = {'revenue':_h1531_rev,'valuation':_h1531_val}
     # Existing research candidates are preserved BELOW verified ranked rows,
     # without a synthetic rank for missing evidence or old H110=52 ties.
     h152_named_research = _h153_attach_research(h152_named_research, h153_ranked)
@@ -17479,12 +17506,17 @@ def _build_excel_bytes_fast_h85(
             # original H148.1 strict manager ranking and H126 second worksheet.
             _h153_top = locals().get('h153_ranked', pd.DataFrame())
             if isinstance(_h153_top,pd.DataFrame) and not _h153_top.empty:
-                _h153_names = '、'.join(f"{r['研究排名']}:{r['股票代號']}" for r in _h153_top.head(5).to_dict('records'))
-                ws.cell(6,2,str(ws.cell(6,2).value or '') +
-                    '｜H153成長／技術研究排名前五（非買進）' + _h153_names)
+                _h153_good = _h153_top[_h153_top['排名等級'].astype(str).str.startswith(('A','B'))]
+                if not _h153_good.empty:
+                    _h153_names = '、'.join(f"{r['研究排名']}:{r['股票代號']}" for r in _h153_good.head(5).to_dict('records'))
+                    ws.cell(6,2,str(ws.cell(6,2).value or '') +
+                        '｜H153.1具名研究前五（非買進，含風控待補證）' + _h153_names)
+                else:
+                    ws.cell(6,2,str(ws.cell(6,2).value or '') +
+                        '｜H153.1只有明確否決／衝突股；不以C級隔離股票補滿前五。')
             else:
                 ws.cell(6,2,str(ws.cell(6,2).value or '') +
-                    '｜H153缺可信同日量價／官方基本面，暫無可驗證研究排名。')
+                    '｜H153.1缺可信同日量價證據，暫無可驗證研究排名。')
             ws.cell(1,1,'H148.1｜量價主流優先研究榜（非交易推薦）')
             ws.cell(1,2,'入榜需同日完整K線、量能、內部族群跨期雙指標及無H109否決；不以H110同分或代號補滿12檔。')
             ws.row_dimensions[6].height = 75

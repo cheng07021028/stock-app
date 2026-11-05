@@ -236,14 +236,19 @@ def build_h114_evidence(root: Path, info_cutoff: Any, *, min_peers: int = MIN_PE
         result[code]["H115同業有效樣本數"] = len(peers)
         result[code]["H115同業資料日期"] = r["asof_date"]
         result[code]["H115同業估值依據"] = "同市場／同產業／同一資料日，排除自己，取同業中位數" if len(peers)>=min_peers else "同業樣本不足；不產生低估訊號"
-        if len(peers) < min_peers: continue
+        # H153.1: raw official PE/EPS are valid independently of whether
+        # five same-market, same-sector, same-day comparables are available.
+        # Do not mistake peer scarcity for lack of official per-stock evidence.
         result[code].update({
             "H114本益比實值":r["pe"],
-            "H114同業本益比中位數_官方":round(median(peers),5),
             "H114近四季EPS實值":r["eps_ttm"],
             "H114估值資料來源": "OFFICIAL_VERIFIED",
             "H114估值資料日期": r["asof_date"],
+            "H115原始估值資料狀態": "OFFICIAL_ASOF_RAW_PE_EPS",
+            "H115同業估值狀態": "VERIFIED_ASOF" if len(peers)>=min_peers else "PEER_SAMPLE_INSUFFICIENT",
         })
+        if len(peers) < min_peers: continue
+        result[code]["H114同業本益比中位數_官方"] = round(median(peers),5)
     return dict(result)
 
 

@@ -201,6 +201,10 @@ def analyze_history(hist: pd.DataFrame | None, *, asof: Any = None) -> dict[str,
             base["H114前次交易日"] = str(prior["day"])
             if float(df["close"].iloc[-6]) > 0:
                 base["H114當前5日漲跌幅%"] = round((float(last["close"])/float(df["close"].iloc[-6])-1)*100,3)
+                base["H114近5日基準交易日"] = str(df["day"].iloc[-6])
+            if float(df["close"].iloc[-4]) > 0:
+                base["H114近3日漲跌幅%"] = round((float(last["close"])/float(df["close"].iloc[-4])-1)*100,3)
+                base["H114近3日基準交易日"] = str(df["day"].iloc[-4])
             base["H114當日漲跌幅%"] = round((float(last["close"]) / float(prior["close"]) - 1) * 100, 3)
     if volume_col and last["lots"] > 0:
         avg20 = df["lots"].iloc[-21:-1].mean()
