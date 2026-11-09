@@ -17279,6 +17279,34 @@ def _build_excel_bytes_fast_h85(
     from godpick_h1483_research_recall import build_research_recall as _h1483_recall
     _h1483_input = locals().get('candidate_diagnosis_export')
     _h1483_source = _h1483_input if isinstance(_h1483_input, pd.DataFrame) else pd.DataFrame()
+    # H153.2: OPTIONAL read-only same-run full-diagnosis recovery. The H113
+    # 120-row audit must not impersonate the 2,000-stock scan. Only restore
+    # a strict superset with identical run signatures and compatible H114 data.
+    from godpick_h1532_scope_repair import restore_research_scope as _h1532_scope
+    _h1532_full = pd.DataFrame()
+    _h1532_adapter_error = ''
+    _h1532_current_sig = None
+    _h1532_full_sig = None
+    if 'st' in globals() and '_k' in globals():
+        _h1532_current_sig = st.session_state.get(_k('active_scan_signature_v181'))
+        _h1532_full_sig = st.session_state.get(_k('decision_frame_scan_signature_v181'))
+        _h1532_raw = st.session_state.get(_k('decision_frame_store_v181'))
+        if isinstance(_h1532_raw, pd.DataFrame) and len(_h1532_raw)>len(_h1483_source):
+            _h1532_build = globals().get('build_candidate_diagnosis')
+            try:
+                _h1532_full = _h1532_build(_h1532_raw) if callable(_h1532_build) else _h1532_raw.copy(deep=False)
+            except Exception as _h1532_exc:
+                _h1532_full = pd.DataFrame()
+                _h1532_adapter_error = type(_h1532_exc).__name__
+            # If existing full scan has no H114 dates, it cannot be ranked as
+            # H153 research without a new full scan of properly dated OHLCV.
+            if not {'H114K線證據日','H114K線資料狀態'}.issubset(_h1532_full.columns):
+                _h1532_full = pd.DataFrame()
+    _h1483_source, _h1532_scope_meta = _h1532_scope(
+        _h1483_source, _h1532_full, current_signature=_h1532_current_sig,
+        full_signature=_h1532_full_sig)
+    if _h1532_adapter_error:
+        _h1532_scope_meta['status'] = 'FULL_RESEARCH_ADAPTER_ERROR:' + _h1532_adapter_error
     h1483_research, h1483_summary, h1483_meta = _h1483_recall(
         diagnosis_frame=_h1483_source,
         audit_frame=tables.get('audit', pd.DataFrame()),
@@ -17396,7 +17424,18 @@ def _build_excel_bytes_fast_h85(
         h153_ranked, _h1483_source, research_day=_h148_research_day,
         root=_h152_root/'data'/'h117'/'daily')
     h153_summary = pd.concat([h153_summary,_h1531_multi_summary],ignore_index=True)
+    # H153.2: visibly distinguish a 119-row limited research pool from a
+    # complete same-run diagnosis. No automatic inference of full coverage.
+    h153_summary = pd.concat([h153_summary, pd.DataFrame([
+        {'檢查項目':'H153.2研究母體來源','結果':_h1532_scope_meta['status'],
+         '說明':'研究備援僅同輪同簽章且同股證據一致；不改H145/H126正式權威'},
+        {'檢查項目':'H153.2本輪研究池實際列數','結果':_h1532_scope_meta['selected_rows'],
+         '說明':'不可將限量稽核樣本稱為全市場股票池'},
+        {'檢查項目':'H153.2原始診斷池列數','結果':_h1532_scope_meta['diagnosis_rows'],
+         '說明':'來源縮減須重新掃描或取得完整同輪資料'},
+    ])],ignore_index=True)
     h153_meta['multiday_research'] = _h1531_multi_meta
+    h153_meta['h1532_scope'] = dict(_h1532_scope_meta)
     # H153.1: a successful file read is NOT evidence of fundamentals coverage.
     # Expose the authoritative ledger's actual monthly/PE row counts in the
     # existing statistics sheet rather than implying the sources are complete.

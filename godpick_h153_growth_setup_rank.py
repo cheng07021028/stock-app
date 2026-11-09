@@ -18,7 +18,7 @@ from godpick_h147_five_gate_review import _code, _day, _s
 from godpick_h114_parallel_alpha import evaluate as evaluate_h114
 from godpick_h1531_quality_repair import classify_h109, liquidity_reasons, source_coverage
 
-VERSION = 'V191-H153.1-GROWTH-TECH-PIT-QUALITY'
+VERSION = 'V191-H153.2-GROWTH-TECH-PIT-QUALITY'
 RANK_COLUMNS = (
     '研究排名', '排名等級', '研究證據分', '研究主題', '股票代號', '股票名稱', '產業',
     '行情證據日', '技術型態', '黃金交叉', '箱型型態', '本益比', '近四季EPS',
@@ -29,6 +29,8 @@ RANK_COLUMNS = (
     'H109證據分類','原始PE_EPS狀態','已公告營收月數',
     '當日成交額百萬','20日均成交額百萬','成交量張','量比','近5日漲幅%',
     '3日相對抗跌pp','5日相對抗跌pp','多日抗跌來源狀態',
+    'H1532布林收斂','H1532布林帶寬%','H1532OBV量價背離',
+    'H1532ADX','H1532DMI方向','H1532技術來源','H1532技術反證',
 )
 WATCH_ONLY = '研究名次僅為已驗證資訊的相對優先序；非明日上漲機率、非H126買進授權'
 
@@ -169,7 +171,13 @@ def build_growth_setup_ranking(*, diagnosis_frame: Any, research_frame: Any,
         existing_r=existing.get(code,{})
         old_tier=_s(existing_r.get('研究層級'))
         resilience=old_tier.startswith('R')
-        setup=pre or compress or box_ready or near or golden or breakout or resilience
+        bb=_s(r.get('H1532布林收斂')).startswith('是｜')
+        obv=_s(r.get('H1532OBV量價背離')).startswith('觀察｜')
+        adx=_num(r.get('H1532ADX'))
+        dmi=_s(r.get('H1532DMI方向'))
+        # An independent two-factor pre-breakout hypothesis.  Neither BB
+        # squeeze alone nor an unverified OBV indicator creates a candidate.
+        setup=pre or compress or box_ready or near or golden or breakout or resilience or (bb and obv)
         if not setup:
             counts['無可核對蓄勢／黃金交叉／箱型／抗跌證據']+=1;continue
         if ret5>12 or today>8:
@@ -219,6 +227,11 @@ def build_growth_setup_ranking(*, diagnosis_frame: Any, research_frame: Any,
         if golden:score+=13;evidence.append(cross)
         if near and not(box_ready or breakout):score+=7;evidence.append('距20日高點6%內')
         if resilience:score+=7;evidence.append('逆勢抗跌研究，待核市場同日證據')
+        # Two complementary families, limited +14; MA/crossover/box already
+        # represent the price-trend family and must not be double counted.
+        if bb:score+=8;evidence.append('布林帶寬低分位（只代表波動收斂）')
+        if obv:score+=6;evidence.append('OBV十日上行且價格未大漲（非集保大戶）')
+
         if growth:score+=14;evidence.append('公告營收年增與三月動能同向')
         if revenue_verified and f.get('H114營收創高')=='近12月新高':score+=7;evidence.append('已公布營收近12月新高')
         if cheap:score+=8;evidence.append('官方同日同業PE折價達15%')
@@ -228,6 +241,7 @@ def build_growth_setup_ranking(*, diagnosis_frame: Any, research_frame: Any,
         # Growth/value signals must both be PIT-vetted before the label.
         if growth and cheap and (pre or box_ready or golden):theme='高成長低估／技術蓄勢'
         elif growth and (pre or box_ready or golden):theme='營收成長／預發動'
+        elif bb and obv and not(pre or compress or golden or box_ready):theme='波動收斂／OBV改善（預發動待驗）'
         elif pre and compress:theme='量縮蓄勢／尚未發動'
         elif box_ready:theme='箱型準突破'
         elif golden:theme='均線黃金交叉'
@@ -256,6 +270,9 @@ def build_growth_setup_ranking(*, diagnosis_frame: Any, research_frame: Any,
         if not growth and revenue_verified:missing.append('營收成長尚未滿足研究假設')
         if inst!='PROVEN_FLOW':missing.append('H123法人待證')
         if tdcc!='VERIFIED_RISING':missing.append('H124集保週增待證')
+        if adx is not None and adx>=25 and dmi.startswith('空向'):
+            missing.append('ADX顯示已有較強空方趨勢；非起漲確認')
+        missing.append('布林收斂可能向下突破、OBV不等於大戶鎖碼；指標不得承諾收益')
         missing.append('隔日方向／大漲機率未校準，跌破箱底或均線需重審')
         rows.append({
             '研究排名':None,'排名等級':tier,'研究證據分':int(score),'研究主題':theme,
@@ -279,6 +296,12 @@ def build_growth_setup_ranking(*, diagnosis_frame: Any, research_frame: Any,
             '已公告營收月數':history_count,
             '當日成交額百萬':amount,'20日均成交額百萬':avg,
             '成交量張':lots,'量比':ratio,'近5日漲幅%':ret5,
+            'H1532布林收斂':_s(r.get('H1532布林收斂')) or '未驗證',
+            'H1532布林帶寬%':_num(r.get('H1532布林帶寬%')),
+            'H1532OBV量價背離':_s(r.get('H1532OBV量價背離')) or '未驗證',
+            'H1532ADX':adx,'H1532DMI方向':dmi or '未驗證',
+            'H1532技術來源':_s(r.get('H1532技術來源')) or '未驗證',
+            'H1532技術反證':_s(r.get('H1532技術反證')) or '缺技術來源，不代表低潛力',
         })
     # Verified research clearance ranks ahead of unknown; formal H126 stays untouched.
     tier_num=lambda x:int({'A':0,'B':1,'C':2}.get(str(x['排名等級'])[:1],3))
@@ -299,6 +322,9 @@ def build_growth_setup_ranking(*, diagnosis_frame: Any, research_frame: Any,
         {'檢查項目':'H153.1 H109明確否決／來源衝突','結果':sum(r['H109證據分類'] in {'EXPLICIT_VETO','EVIDENCE_CONFLICT'} for r in rows),'說明':'保留隔離，不讓否決股擠入正常研究榜'},
         {'檢查項目':'H153.1有官方原始PE/EPS排名股','結果':sum(r['本益比'] is not None and r['近四季EPS'] is not None for r in rows),'說明':'不依賴同業樣本；同業折價須另有官方可比證據'},
 
+        {'檢查項目':'H153.2布林收斂與OBV雙因子','結果':sum('布林收斂／OBV改善' in r['研究主題'] for r in rows),'說明':'僅限同日有效OHLCV，研究用；未校準勝率'},
+        {'檢查項目':'H153.2獨立布林收斂已核','結果':sum(str(r['H1532布林收斂']).startswith('是｜') for r in rows),'說明':'可能向上或向下突破'},
+        {'檢查項目':'H153.2OBV改善已核','結果':sum(str(r['H1532OBV量價背離']).startswith('觀察｜') for r in rows),'說明':'僅日成交量推導，不等於持股集中'},
         {'檢查項目':'H153研究證據排名候選','結果':len(rows),'說明':'排名按等級與有來源證據分，同分並列；不是預測漲幅'},
         {'檢查項目':'H153已揭露名單','結果':len(top),'說明':'完整候選可稽核；不以資料缺失股票湊榜'},
         {'檢查項目':'H153營收與技術交叉A級','結果':sum(r['排名等級'].startswith('A') for r in rows),'說明':'已公告營收／技術型態共同驗證，仍非買進資格'},
@@ -373,7 +399,8 @@ def attach_rank_to_research(research_frame: Any, ranked: Any) -> pd.DataFrame:
                          '尚需驗證與不得買進原因':info['反證與待補']})
     # ensure the chief's four rank columns precede old wide pool detail
     priority=['研究排名','排名等級','研究證據分','股票代號','股票名稱',
-              '研究主題','本益比','近四季EPS','營收年增率%','營收創高',
+              '研究主題','H1532布林收斂','H1532OBV量價背離','H1532ADX','H1532DMI方向',
+              '本益比','近四季EPS','營收年增率%','營收創高',
               '黃金交叉','箱型型態','H109證據分類','反證與待補',
               'H153.1欄位對齊','H153.1原值差異','H153成長與技術主題','H153來源與反證']
     result=pd.DataFrame(rows)
@@ -439,6 +466,11 @@ def build_ranked_five_plans(*, ranked: Any, diagnosis_frame: Any,
                   'H153高成長／技術證據':ref['研究主題'],
                   '股票代號':code,'股票名稱':ref['股票名稱'],
                   '研究層級':ref['排名等級'],'研究機會':ref['研究主題'],
+                  'H1532布林收斂':ref.get('H1532布林收斂'),
+                  'H1532布林帶寬%':ref.get('H1532布林帶寬%'),
+                  'H1532OBV量價背離':ref.get('H1532OBV量價背離'),
+                  'H1532ADX':ref.get('H1532ADX'),
+                  'H1532DMI方向':ref.get('H1532DMI方向'),
                   '成立證據':ref['研究成立理由'], '反證／失效條件':ref['反證與待補'],
                   '研究現價':price,'支撐價':support,'壓力價':resistance,
                   '參考風險報酬比':rr,'價位計算狀態':note,

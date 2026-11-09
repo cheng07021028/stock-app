@@ -103,6 +103,10 @@ def analyze_history(hist: pd.DataFrame | None, *, asof: Any = None) -> dict[str,
         "H114黃金交叉": "未驗證", "H114箱型狀態": "未驗證",
         "H114箱頂": None, "H114箱底": None, "H114MA20": None, "H114MA60": None,
         "H114技術失效條件": "未驗證",
+        "H1532布林收斂":"未驗證", "H1532布林帶寬%":None,
+        "H1532OBV量價背離":"未驗證", "H1532OBV近10日方向":"未驗證",
+        "H1532ADX":None, "H1532DMI方向":"未驗證",
+        "H1532技術來源":"日K資料不足", "H1532技術反證":"不得推算明日上漲機率",
     }
     if not isinstance(hist, pd.DataFrame) or hist.empty:
         return base
@@ -147,6 +151,11 @@ def analyze_history(hist: pd.DataFrame | None, *, asof: Any = None) -> dict[str,
     if limit and (limit - df["day"].iloc[-1]).days > 5:
         base["H114K線資料狀態"] = "STALE_DAILY_K"
         return base
+    # H153.2 complementary volatility/volume/trend lenses: independent,
+    # as-of, no network and no changes to H109/H126 decisions.
+    if volume_col and len(df)>=85 and (not limit or df["day"].iloc[-1]==limit):
+        from godpick_h1532_technical_evidence import evaluate_prebreakout
+        base.update(evaluate_prebreakout(df))
     # H153: compute crossover using only complete bars through the study date;
     # box boundaries come from PRIOR 20 sessions, never tomorrow's candle.
     if volume_col and len(df) >= 60 and df["lots"].iloc[-21:].notna().all():
