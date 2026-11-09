@@ -216,7 +216,7 @@ def fetch_twse_tpex_daily_range(code: str, market: str, start: date, end: date, 
     return df
 
 
-def fetch_multi_source_history(code: str, stock_name: str = "", market: str = "", start_date: date | str | None = None, end_date: date | str | None = None, timeout: int = 8) -> tuple[pd.DataFrame, str]:
+def fetch_multi_source_history(code: str, stock_name: str = "", market: str = "", start_date: date | str | None = None, end_date: date | str | None = None, timeout: int = 8, *, allow_daily_fallback: bool = True) -> tuple[pd.DataFrame, str]:
     start = pd.to_datetime(start_date, errors="coerce")
     end = pd.to_datetime(end_date, errors="coerce")
     if pd.isna(start) or pd.isna(end):
@@ -226,8 +226,13 @@ def fetch_multi_source_history(code: str, stock_name: str = "", market: str = ""
     sources = [
         ("YahooChart", lambda: fetch_yahoo_chart(code, market, start_d, end_d, timeout=timeout)),
         ("StooqCSV", lambda: fetch_stooq_csv(code, market, start_d, end_d, timeout=timeout)),
-        ("TWSE_TPExDaily", lambda: fetch_twse_tpex_daily_range(code, market, start_d, end_d)),
     ]
+    # H153.3: the daily official fallback walks up to 120 calendar dates and
+    # queries two markets on each date. A "7 second" HTTP request timeout is
+    # NOT a 7 second limit for that loop. Scheduled hit tracking disables this
+    # fallback while explicit/manual historical lookup preserves the feature.
+    if allow_daily_fallback:
+        sources.append(("TWSE_TPExDaily", lambda: fetch_twse_tpex_daily_range(code, market, start_d, end_d)))
     errors = []
     for name, fn in sources:
         try:

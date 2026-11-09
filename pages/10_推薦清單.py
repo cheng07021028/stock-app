@@ -1206,7 +1206,7 @@ def _horizon_perf_v101(hist: pd.DataFrame, base_price: float | None, n: int) -> 
         return None, None
 
 
-def _calc_night_hit_for_row_v101(row: Any, timeout: int = 7) -> dict[str, Any]:
+def _calc_night_hit_for_row_v101(row: Any, timeout: int = 7, *, allow_slow_fallback: bool = True) -> dict[str, Any]:
     code = _normalize_code(row.get("股票代號") if hasattr(row, "get") else "")
     if not code:
         return {"作戰追蹤狀態": "缺股票代號", "作戰追蹤更新時間": _now_text()}
@@ -1220,7 +1220,7 @@ def _calc_night_hit_for_row_v101(row: Any, timeout: int = 7) -> dict[str, Any]:
         return {"作戰追蹤狀態": "尚未到隔日", "作戰追蹤更新時間": _now_text()}
     market = _safe_str(row.get("市場別") if hasattr(row, "get") else "")
     name = _safe_str(row.get("股票名稱") if hasattr(row, "get") else "")
-    hist, source = fetch_multi_source_history(code, name, market, start_date=start, end_date=end, timeout=timeout)
+    hist, source = fetch_multi_source_history(code, name, market, start_date=start, end_date=end, timeout=timeout, allow_daily_fallback=allow_slow_fallback)
     if hist is None or hist.empty:
         return {"作戰追蹤狀態": "歷史K線不足", "作戰追蹤資料源": source, "作戰追蹤更新時間": _now_text()}
     hist = hist.copy()
@@ -1270,29 +1270,75 @@ def _calc_night_hit_for_row_v101(row: Any, timeout: int = 7) -> dict[str, Any]:
     return result
 
 
-def _update_night_hit_tracking_v101(df: pd.DataFrame, max_rows: int = 60, show_progress: bool = True) -> tuple[pd.DataFrame, dict[str, Any]]:
+def _update_night_hit_tracking_v101(
+    df: pd.DataFrame,
+    max_rows: int = 60,
+    show_progress: bool = True,
+    *,
+    time_budget_seconds: float | None = None,
+    per_request_timeout_seconds: int = 7,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """H153.3: bounded, resumable hit update; manual UI retains its old defaults.
+
+    Scheduled jobs pass a small batch and deadline. Already processed rows get a
+    tracking timestamp, so the next scheduled run starts with missing rows. A
+    single provider call may exceed its nominal timeout if it tries fallbacks;
+    never begin another provider call after the deadline is exhausted.
+    """
+    import time as _h1533_time
+
     x = _ensure_record_columns(df).copy() if df is not None else pd.DataFrame(columns=GODPICK_RECORD_COLUMNS)
     for c in NIGHT_HIT_TRACKING_COLUMNS:
         if c not in x.columns:
             x[c] = ""
     if x.empty:
-        return x, {"processed": 0, "success": 0, "fail": 0, "messages": ["無推薦清單資料"]}
-    # 優先更新尚未追蹤、有夜間欄位或近期推薦的資料。
+        return x, {"processed": 0, "success": 0, "fail": 0, "remaining": 0, "messages": ["無推薦清單資料"]}
     work = x.copy()
     work["_rec_dt"] = pd.to_datetime(work.get("推薦日期"), errors="coerce")
-    needs = work["作戰追蹤更新時間"].map(_is_blank_value) if "作戰追蹤更新時間" in work.columns else pd.Series([True] * len(work), index=work.index)
-    candidates = work[needs].sort_values("_rec_dt", ascending=False, na_position="last").head(int(max_rows))
-    if candidates.empty:
-        candidates = work.sort_values("_rec_dt", ascending=False, na_position="last").head(int(max_rows))
+    needs = work["作戰追蹤更新時間"].map(_is_blank_value)
+    pending = work[needs].sort_values("_rec_dt", ascending=False, na_position="last")
+    # Preserve manual full-refresh. For scheduled work, revisit tracked rows
+    # only when at least ~one business day old; otherwise remote writes repeat
+    # without any new market session. Order by oldest follow-up first so 300+
+    # records cannot starve behind the latest 6 recommendations forever.
+    if pending.empty:
+        if time_budget_seconds is not None:
+            updated_at = pd.to_datetime(work["作戰追蹤更新時間"], errors="coerce")
+            stale_cutoff = pd.Timestamp.now() - pd.Timedelta(hours=22)
+            work["_track_dt"] = updated_at
+            pending = work[updated_at.isna() | (updated_at <= stale_cutoff)].sort_values(
+                ["_track_dt", "_rec_dt"], ascending=[True, False], na_position="first"
+            )
+        else:
+            pending = work.sort_values("_rec_dt", ascending=False, na_position="last")
+    batch = max(1, min(int(max_rows or 60), 300))
+    candidates = pending.head(batch)
+    pending_count = len(pending)
     bar = st.progress(0.0, text="準備更新隔日命中追蹤...") if show_progress else None
     processed = success = fail = 0
     errors: list[str] = []
+    deadline = (_h1533_time.monotonic() + max(1.0, float(time_budget_seconds))) if time_budget_seconds is not None else None
+    request_limit = max(1, min(int(per_request_timeout_seconds or 7), 12))
     total = max(len(candidates), 1)
     for i, (idx, row) in enumerate(candidates.iterrows(), start=1):
+        # Time budgets apply to the entire batch, not 300 * per-stock timeout.
+        remaining_sec = deadline - _h1533_time.monotonic() if deadline is not None else None
+        if remaining_sec is not None and remaining_sec < 2.0:
+            errors.append("H153.3整批時間預算到達，保留剩餘股票，下次續跑")
+            break
+        timeout = min(request_limit, max(1, int(remaining_sec - 1))) if remaining_sec is not None else request_limit
         try:
             if bar is not None:
                 bar.progress(min(i / total, 1.0), text=f"更新 {i}/{total}：{row.get('股票代號', '')} {row.get('股票名稱', '')}")
-            res = _calc_night_hit_for_row_v101(row, timeout=7)
+            try:
+                res = _calc_night_hit_for_row_v101(row, timeout=timeout, allow_slow_fallback=(deadline is None))
+            except TypeError as e:
+                # Some older installed test/extension adapters monkeypatch the
+                # original (row, timeout) call contract. Preserve compatibility
+                # without swallowing unrelated type errors from the provider.
+                if "allow_slow_fallback" not in str(e):
+                    raise
+                res = _calc_night_hit_for_row_v101(row, timeout=timeout)
             for c, v in res.items():
                 if c not in x.columns:
                     x[c] = ""
@@ -1302,15 +1348,22 @@ def _update_night_hit_tracking_v101(df: pd.DataFrame, max_rows: int = 60, show_p
                 fail += 1
             else:
                 success += 1
-            # Streamlit Cloud 防卡：每批最多跑 max_rows，不在這裡長時間休眠。
-        except Exception as e:
+        except Exception as exc:
             processed += 1
             fail += 1
-            errors.append(f"{row.get('股票代號', '')}:{str(e)[:80]}")
+            errors.append(f"{row.get('股票代號', '')}:{type(exc).__name__}:{str(exc)[:80]}")
     if bar is not None:
         bar.empty()
     x = x.drop(columns=[c for c in ["_rec_dt"] if c in x.columns], errors="ignore")
-    return _ensure_record_columns(x), {"processed": processed, "success": success, "fail": fail, "messages": errors[:8]}
+    # No silent success: even if a batch is fully processed, any other pending
+    # rows are explicitly recorded and left untouched for future runs.
+    remaining = max(0, pending_count - processed)
+    return _ensure_record_columns(x), {
+        "processed": processed, "success": success, "fail": fail,
+        "remaining": remaining, "budget_exhausted": bool(deadline is not None and remaining > 0),
+        "time_budget_seconds": time_budget_seconds,
+        "messages": errors[:8],
+    }
 
 
 def _render_night_hit_tracker_v101(filtered_df: pd.DataFrame) -> None:

@@ -78,7 +78,7 @@ DEFAULT_JOB_OPTIONS = {
     "record_performance": {"process_all": True, "max_records": 5000, "batch_limit": 120, "max_workers": 12, "stale_minutes": 30},
     "recommend_list_performance": {"process_all": True, "max_records": 5000, "batch_limit": 120, "max_workers": 12, "stale_minutes": 30},
     "recommend_list_n_day": {"max_rows": 300},
-    "recommend_list_hits": {"max_rows": 300},
+    "recommend_list_hits": {"max_rows": 6, "time_budget_seconds": 28, "per_request_timeout_seconds": 4, "scheduler_immediate_retries": 0},
     "t1_truth": {"max_records": 500, "max_workers": 8},
     "feedback_learning": {},
     "durability_retry": {"max_sync_per_run": 6, "time_budget_seconds": 35},
@@ -635,17 +635,39 @@ def _repair_future_completed_keys(status: dict[str, Any], now: datetime) -> int:
 
 
 def _checkpoint_runtime(status: dict[str, Any], history: list[dict[str, Any]], cfg: dict[str, Any], reason: str) -> None:
-    """Persist after every job so a Streamlit rerun/process restart cannot erase progress."""
+    """H153.3: immediate local atomic checkpoint; coalesced remote verification.
+
+    Before/after each of 14 jobs, the former implementation synchronously
+    performed four or more remote GitHub/Firestore operations. When credentials
+    or network failed, the scheduler appeared frozen for minutes. Intermediate
+    checkpoints are now locally atomic; the terminal checkpoint still uses
+    synchronous remote persistence for external reboot safety. Intermediate
+    statuses must not be called remotely confirmed until that terminal save.
+    """
     history[:] = history[-int(cfg.get("history_keep",400)):]
-    status["updated_at"]=now_text()
-    try:
-        _persist_runtime(STATUS_FILE,status,f"V191 scheduler checkpoint｜{reason}")
-    except Exception:
-        pass
-    try:
-        _persist_runtime(HISTORY_FILE,{"version":VERSION,"updated_at":now_text(),"records":history},f"V191 scheduler history checkpoint｜{reason}")
-    except Exception:
-        pass
+    status["updated_at"] = now_text()
+    terminal = reason in {"run-finished", "run-paused-pending-retry"}
+    files = (
+        (STATUS_FILE, status, "status"),
+        (HISTORY_FILE, {"version": VERSION, "updated_at": now_text(), "records": history}, "history"),
+    )
+    for path, payload, label in files:
+        try:
+            if terminal:
+                _persist_runtime(path, payload, f"H153.3 terminal remote checkpoint｜{reason}｜{label}")
+            else:
+                # Avoid racing the final authoritative status with an old
+                # asynchronous remote write. Do not claim remote confirmation.
+                from godpick_persistence_service import write_local_json_atomic
+                write_local_json_atomic(path, payload)
+        except Exception:
+            # Even a failed durable coordinator must not destroy the scheduler
+            # status. Reported remote confirmation remains false until proven.
+            try:
+                from godpick_persistence_service import write_local_json_atomic
+                write_local_json_atomic(path, payload)
+            except Exception:
+                pass
 
 
 def _execute_one(job:str, job_cfg:dict[str,Any], global_cfg:dict[str,Any]) -> dict[str,Any]:
@@ -655,9 +677,12 @@ def _execute_one(job:str, job_cfg:dict[str,Any], global_cfg:dict[str,Any]) -> di
     options = job_cfg.get("options") if isinstance(job_cfg.get("options"), dict) else {}
     retry_override = options.get("scheduler_immediate_retries")
     if retry_override is None:
-        retry_count = int(global_cfg.get("retry_count",2) or 0)
+        # Remote-record jobs are individually network-heavy, and H7 already
+        # provides a durable follow-up. Never retry an entire completed
+        # calculation + remote save 2 more times in the same UI request.
+        retry_count = 0 if job in {"record_latest_price", "record_performance", "recommend_list_performance", "recommend_list_n_day", "recommend_list_hits"} else int(global_cfg.get("retry_count",2) or 0)
     else:
-        retry_count = max(0, min(int(retry_override or 0), 5))
+        retry_count = max(0, min(int(retry_override or 0), 1 if job in {"record_latest_price", "record_performance", "recommend_list_performance", "recommend_list_n_day", "recommend_list_hits"} else 5))
     attempts=max(1,retry_count+1); delay=int(global_cfg.get("retry_delay_seconds",20) or 20)
     last={}
     for n in range(1,attempts+1):
@@ -671,6 +696,24 @@ def _execute_one(job:str, job_cfg:dict[str,Any], global_cfg:dict[str,Any]) -> di
             time.sleep(delay)
     _touch_lock(job)
     return last
+
+
+_H1533_REMOTE_FANOUT = {
+    "record_latest_price", "record_performance", "recommend_list_performance",
+    "recommend_list_n_day", "recommend_list_hits",
+}
+
+
+def _h1533_remote_failure(job: str, result: dict[str, Any]) -> bool:
+    """Open a per-run circuit only for an explicit remote persistence failure.
+
+    Do not conflate absent historical data, price service errors or a slow
+    provider with failed remote permission; those have separate diagnostics.
+    """
+    if job not in _H1533_REMOTE_FANOUT or bool(result.get("ok")):
+        return False
+    message = str(result.get("message") or "")
+    return any(x in message for x in ("永久同步失敗", "同步失敗", "永久化失敗"))
 
 
 def _emit_progress(progress_callback, event: dict[str, Any]) -> None:
@@ -783,6 +826,7 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
         _checkpoint_runtime(status,history,cfg,"run-start")
 
     executed=[]; overall=True
+    _h1533_sync_breaker = ""  # reset every wake; no permanent circuit lockout
     try:
         for job in _ordered_job_keys(cfg):
             job_cfg=(cfg.get("jobs") or {}).get(job) or {}
@@ -819,6 +863,14 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
                 started=now_text(now) if simulate else now_text()
                 if not deps_ok:
                     result={"ok":False,"blocked":True,"message":deps_msg,"finished_at":now_text(now) if simulate else now_text()}
+                elif _h1533_sync_breaker and job in _H1533_REMOTE_FANOUT and not simulate:
+                    # A confirmed remote failure earlier this wake must not
+                    # trigger four more full-history syncs and minute-long
+                    # network retries. Keep the slot BLOCKED (retryable), not
+                    # SUCCESS, and allow the dedicated H7 durability job.
+                    result={"ok":False,"blocked":True,
+                        "message":f"H153.3遠端永久同步暫停：{_h1533_sync_breaker} 已失敗；本工作尚未執行，保留資料，下輪重試／使用17永久化修復。",
+                        "finished_at":now_text()}
                 elif simulate:
                     result={"ok":True,"simulated":True,"message":"模擬：到期且前置條件已通過，未實際執行。","finished_at":now_text(now)}
                 else:
@@ -828,6 +880,8 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
                     "started_at":started,"finished_at":result.get("finished_at") or now_text(),"status":("WARNING" if result.get("ok") and result.get("warning") else ("SUCCESS" if result.get("ok") else ("BLOCKED" if result.get("blocked") else "FAILED"))),
                     "message":str(result.get("message") or ""),"duration_seconds":result.get("duration_seconds"),"attempt":result.get("attempt"),"details":result.get("details",{}),
                 }
+                if _h1533_remote_failure(job, result):
+                    _h1533_sync_breaker = job
                 executed.append(row); history.append({k:v for k,v in row.items() if k != "details"})
                 js=status["jobs"].setdefault(job,{})
                 js.update({"label":JOB_LABELS.get(job,job),"last_status":row["status"],"last_run_at":row["finished_at"],"last_message":row["message"],"last_duration_seconds":row.get("duration_seconds"),"last_slot":row["slot"]})

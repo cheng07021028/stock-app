@@ -430,6 +430,26 @@ def task_recommend_list_performance(cfg: dict[str, Any] | None = None) -> dict[s
         return _report(False,f"推薦清單績效更新失敗：{type(exc).__name__}: {exc}",started=t0)
 
 
+def _h1533_remote_failure_hint(messages: Any) -> str:
+    """Safe, non-secret operator hint for remote sync failures."""
+    import re
+    raw = " ".join(str(x) for x in (messages or [])).lower()
+    for status, explanation in (
+        ("401", "GitHub/遠端授權已失效"),
+        ("403", "GitHub/遠端寫入權限不足或受限制"),
+        ("409", "GitHub分支版本衝突，需重新取得SHA"),
+        ("422", "GitHub提交格式或分支保護拒絕"),
+        ("429", "遠端服務流量限制"),
+    ):
+        if re.search(r"(?<![0-9])"+status+r"(?![0-9])",raw):
+            return explanation+f" (HTTP {status})"
+    if "timeout" in raw or "逾時" in raw or "timed out" in raw:
+        return "遠端同步逾時；保留本輪結果等待重試"
+    if "token" in raw and ("未設定" in raw or "missing" in raw):
+        return "GitHub Token 未設定或不可讀取"
+    return "永久化未獲得遠端確認，請查看17系統健康檢查之同步明細"
+
+
 def task_recommend_list_n_day(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     t0=time.perf_counter(); cfg=cfg or {}
     try:
@@ -439,9 +459,10 @@ def task_recommend_list_n_day(cfg: dict[str, Any] | None = None) -> dict[str, An
         df,msgs=_load_recommend_list()
         out,summary=ns["_update_formal_n_day_metrics_v98"](df,max_rows=int(cfg.get("max_rows",300) or 300),show_progress=False)
         ok_sync,sync_msgs=ns["_sync_records"](out)
+        hint = "" if ok_sync else f"；原因：{_h1533_remote_failure_hint(sync_msgs)}"
         ok=bool(ok_sync and (int(summary.get("processed",0) or 0)>=0))
         no_data=bool(df.empty)
-        return _report(ok,f"正式N日績效回補：處理 {summary.get('processed',0)}／成功 {summary.get('success',0)}／剩餘 {summary.get('remaining',0)}；{'0筆安全略過（未清空歷史）' if no_data else ('同步成功' if ok_sync else '同步失敗')}",details={"summary":summary,"load_messages":msgs[-10:],"sync_messages":sync_msgs[-20:]},changed_files=["godpick_recommend_list.json","godpick_records.json"],started=t0,warning=bool(no_data and ok))
+        return _report(ok,f"正式N日績效回補：處理 {summary.get('processed',0)}／成功 {summary.get('success',0)}／剩餘 {summary.get('remaining',0)}；{'0筆安全略過（未清空歷史）' if no_data else ('同步成功' if ok_sync else '同步失敗')}{hint}",details={"summary":summary,"load_messages":msgs[-10:],"sync_messages":sync_msgs[-20:]},changed_files=["godpick_recommend_list.json","godpick_records.json"],started=t0,warning=bool(no_data and ok))
     except Exception as exc:
         return _report(False,f"正式N日績效回補失敗：{type(exc).__name__}: {exc}",started=t0)
 
@@ -453,10 +474,32 @@ def task_recommend_list_hits(cfg: dict[str, Any] | None = None) -> dict[str, Any
         ns=load_page_namespace("pages/10_推薦清單.py", base_dir=BASE_DIR)
         _require_headless_callables(ns, "Page10", ["_update_night_hit_tracking_v101", "_sync_records", "upsert_records_authority_fast", "save_named_json_permanent"])
         df,msgs=_load_recommend_list()
-        out,summary=ns["_update_night_hit_tracking_v101"](df,max_rows=int(cfg.get("max_rows",300) or 300),show_progress=False)
+        # Small scheduled batches are essential: a per-stock HTTP timeout is
+        # not a whole-task deadline, especially with multi-source fallbacks.
+        # Manual page10 keeps its existing explicit refresh UI behaviour.
+        max_rows=max(1,min(int(cfg.get("max_rows",6) or 6),12))
+        time_budget=max(8.0,min(float(cfg.get("time_budget_seconds",28) or 28),50.0))
+        per_request=max(2,min(int(cfg.get("per_request_timeout_seconds",4) or 4),6))
+        out,summary=ns["_update_night_hit_tracking_v101"](
+            df,max_rows=max_rows,show_progress=False,
+            time_budget_seconds=time_budget,per_request_timeout_seconds=per_request,
+        )
+        # Empty/unchanged batches must not issue another round of remote
+        # GitHub+Firestore writes (the prior four jobs may already be failing).
+        if int(summary.get("processed",0) or 0)==0 and not df.empty:
+            return _report(True,
+                f"隔日命中追蹤：本輪未處理新筆數／剩餘 {summary.get('remaining',0)}，保留資料下次續跑；未重新送出永久同步",
+                details={"summary":summary,"load_messages":msgs[-10:]},started=t0,warning=True)
         ok_sync,sync_msgs=ns["_sync_records"](out)
+        hint = "" if ok_sync else f"；原因：{_h1533_remote_failure_hint(sync_msgs)}"
         no_data=bool(df.empty)
-        return _report(bool(ok_sync),f"隔日命中追蹤：處理 {summary.get('processed',0)}／成功 {summary.get('success',0)}／失敗 {summary.get('fail',0)}；{'0筆安全略過（未清空歷史）' if no_data else ('同步成功' if ok_sync else '同步失敗')}",details={"summary":summary,"load_messages":msgs[-10:],"sync_messages":sync_msgs[-20:]},changed_files=["godpick_recommend_list.json","godpick_records.json"],started=t0,warning=bool(no_data and ok_sync))
+        remaining=int(summary.get("remaining",0) or 0)
+        return _report(bool(ok_sync),
+            f"隔日命中追蹤：處理 {summary.get('processed',0)}／成功 {summary.get('success',0)}／失敗 {summary.get('fail',0)}／待續 {remaining}；"
+            + ('0筆安全略過（未清空歷史）' if no_data else ('遠端同步已確認' if ok_sync else '遠端同步失敗，已保留本輪結果與失敗明細')) + hint,
+            details={"summary":summary,"load_messages":msgs[-10:],"sync_messages":sync_msgs[-20:]},
+            changed_files=["godpick_recommend_list.json","godpick_records.json"],started=t0,
+            warning=bool(ok_sync and (no_data or remaining>0 or int(summary.get("fail",0) or 0)>0)))
     except Exception as exc:
         return _report(False,f"隔日命中追蹤失敗：{type(exc).__name__}: {exc}",started=t0)
 

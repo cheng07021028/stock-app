@@ -368,7 +368,7 @@ if callable(load_auto_scheduler_settings):
                     _progress.progress(_ratio, text=f"{_completed}/{_total} 已完成｜目前第 {_index} 項：{_job_label}")
                     _live.info(
                         f"▶ **正在執行第 {_index}/{_total} 項**｜{_job_label}\n"
-                        f"已完成 {_completed} 項｜累計耗時 {_fmt_elapsed()}｜本項完成後會立即永久 checkpoint。"
+                        f"已完成 {_completed} 項｜累計耗時 {_fmt_elapsed()}｜本項完成後立即本機 checkpoint；本輪結束再確認遠端永久同步。"
                     )
                 elif _event == "job_complete":
                     _ratio = min(1.0, _completed / _total)
