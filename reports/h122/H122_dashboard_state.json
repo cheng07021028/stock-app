@@ -1,6 +1,7 @@
 {
   "alert_codes": [
     "NO_THREE_SOURCE_DAY",
+    "TODAY_OFFICIAL_EOD_NOT_VERIFIED",
     "NO_IMMUTABLE_DECISIONS",
     "NO_H116_PERFORMANCE_MANIFEST",
     "NIGHTLY_PIPELINE_STEP_FAILED",
@@ -17,7 +18,7 @@
     "last_three_source_day": null,
     "partial_day_count": 0
   },
-  "fingerprint_sha256": "9498bcea45211c9dda9d0881f012209fb7f06fb364eced6cda7d8fb8bb1d9fa4",
+  "fingerprint_sha256": "5ca3de96306c621e3345833ab4dea90108529011ebe44de00b22c4eabb7d77d3",
   "h120_attested_days": null,
   "persistence": "REMOTE_UNVERIFIED",
   "pipeline_steps": {
