@@ -1,0 +1,51 @@
+name: H150 safe login-triggered source refresh
+on:
+  workflow_dispatch:
+    inputs:
+      trigger_source:
+        description: login or administrator
+        required: false
+        default: login
+  schedule:
+    - cron: '50 15 * * 1-5' # 23:50 Asia/Taipei; data pipelines also have independent schedules
+permissions:
+  contents: write
+  actions: write
+concurrency:
+  group: godpick-h150-unattended-refresh
+  cancel-in-progress: false
+jobs:
+  auto-data:
+    runs-on: ubuntu-latest
+    timeout-minutes: 155
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout runtime-data public cache branch
+        uses: actions/checkout@v4
+        with:
+          ref: runtime-data
+          path: runtime
+          persist-credentials: true
+      - name: Refresh public RSS headline cache (non-trading research)
+        id: news
+        continue-on-error: true
+        run: python tools/h150_public_news.py --output runtime/data/h150/H150_news.json
+      - name: Commit only H150 public RSS cache
+        if: steps.news.outcome == 'success'
+        working-directory: runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add data/h150/H150_news.json
+          if ! git diff --cached --quiet; then
+            git commit -m 'H150: refresh public research headlines (no trades)'
+            git pull --rebase origin runtime-data
+            git push origin HEAD:runtime-data
+          fi
+      - name: Dispatch existing official collectors in safe sequence
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          H150_TRIGGER_SOURCE: ${{ github.event.inputs.trigger_source || github.event_name }}
+        run: python tools/h150_actions_chain.py

@@ -1,0 +1,44 @@
+name: H1534 official three-margin snapshots
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '45 15 * * 1-5' # 23:45 Taiwan weekdays; snapshots deduplicate on unchanged financial facts
+permissions:
+  contents: write
+concurrency:
+  group: h1534-official-margin-history-main
+  cancel-in-progress: false
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: true
+      - name: Snapshot official TWSE individual-quarter ratios
+        id: twse
+        continue-on-error: true
+        run: python tools/h1534_import_margins.py --fetch-twse --store data/h115
+      - name: Snapshot official TPEx individual-quarter ratios
+        id: tpex
+        continue-on-error: true
+        run: python tools/h1534_import_margins.py --fetch-tpex --store data/h115
+      - name: Persist only H1534 official margin observations
+        if: steps.twse.outcome == 'success' || steps.tpex.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- data/h115/quarterly_margins.jsonl
+          if ! git diff --cached --quiet; then
+            git commit -m 'H1534: archive first-observed official quarterly margin ratios'
+            git pull --rebase origin main
+            git push origin HEAD:main
+          fi
+      - name: Explicitly report missing official sources
+        if: steps.twse.outcome != 'success' && steps.tpex.outcome != 'success'
+        run: |
+          echo '::warning::No official margin data saved. Do not certify three-rises.'
