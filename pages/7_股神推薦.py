@@ -12674,6 +12674,9 @@ def _build_recommend_df(
             else governed_candidate_df.copy()
         )
         st.session_state[_k("candidate_diagnosis_store")] = candidate_diagnosis_df.copy()
+        # H153.5: bind the complete candidate pool to THIS scan signature.
+        # A previous-session 2,000-stock frame must not repair this run.
+        st.session_state[_k("candidate_diagnosis_scan_signature_h1535")] = scan_signature
         # H79: once per completed scan, retain true decision-time evidence.
         try:
             from godpick_h78_snapshot_store import capture_snapshot
@@ -17302,9 +17305,37 @@ def _build_excel_bytes_fast_h85(
             # H153 research without a new full scan of properly dated OHLCV.
             if not {'H114K線證據日','H114K線資料狀態'}.issubset(_h1532_full.columns):
                 _h1532_full = pd.DataFrame()
+    _h1483_original_limited = _h1483_source
     _h1483_source, _h1532_scope_meta = _h1532_scope(
         _h1483_source, _h1532_full, current_signature=_h1532_current_sig,
         full_signature=_h1532_full_sig)
+    # H153.5: a single ETF such as 0056 must not invalidate a full
+    # same-run research superset. Prefer the freshly captured candidate
+    # diagnostic frame (run signature persisted on scan), then an equally
+    # signed decision frame. H114 evidence for new codes is NEVER invented.
+    from godpick_h1535_research_recovery import restore_verified_research_pool as _h1535_scope
+    _h1535_scope_meta = {'status':'NO_VERIFIED_FULL_SUPERSET','selected_rows':len(_h1483_source)}
+    if _h1532_scope_meta.get('status') != 'RESTORED_VERIFIED_SUPERSET_RESEARCH_ONLY':
+        _h1535_pool_options = []
+        if 'st' in globals() and '_k' in globals():
+            _h1535_full_pool = st.session_state.get(_k('candidate_diagnosis_store'))
+            _h1535_full_sig = st.session_state.get(_k('candidate_diagnosis_scan_signature_h1535'))
+            if isinstance(_h1535_full_pool,pd.DataFrame):
+                _h1535_pool_options.append(('完整候選診斷快取',_h1535_full_pool,_h1535_full_sig))
+            if isinstance(_h1532_full,pd.DataFrame):
+                _h1535_pool_options.append(('完整決策快取',_h1532_full,_h1532_full_sig))
+        _h1535_pool_options.sort(key=lambda x:len(x[1]),reverse=True)
+        for _h1535_label,_h1535_pool,_h1535_sig in _h1535_pool_options:
+            _h1535_candidate,_h1535_check = _h1535_scope(
+                _h1483_original_limited,_h1535_pool,
+                current_signature=_h1532_current_sig,full_signature=_h1535_sig)
+            _h1535_scope_meta={**_h1535_check,'candidate_source':_h1535_label}
+            if _h1535_check.get('status')=='VERIFIED_SAME_RUN_RESEARCH_SUPERSET':
+                _h1483_source=_h1535_candidate
+                break
+    else:
+        _h1535_scope_meta={'status':'H1532_ALREADY_RESTORED',
+                            'selected_rows':len(_h1483_source)}
     if _h1532_adapter_error:
         _h1532_scope_meta['status'] = 'FULL_RESEARCH_ADAPTER_ERROR:' + _h1532_adapter_error
     h1483_research, h1483_summary, h1483_meta = _h1483_recall(
@@ -17436,6 +17467,13 @@ def _build_excel_bytes_fast_h85(
     ])],ignore_index=True)
     h153_meta['multiday_research'] = _h1531_multi_meta
     h153_meta['h1532_scope'] = dict(_h1532_scope_meta)
+    h153_meta['h1535_scope'] = dict(_h1535_scope_meta)
+    h153_summary = pd.concat([h153_summary,pd.DataFrame([
+        {'檢查項目':'H153.5研究母體恢復狀態','結果':_h1535_scope_meta.get('status'),
+         '說明':'只讀同輪簽章、排除ETF及重複股；不能將未驗行情的新股當成有效K線'},
+        {'檢查項目':'H153.5研究池有效列數','結果':len(_h1483_source),
+         '說明':'母體與量價可用檔數須分開核實；不等於H126正式股票'},
+    ])],ignore_index=True)
     # H153.1: a successful file read is NOT evidence of fundamentals coverage.
     # Expose the authoritative ledger's actual monthly/PE row counts in the
     # existing statistics sheet rather than implying the sources are complete.
@@ -17464,6 +17502,18 @@ def _build_excel_bytes_fast_h85(
     # Existing research candidates are preserved BELOW verified ranked rows,
     # without a synthetic rank for missing evidence or old H110=52 ties.
     h152_named_research = _h153_attach_research(h152_named_research, h153_ranked)
+    # H153.5: do NOT turn H109-vetoed stocks into trade recommendations.
+    # Offer named, dated, liquid *verification priorities* when the normal
+    # evidence-ranked list is empty. They remain separate from H153 ranking
+    # and must never be used to fill the official H126 or H153 five plans.
+    from godpick_h1535_research_recovery import (
+        build_verification_watchlist as _h1535_watch,
+        merge_nontrading_watchlist as _h1535_merge_watch)
+    _h1535_watchlist,_h1535_watch_summary,_h1535_watch_meta = _h1535_watch(
+        _h1483_source,research_day=_h148_research_day,limit=12)
+    h152_named_research = _h1535_merge_watch(h152_named_research,_h1535_watchlist)
+    h153_summary = pd.concat([h153_summary,_h1535_watch_summary],ignore_index=True)
+    h153_meta['h1535_watch']=dict(_h1535_watch_meta)
     h152_opportunities = _h153_five_plans(ranked=h153_ranked,
         diagnosis_frame=_h1483_source, previous_plans=h152_opportunities,
         research_day=_h148_research_day, limit=5)
@@ -17559,6 +17609,16 @@ def _build_excel_bytes_fast_h85(
             else:
                 ws.cell(6,2,str(ws.cell(6,2).value or '') +
                     '｜H153.1缺可信同日量價證據，暫無可驗證研究排名。')
+            # H153.5: make non-trading audit priorities discoverable on the
+            # FIRST worksheet when every formal recommendation is blocked.
+            _h1535_leads=locals().get('_h1535_watchlist',pd.DataFrame())
+            if isinstance(_h1535_leads,pd.DataFrame) and not _h1535_leads.empty:
+                _h1535_topnames='、'.join(
+                    str(r['核查優先序'])+':'+str(r['股票代號'])
+                    for r in _h1535_leads.head(5).to_dict('records'))
+                ws.cell(6,2,str(ws.cell(6,2).value or '')+
+                    '｜H153.5非交易補證優先 '+_h1535_topnames+
+                    '（H109否決仍有效；只看01具名研究，不是H126買進）')
             ws.cell(1,1,'H148.1｜量價主流優先研究榜（非交易推薦）')
             ws.cell(1,2,'入榜需同日完整K線、量能、內部族群跨期雙指標及無H109否決；不以H110同分或代號補滿12檔。')
             ws.row_dimensions[6].height = 75
