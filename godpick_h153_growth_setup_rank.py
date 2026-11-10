@@ -17,8 +17,9 @@ import pandas as pd
 from godpick_h147_five_gate_review import _code, _day, _s
 from godpick_h114_parallel_alpha import evaluate as evaluate_h114
 from godpick_h1531_quality_repair import classify_h109, liquidity_reasons, source_coverage
+from godpick_h1534_three_margin import evaluate_three_rises
 
-VERSION = 'V191-H153.2-GROWTH-TECH-PIT-QUALITY'
+VERSION = 'V191-H153.4-THREE-RISES-PIT-RESEARCH'
 RANK_COLUMNS = (
     '研究排名', '排名等級', '研究證據分', '研究主題', '股票代號', '股票名稱', '產業',
     '行情證據日', '技術型態', '黃金交叉', '箱型型態', '本益比', '近四季EPS',
@@ -31,6 +32,9 @@ RANK_COLUMNS = (
     '3日相對抗跌pp','5日相對抗跌pp','多日抗跌來源狀態',
     'H1532布林收斂','H1532布林帶寬%','H1532OBV量價背離',
     'H1532ADX','H1532DMI方向','H1532技術來源','H1532技術反證',
+    'H1534三率三升狀態','H1534毛利率%','H1534營益率%','H1534稅後淨利率%',
+    'H1534三率同比變化pp','H1534三率季增','H1534毛利營益突破',
+    'H1534財報季別','H1534財報可用時間','H1534三率來源反證',
 )
 WATCH_ONLY = '研究名次僅為已驗證資訊的相對優先序；非明日上漲機率、非H126買進授權'
 
@@ -193,6 +197,7 @@ def build_growth_setup_ranking(*, diagnosis_frame: Any, research_frame: Any,
         enriched.update({k:v for k,v in independent.items() if str(k).startswith(('H114','H115'))})
         f=evaluate_h114(enriched,info_asof=day)
         scenario=forecast_revenue_scenario(enriched.get('H114月營收歷史'),day)
+        margins=evaluate_three_rises(independent.get('H1534季度三率歷史'), research_day=day)
         revenue_verified=f.get('H114營收資料狀態')=='VERIFIED_ASOF'
         value_verified=f.get('H114估值資料狀態')=='VERIFIED_ASOF'
         yoy=_num(f.get('H114營收年增率%'))
@@ -232,6 +237,14 @@ def build_growth_setup_ranking(*, diagnosis_frame: Any, research_frame: Any,
         if bb:score+=8;evidence.append('布林帶寬低分位（只代表波動收斂）')
         if obv:score+=6;evidence.append('OBV十日上行且價格未大漲（非集保大戶）')
 
+        # H153.4: only H115 official SINGLE_QUARTER PIT source can earn
+        # financial-quality points. Missing financial data does not veto a stock.
+        if margins['yoy_two']:
+            score+=8;evidence.append('H153.4已公告連兩季三率年增（非交易訊號）')
+        if margins['breakout']:
+            score+=4;evidence.append('毛利率／營益率創近五季新高（基本面突破）')
+        if margins['yoy_two'] and breakout:
+            evidence.append('三率改善與箱型技術突破共振（仍須H126）')
         if growth:score+=14;evidence.append('公告營收年增與三月動能同向')
         if revenue_verified and f.get('H114營收創高')=='近12月新高':score+=7;evidence.append('已公布營收近12月新高')
         if cheap:score+=8;evidence.append('官方同日同業PE折價達15%')
@@ -240,6 +253,7 @@ def build_growth_setup_ranking(*, diagnosis_frame: Any, research_frame: Any,
         # Do not mislabel high EPS: positive EPS alone is not peer-high EPS.
         # Growth/value signals must both be PIT-vetted before the label.
         if growth and cheap and (pre or box_ready or golden):theme='高成長低估／技術蓄勢'
+        elif margins['yoy_two'] and margins['breakout'] and (pre or box_ready or golden):theme='三率三升獲利突破／技術蓄勢'
         elif growth and (pre or box_ready or golden):theme='營收成長／預發動'
         elif bb and obv and not(pre or compress or golden or box_ready):theme='波動收斂／OBV改善（預發動待驗）'
         elif pre and compress:theme='量縮蓄勢／尚未發動'
@@ -255,7 +269,7 @@ def build_growth_setup_ranking(*, diagnosis_frame: Any, research_frame: Any,
         score=min(100,score)
         if veto:
             tier='C｜明確否決／來源衝突隔離'
-        elif growth and (pre or box_ready or golden) and h109_class=='RESEARCH_ALLOWED':
+        elif (growth or (margins['yoy_two'] and margins['breakout'])) and (pre or box_ready or golden) and h109_class=='RESEARCH_ALLOWED':
             tier='A｜成長與技術交叉研究'
         elif h109_class=='PENDING_EVIDENCE':
             tier='B｜研究證據待補（不得交易）'
@@ -264,6 +278,8 @@ def build_growth_setup_ranking(*, diagnosis_frame: Any, research_frame: Any,
         missing=['H126未授權，研究名次不得下單']
         if veto:missing.append('H109:'+risk+' 已明確否決／來源衝突，禁止混入可用研究')
         elif h109_class=='PENDING_EVIDENCE':missing.append('H109:'+risk+' 狀態待核，不是已否決亦非已授權')
+        if not margins['yoy_two']:
+            missing.append('H153.4三率三升未認證：'+margins['reason'])
         if not revenue_verified:missing.append('官方逐月營收公告證據不足')
         if not raw_valuation_ok:missing.append('官方原始PE／EPS證據不足')
         elif not value_verified:missing.append('同日同業PE樣本不足；原始PE／EPS仍可研究')
@@ -302,6 +318,16 @@ def build_growth_setup_ranking(*, diagnosis_frame: Any, research_frame: Any,
             'H1532ADX':adx,'H1532DMI方向':dmi or '未驗證',
             'H1532技術來源':_s(r.get('H1532技術來源')) or '未驗證',
             'H1532技術反證':_s(r.get('H1532技術反證')) or '缺技術來源，不代表低潛力',
+            'H1534三率三升狀態':margins['status'],
+            'H1534毛利率%':margins['gross'],
+            'H1534營益率%':margins['operating'],
+            'H1534稅後淨利率%':margins['net'],
+            'H1534三率同比變化pp':margins['yoy_delta'],
+            'H1534三率季增':('三率季增' if margins['qoq'] is True else ('非全數季增' if margins['qoq'] is False else '待核')),
+            'H1534毛利營益突破':('近五季新高' if margins['breakout'] else '未認證'),
+            'H1534財報季別':margins['quarter'],
+            'H1534財報可用時間':margins['available_at'],
+            'H1534三率來源反證':margins['reason'],
         })
     # Verified research clearance ranks ahead of unknown; formal H126 stays untouched.
     tier_num=lambda x:int({'A':0,'B':1,'C':2}.get(str(x['排名等級'])[:1],3))
@@ -325,6 +351,8 @@ def build_growth_setup_ranking(*, diagnosis_frame: Any, research_frame: Any,
         {'檢查項目':'H153.2布林收斂與OBV雙因子','結果':sum('布林收斂／OBV改善' in r['研究主題'] for r in rows),'說明':'僅限同日有效OHLCV，研究用；未校準勝率'},
         {'檢查項目':'H153.2獨立布林收斂已核','結果':sum(str(r['H1532布林收斂']).startswith('是｜') for r in rows),'說明':'可能向上或向下突破'},
         {'檢查項目':'H153.2OBV改善已核','結果':sum(str(r['H1532OBV量價背離']).startswith('觀察｜') for r in rows),'說明':'僅日成交量推導，不等於持股集中'},
+        {'檢查項目':'H153.4已核連兩季三率年增','結果':sum(r['H1534三率三升狀態'].startswith('連兩季') for r in rows),'說明':'僅已公布單季毛利／營益／淨利，與去年同季比較；非H126資格'},
+        {'檢查項目':'H153.4毛利營益近五季新高','結果':sum(r['H1534毛利營益突破']=='近五季新高' for r in rows),'說明':'財報突破，不等於股價突破'},
         {'檢查項目':'H153研究證據排名候選','結果':len(rows),'說明':'排名按等級與有來源證據分，同分並列；不是預測漲幅'},
         {'檢查項目':'H153已揭露名單','結果':len(top),'說明':'完整候選可稽核；不以資料缺失股票湊榜'},
         {'檢查項目':'H153營收與技術交叉A級','結果':sum(r['排名等級'].startswith('A') for r in rows),'說明':'已公告營收／技術型態共同驗證，仍非買進資格'},
@@ -400,6 +428,8 @@ def attach_rank_to_research(research_frame: Any, ranked: Any) -> pd.DataFrame:
     # ensure the chief's four rank columns precede old wide pool detail
     priority=['研究排名','排名等級','研究證據分','股票代號','股票名稱',
               '研究主題','H1532布林收斂','H1532OBV量價背離','H1532ADX','H1532DMI方向',
+              'H1534三率三升狀態','H1534毛利率%','H1534營益率%','H1534稅後淨利率%',
+              'H1534毛利營益突破','H1534財報季別',
               '本益比','近四季EPS','營收年增率%','營收創高',
               '黃金交叉','箱型型態','H109證據分類','反證與待補',
               'H153.1欄位對齊','H153.1原值差異','H153成長與技術主題','H153來源與反證']
@@ -471,6 +501,12 @@ def build_ranked_five_plans(*, ranked: Any, diagnosis_frame: Any,
                   'H1532OBV量價背離':ref.get('H1532OBV量價背離'),
                   'H1532ADX':ref.get('H1532ADX'),
                   'H1532DMI方向':ref.get('H1532DMI方向'),
+                  'H1534三率三升狀態':ref.get('H1534三率三升狀態'),
+                  'H1534毛利率%':ref.get('H1534毛利率%'),
+                  'H1534營益率%':ref.get('H1534營益率%'),
+                  'H1534稅後淨利率%':ref.get('H1534稅後淨利率%'),
+                  'H1534毛利營益突破':ref.get('H1534毛利營益突破'),
+                  'H1534財報季別':ref.get('H1534財報季別'),
                   '成立證據':ref['研究成立理由'], '反證／失效條件':ref['反證與待補'],
                   '研究現價':price,'支撐價':support,'壓力價':resistance,
                   '參考風險報酬比':rr,'價位計算狀態':note,

@@ -17444,8 +17444,9 @@ def _build_excel_bytes_fast_h85(
         _h1531_ledger_digest = _h1531_pit_digest(_h152_root)
         _h1531_rev = _h1531_ledger_digest['files']['revenue.jsonl'].get('rows',0)
         _h1531_val = _h1531_ledger_digest['files']['valuations.jsonl'].get('rows',0)
+        _h1534_margin = _h1531_ledger_digest['files']['quarterly_margins.jsonl'].get('rows',0)
     except (OSError,ValueError,TypeError,KeyError):
-        _h1531_rev = _h1531_val = 0
+        _h1531_rev = _h1531_val = _h1534_margin = 0
     _h1531_revenue_status = ('帳本缺歷史或未成功同步' if not _h1531_rev else '須看每股12/24月覆蓋，不等於資料齊全')
     _h1531_valuation_status = ('原始官方PE/EPS帳本缺失｜不可宣稱基本面已核' if not _h1531_val else '原始PE/EPS與同業折價分開認證')
     h153_summary = pd.concat([h153_summary, pd.DataFrame([
@@ -17455,9 +17456,11 @@ def _build_excel_bytes_fast_h85(
          '說明':_h1531_revenue_status},
         {'檢查項目':'H153.1 H115原始PE/EPS帳本實際列數','結果':_h1531_val,
          '說明':_h1531_valuation_status},
+        {'檢查項目':'H153.4三率三升官方單季帳本列數','結果':_h1534_margin,
+         '說明':'須有當時公告日期、毛利率/營益率/淨利率，連續兩季同比；0代表尚未補來源，並非公司不良'},
     ])], ignore_index=True)
     h153_meta['fundamental_source'] = _h153_pit_status
-    h153_meta['h115_ledger_rows'] = {'revenue':_h1531_rev,'valuation':_h1531_val}
+    h153_meta['h115_ledger_rows'] = {'revenue':_h1531_rev,'valuation':_h1531_val,'quarterly_margins':_h1534_margin}
     # Existing research candidates are preserved BELOW verified ranked rows,
     # without a synthetic rank for missing evidence or old H110=52 ties.
     h152_named_research = _h153_attach_research(h152_named_research, h153_ranked)

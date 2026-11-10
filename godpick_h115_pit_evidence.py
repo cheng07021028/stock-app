@@ -106,6 +106,22 @@ def _canonical(r: Mapping[str, Any], category: str) -> dict[str, Any]:
         if int(ym[:4]) * 12 + int(ym[4:]) > avail.year * 12 + avail.month:
             raise ValueError("營收資料年月不能晚於首次可用日")
         common.update({"year_month": ym, "revenue_twd": int(round(revenue))})
+    elif category == "quarterly_margin":
+        from godpick_h1534_three_margin import _period as _quarter
+        q = _quarter(x.get("year_quarter") or x.get("資料季度"))
+        statement_basis = str(x.get("statement_basis") or "").upper().strip()
+        industry = str(x.get("industry_type") or "").upper().strip()
+        if not q or statement_basis != "SINGLE_QUARTER" or industry != "GENERAL":
+            raise ValueError("三率需一般業單季資料、有效年季；累計損益表不可直接視為單季")
+        if (q[0],q[1]) > (avail.year,(avail.month-1)//3+1):
+            raise ValueError("財報季別不能晚於公告時間")
+        names=("gross_margin_pct", "operating_margin_pct", "net_margin_pct")
+        vals=[_num(x.get(k)) for k in names]
+        if any(n is None or n < -100 or n > 1000 for n in vals):
+            raise ValueError("三率必須全部是有限的百分比(%)，不能用小數比率或金額混入")
+        common.update({"year_quarter":f"{q[0]:04d}Q{q[1]}",
+                       "statement_basis":"SINGLE_QUARTER","industry_type":"GENERAL",
+                       **dict(zip(names,vals))})
     elif category == "valuation":
         day = _datetime(x.get("asof_date") or x.get("資料日期"))
         pe = _num(x.get("pe") if "pe" in x else x.get("本益比"))
@@ -160,6 +176,9 @@ def _append_canonical(path: Path, items: Iterable[Mapping[str, Any]], category: 
     def fact_key(v: Mapping[str, Any]):
         if category == "revenue":
             return (v.get("code"),v.get("year_month"),v.get("revenue_twd"),v.get("source"))
+        if category == "quarterly_margin":
+            return (v.get("code"),v.get("year_quarter"),v.get("gross_margin_pct"),
+                    v.get("operating_margin_pct"),v.get("net_margin_pct"),v.get("source"))
         return (v.get("code"),v.get("asof_date"),v.get("pe"),v.get("eps_ttm"),v.get("source"))
     indexed={fact_key(v) for v in before}
     newly=[]
@@ -189,6 +208,11 @@ def append_valuations(store_dir: Path, rows: Iterable[Mapping[str, Any]]) -> dic
     return _append_canonical(Path(store_dir) / "valuations.jsonl", rows, "valuation")
 
 
+def append_quarterly_margins(store_dir: Path, rows: Iterable[Mapping[str, Any]]) -> dict[str, int]:
+    """Append-only official quarterly single-period ratios, with true availability time."""
+    return _append_canonical(Path(store_dir) / "quarterly_margins.jsonl", rows, "quarterly_margin")
+
+
 def build_h114_evidence(root: Path, info_cutoff: Any, *, min_peers: int = MIN_PEERS) -> dict[str, dict[str, Any]]:
     """Returns only evidence that was AVAILABLE at info_cutoff.
 
@@ -214,6 +238,22 @@ def build_h114_evidence(root: Path, info_cutoff: Any, *, min_peers: int = MIN_PE
             "released_at": row["available_at"], "source": row["source"]})
     for item in result.values():
         item["H114月營收歷史"].sort(key=lambda x:x["year_month"])
+
+    # H153.4 research-only financial quality. Read safely; no cloud calls.
+    margin_quarters: dict[tuple[str,str],dict[str,Any]]={}
+    for row in _jsonl_rows(store / "quarterly_margins.jsonl"):
+        try: r=_canonical(row,"quarterly_margin")
+        except ValueError:continue
+        av=_datetime(r["available_at"])
+        if av and av<=cutoff:
+            key=(r["code"],r["year_quarter"])
+            if key not in margin_quarters or r["available_at"]>margin_quarters[key]["available_at"]:
+                margin_quarters[key]=r
+    for (_, _),r in margin_quarters.items():
+        result[r["code"]].setdefault("H1534季度三率歷史", []).append(r)
+    for rec in result.values():
+        if "H1534季度三率歷史" in rec:
+            rec["H1534季度三率歷史"].sort(key=lambda x:x["year_quarter"])
 
     valuations: dict[tuple[str, str], dict[str, Any]] = {}
     for row in _jsonl_rows(store / "valuations.jsonl"):
@@ -255,7 +295,7 @@ def build_h114_evidence(root: Path, info_cutoff: Any, *, min_peers: int = MIN_PE
 def evidence_digest(root: Path) -> dict[str, Any]:
     store = Path(root)/"data"/"h115"
     out={"version":VERSION,"storage":"LOCAL_ONLY_UNTIL_COMMITTED_OR_DURABLE_MOUNT","files":{}}
-    for n in ("revenue.jsonl", "valuations.jsonl"):
+    for n in ("revenue.jsonl", "valuations.jsonl", "quarterly_margins.jsonl"):
         p=store/n
         if p.is_file():
             out["files"][n]={"rows":len(_jsonl_rows(p)),"sha256":hashlib.sha256(p.read_bytes()).hexdigest()}
