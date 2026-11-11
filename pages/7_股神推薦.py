@@ -4104,7 +4104,12 @@ def _weight_text(weights: dict[str, int] | None = None) -> str:
 
 
 def _read_project_json_file(file_name: str) -> dict[str, Any]:
-    """v33：安全讀取專案根目錄 JSON；失敗回傳空 dict，不能讓推薦頁空白。"""
+    """H153.8: prefer verified current runtime-data over bundled July snapshots.
+
+    Only the 3 business-date artifacts are affected.  Other original local
+    settings/files retain the exact previous read path.  The old July JSON is
+    never promoted to a current trading authority after Streamlit Reboot.
+    """
     candidates = []
     try:
         candidates.append(Path(__file__).resolve().parent.parent / file_name)
@@ -4113,6 +4118,7 @@ def _read_project_json_file(file_name: str) -> dict[str, Any]:
     candidates.append(Path.cwd() / file_name)
     candidates.append(Path(file_name))
     seen = set()
+    local: dict[str, Any] = {}
     for p in candidates:
         try:
             key = str(p.resolve())
@@ -4124,11 +4130,29 @@ def _read_project_json_file(file_name: str) -> dict[str, Any]:
         if not p.exists():
             continue
         try:
-            payload = json.loads(p.read_text(encoding="utf-8"))
-            return payload if isinstance(payload, dict) else {}
+            payload = json.loads(p.read_text(encoding="utf-8-sig"))
+            if isinstance(payload, dict):
+                local = payload
+                break
         except Exception:
             continue
-    return {}
+    if file_name in {"market_snapshot.json", "macro_mode_bridge.json", "official_factors_cache.json"}:
+        try:
+            from godpick_h1538_source_authority import reconcile_json
+            root = Path(__file__).resolve().parent.parent
+            # Only validated strictly newer remote DATA can replace the local
+            # copy.  We never write to main/runtime-data from this reader.
+            decision = reconcile_json(file_name, local, root=root, write_local=True)
+            return decision.get("payload") or {}
+        except Exception:
+            # The source remains unverified: do not silently certify a stale
+            # packaged July fallback as today's official market data.
+            try:
+                from godpick_h1538_source_authority import select_authority
+                return select_authority(file_name, local, None).get("payload") or {}
+            except Exception:
+                return {}
+    return local
 
 
 def _expected_latest_trade_date_v173() -> pd.Timestamp:
@@ -4208,12 +4232,12 @@ def _project_data_freshness_snapshot_v173() -> dict[str, Any]:
     ])
 
     market_payload = _read_project_json_file(MARKET_SNAPSHOT_FILE)
+    # H153.8: Only TWSE's business date proves the current market snapshot.
+    # A row tag or filesystem updated_at cannot certify the source as current.
     market_date = _parse_date_v173(
-        market_payload.get("market_date") or market_payload.get("twse_data_date")
-        or market_payload.get("otc_data_date") or market_payload.get("data_date")
-        or market_payload.get("updated_at")
+        market_payload.get("twse_data_date") or market_payload.get("market_date")
+        or market_payload.get("data_date")
     ) if isinstance(market_payload, dict) else None
-    market_date = max([x for x in [market_date, row_market_date] if x is not None], default=None)
 
     # V186：冷啟動先透過 official_factor_service 做「業務日期權威選舉」。
     # 不可直接讀部署包內的舊 JSON，否則 Streamlit Reboot 會把 runtime-data
@@ -4251,8 +4275,10 @@ def _project_data_freshness_snapshot_v173() -> dict[str, Any]:
     official_top_date = _parse_date_v173(
         official_payload.get("data_date") or official_meta.get("data_date")
     ) if isinstance(official_payload, dict) else None
+    # H153.8: candidate-row metadata is not an independently checked
+    # official-factor authority; never let it hide a stale/failed cache.
     official_date = max(
-        [x for x in [official_content_date, official_top_date, row_official_date] if x is not None],
+        [x for x in [official_content_date, official_top_date] if x is not None],
         default=None,
     )
     saved_date = _parse_date_v173(latest_payload.get("saved_at")) if isinstance(latest_payload, dict) else None
@@ -4306,6 +4332,14 @@ def _project_data_freshness_snapshot_v173() -> dict[str, Any]:
     elif scan_lag > 0:
         issues.append(f"最新推薦保存於{saved_date:%Y-%m-%d}，需重新推薦")
 
+    try:
+        from godpick_h1538_source_authority import last_status
+        authority_sources = {
+            "market": last_status("market_snapshot.json"),
+            "official": last_status("official_factors_cache.json"),
+        }
+    except Exception:
+        authority_sources = {}
     hard_block = bool(
         kline_lag > 0 or market_lag > 0 or official_lag >= 2
         or market_date is None or official_date is None or kline_date is None
@@ -4329,6 +4363,7 @@ def _project_data_freshness_snapshot_v173() -> dict[str, Any]:
         "release_timing": release_timing,
         "hard_block": hard_block,
         "ready": not hard_block,
+        "h1538_authority_sources": authority_sources,
     }
 
 
@@ -4369,6 +4404,17 @@ def _render_project_data_freshness_warning_v173() -> dict[str, Any]:
             f"官方因子：{snapshot.get('official_date') or '未驗證'}｜"
             f"目前推薦保存：{snapshot.get('saved_date') or '未驗證'}"
         )
+        _sources_h1538 = snapshot.get("h1538_authority_sources") or {}
+        if _sources_h1538:
+            _source_m = (_sources_h1538.get("market") or {})
+            _source_o = (_sources_h1538.get("official") or {})
+            st.caption(
+                "H153.8權威來源｜大盤：" + str(_source_m.get("source") or "未確認")
+                + "（" + str(_source_m.get("remote_status") or "無遠端診斷") + "）｜官方因子："
+                + str(_source_o.get("source") or "未確認")
+                + "（" + str(_source_o.get("remote_status") or "無遠端診斷") + "）。"
+                + "唯讀回復不代表推薦設定/紀錄永久寫入成功。"
+            )
         if scan_stale:
             request_rescan = st.button(
                 "🔄 立即重新推薦（使用第17頁已更新的最新資料）",
@@ -4421,7 +4467,12 @@ def _read_market_snapshot_v33() -> dict[str, Any]:
         if not _h40_market_business_date(snapshot):
             _h40_restored = _h40_load_market_snapshot()
             if isinstance(_h40_restored, dict) and _h40_market_business_date(_h40_restored):
-                snapshot = _h40_restored
+                # H153.8: H40 compatibility fallback must not resurrect the
+                # packed 2026-07 market file after current data is missing.
+                from godpick_h1538_source_authority import select_authority
+                _h1538_checked = select_authority("market_snapshot.json", _h40_restored, None)
+                if _h1538_checked.get("payload"):
+                    snapshot = _h1538_checked["payload"]
     except Exception:
         pass
     required = snapshot.get("required_by_godpick")
@@ -4463,7 +4514,7 @@ def _macro_bridge_freshness_v121(bridge: dict[str, Any]) -> dict[str, Any]:
         return {"date": "", "lag": 999, "stale": True, "status": "日期未驗證"}
     raw = _safe_str(
         bridge.get("market_date") or bridge.get("twse_data_date") or bridge.get("data_date")
-        or bridge.get("updated_at")
+        # H153.8: update time is NOT the underlying market's business date.
     )
     try:
         market_date = pd.to_datetime(raw, errors="coerce")
