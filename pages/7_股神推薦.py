@@ -17662,6 +17662,29 @@ def _build_excel_bytes_fast_h85(
     _h1536_existing_summary = locals().get('h152_research_summary',pd.DataFrame())
     h152_research_summary = pd.concat([_h1536_existing_summary,_h1536_audit],
                                       ignore_index=True,sort=False)
+    # H153.7 content acceptance: first page MUST show actual named ranked
+    # securities, not just a two-cell prose summary. Keep the original H148.1
+    # evidence/AutoFilter below and leave H126 authority fields untouched.
+    from godpick_h1537_manager_visible import (
+        render_manager_visible as _h1537_visible,
+        validate_manager_content as _h1537_validate)
+    _h1537_report = _h1537_visible(
+        wb, ranked=locals().get('h153_ranked',pd.DataFrame()),
+        watch=locals().get('_h1535_watchlist',pd.DataFrame()),
+        research=locals().get('h152_named_research',pd.DataFrame()),
+        h126_buyable=h144_focus_meta.get('h126_buyable',0),
+        research_day=locals().get('_h148_research_day'),
+        h145_status=str(locals().get('_h145_bridge',{}).get('status','')))
+    _h1537_validate(wb,_h1537_report,
+        research=locals().get('h152_named_research',pd.DataFrame()))
+    h152_research_summary = pd.concat([h152_research_summary,pd.DataFrame([
+        {'檢查項目':'H153.7主管首頁實際具名研究列','結果':_h1537_report['a_b_rows'],
+         '說明':'00首頁A/B可篩選具名排名表；與01表同代號同研究，不是H126買進'},
+        {'檢查項目':'H153.7主管首頁非交易核查列','結果':_h1537_report['w_rows'],
+         '說明':'與A/B先去重後呈現，不補假推薦'},
+        {'檢查項目':'H153.7 H126正式授權列','結果':_h1537_report['h126_authorized'],
+         '說明':'未授權0檔時空白屬正常風控，第二表仍展示禁止買進與理由'},
+    ])],ignore_index=True)
     # H151 category-separated manager workbook: each evidence category has
     # one header row, one AutoFilter and its own freeze pane. Keep H126 as
     # worksheet #2 for legacy readers that rely on its stable position.
@@ -17679,6 +17702,10 @@ def _build_excel_bytes_fast_h85(
         source_summary=locals().get('h1482_repair'),
         source_detail=locals().get('h1482_details'),
     )
+    # H153.7 independent content gate AFTER the actual 01 research sheet
+    # exists. A green pytest result is not enough when manager cells are empty.
+    from godpick_h1537_manager_visible import validate_exported_cross_tab as _h1537_cross_tab
+    _h1537_cross_tab(wb,_h1537_report)
     try:
         wb.active = 0
     except Exception:
