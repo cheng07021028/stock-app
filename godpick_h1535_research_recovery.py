@@ -130,7 +130,8 @@ WATCH_COLUMNS=(
 )
 
 
-def build_verification_watchlist(diagnosis:Any, *,research_day:Any,limit:int=12):
+def build_verification_watchlist(diagnosis:Any, *,research_day:Any,limit:int=12,
+                                 existing_codes:Any=None):
     """Rank *verification work*, never nominal winners or forecast probabilities.
 
     Every listed stock has valid same-session H114 and explicit ≥150M daily
@@ -210,19 +211,30 @@ def build_verification_watchlist(diagnosis:Any, *,research_day:Any,limit:int=12)
         })
     # Across all-risk-veto pools, still present research *audit* priorities, not buys.
     items.sort(key=lambda x:(-x['__priority'],-x['當日成交額百萬'],x['股票代號']))
+    cap=max(1,min(int(limit),30))
+    # H153.6: the original implementation truncated BEFORE eliminating names
+    # already shown in H153 research. That loses distinct, still-qualified
+    # audit candidates and makes "shown 12" different from the Excel reality.
+    # Retain all pre-dedup audit counts; only the display slice is disjoint.
+    existing_values=list(existing_codes) if existing_codes is not None else []
+    excluded={_code(v) for v in existing_values if _code(v)}
+    existing_hits=sum(item['股票代號'] in excluded for item in items)
+    chosen=[item for item in items if item['股票代號'] not in excluded][:cap]
+    # W ranks are independent *verification priorities*. After deduplication
+    # they must start from 1, not inherit a hidden stock's old ordinal.
     previous=None;ordinal=0;rank=0
-    for item in items:
+    for item in chosen:
         ordinal+=1
         if item['__priority']!=previous:rank=ordinal;previous=item['__priority']
         item['核查優先序']=rank
-    cap=max(1,min(int(limit),30))
-    chosen=items[:cap]
-    for item in chosen:item.pop('__priority',None)
+        item.pop('__priority',None)
     summary=[
         {'檢查項目':'H153.5補證優先觀察候選總數','結果':len(items),
          '說明':'研究核查優先序，不能稱正式推薦或當日全市場排名'},
         {'檢查項目':'H153.5補證優先榜顯示列','結果':len(chosen),
-         '說明':'有日期＋成交額／張數＋至少一項已知技術線索；不保證收益'},
+         '說明':'排除01表已顯示個股後的實際不同股票數；不保證收益'},
+        {'檢查項目':'H153.6核查榜與既有研究重疊','結果':existing_hits,
+         '說明':'先去重再取前12；已出現的股票不佔核查榜名額'},
         {'檢查項目':'H153.5其中H109明確否決','結果':sum(x['H109證據分類'] in ('EXPLICIT_VETO','EVIDENCE_CONFLICT') for x in chosen),
          '說明':'只做風控反證，禁止放入H126買進或正式推薦清單'},
         {'檢查項目':'H153.5研究母體有效代號','結果':len(good),
@@ -231,6 +243,7 @@ def build_verification_watchlist(diagnosis:Any, *,research_day:Any,limit:int=12)
     summary.extend({'檢查項目':'H153.5未入核查榜-'+k,'結果':v,'說明':'不可當作個股必跌證據'} for k,v in counts.most_common())
     meta={'version':VERSION,'limited_rows':len(pool),'valid_stocks':len(good),
           'total_watch':len(items),'shown_watch':len(chosen),
+          'existing_research_overlap':existing_hits,
           'removed_nonstocks':quality['excluded_nonstocks'],
           'duplicate_codes':quality['duplicate_codes'],
           'formal_trade_modified':False,'h109_modified':False,

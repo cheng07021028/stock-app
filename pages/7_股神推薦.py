@@ -17509,8 +17509,11 @@ def _build_excel_bytes_fast_h85(
     from godpick_h1535_research_recovery import (
         build_verification_watchlist as _h1535_watch,
         merge_nontrading_watchlist as _h1535_merge_watch)
+    _h1536_shown_codes = list(h152_named_research['股票代號']) if (
+        isinstance(h152_named_research,pd.DataFrame) and '股票代號' in h152_named_research) else []
     _h1535_watchlist,_h1535_watch_summary,_h1535_watch_meta = _h1535_watch(
-        _h1483_source,research_day=_h148_research_day,limit=12)
+        _h1483_source,research_day=_h148_research_day,limit=12,
+        existing_codes=_h1536_shown_codes)
     h152_named_research = _h1535_merge_watch(h152_named_research,_h1535_watchlist)
     h153_summary = pd.concat([h153_summary,_h1535_watch_summary],ignore_index=True)
     h153_meta['h1535_watch']=dict(_h1535_watch_meta)
@@ -17642,6 +17645,23 @@ def _build_excel_bytes_fast_h85(
             # remain unchanged. No research evidence is deleted.
             ws.sheet_properties.tabColor = '185C70'
             # Preserve H146 verified A:Q filtering contract; appended evidence remains readable.
+    # H153.6: put the actual A/B research priorities, separate non-trade
+    # watch candidates and H126 zero together ON THE FIRST PAGE. Preserve the
+    # entire H146-H153.5 original board text in 02 evidence, not the tiny cell.
+    from godpick_h1536_manager_clarity import clarify_manager_board as _h1536_clarity
+    _h1536_meta = locals().get('h153_meta') or {}
+    _h1536_audit = _h1536_clarity(
+        wb, ranked=locals().get('h153_ranked',pd.DataFrame()),
+        watch=locals().get('_h1535_watchlist',pd.DataFrame()),
+        research=locals().get('h152_named_research',pd.DataFrame()),
+        diagnosis=locals().get('_h1483_source',pd.DataFrame()),
+        h126_buyable=h144_focus_meta.get('h126_buyable',0),
+        h145_bridge=locals().get('_h145_bridge',{}),
+        research_day=locals().get('_h148_research_day'),
+        h115_ledger_rows=_h1536_meta.get('h115_ledger_rows',{}))
+    _h1536_existing_summary = locals().get('h152_research_summary',pd.DataFrame())
+    h152_research_summary = pd.concat([_h1536_existing_summary,_h1536_audit],
+                                      ignore_index=True,sort=False)
     # H151 category-separated manager workbook: each evidence category has
     # one header row, one AutoFilter and its own freeze pane. Keep H126 as
     # worksheet #2 for legacy readers that rely on its stable position.
