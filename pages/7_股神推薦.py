@@ -17498,6 +17498,18 @@ def _build_excel_bytes_fast_h85(
         diagnosis_frame=_h1483_source, research_frame=h152_named_research,
         research_day=_h148_research_day, verified_fundamentals=_h153_ledger,
         limit=30)
+    # H153.9: existing H108/industry peer breadth and local rotation history
+    # distinguish real same-session leadership from repeat/stale-score research.
+    # No network during Excel export; no H109/H126 change or fictitious new signal.
+    from godpick_h1539_mainstream_freshness import (
+        read_local_rotation_snapshots as _h1539_read_rotation,
+        audit_mainstream_repetition as _h1539_audit)
+    _h1539_history, _h1539_history_source = _h1539_read_rotation(_h152_root)
+    h153_ranked, _h1539_summary, _h1539_meta = _h1539_audit(
+        h153_ranked, _h1483_source, research_day=_h148_research_day,
+        snapshots=_h1539_history, history_source=_h1539_history_source)
+    h153_summary = pd.concat([h153_summary,_h1539_summary],ignore_index=True)
+    h153_meta['h1539_mainstream'] = _h1539_meta
     # H153.1: optional 3/5-session resilience. ONLY SHA-verified H117 TAIEX,
     # with exact per-stock reference session. Missing source yields blanks,
     # not a claimed rising probability or fabricated "抗跌" signal.
