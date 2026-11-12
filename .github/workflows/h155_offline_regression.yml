@@ -1,0 +1,76 @@
+name: H155 offline Page17 full macro regression
+on:
+  push:
+    branches:
+      - fix/h155-page17-full-refresh-parity
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  h155-offline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Syntax compile without network
+        run: |
+          python -m py_compile godpick_auto_scheduler.py tools/run_godpick_auto_scheduler_v191.py 'pages/17_系統健康檢查.py'
+      - name: Deterministic simulated success and failure scenarios
+        run: |
+          python - <<'PY'
+          import runpy
+          ns = runpy.run_path('tests/test_h155_page17_full_macro_pipeline.py')
+          tests = sorted((name, obj) for name, obj in ns.items() if name.startswith('test_') and callable(obj))
+          for name, test in tests:
+              test()
+              print('PASS', name)
+          print('ALL', len(tests), 'OFFLINE TESTS PASS')
+          PY
+      - name: Package modified files only, preserving Unicode paths
+        shell: bash
+        run: |
+          mkdir -p patch/pages patch/tools patch/tests
+          cp godpick_auto_scheduler.py patch/
+          cp 'pages/17_系統健康檢查.py' patch/pages/
+          cp tools/run_godpick_auto_scheduler_v191.py patch/tools/
+          cp tests/test_h155_page17_full_macro_pipeline.py patch/tests/
+          cat > patch/H155_README.txt <<'EOF'
+          V191-H155 Page17 full Page01 macro parity + same-run recommendation gate
+          Based on stock-app main 4d9e6a23a75bbe8f108b3abea615497da8fd7439 (2026-11-12).
+          1. Back up your current application.
+          2. Verify this base has not changed before deployment. Copy these 3 Python files to the same relative paths.
+          3. The existing 17 quick refresh remains available; use new full refresh for Page01 parity.
+          4. Full refresh requires the configured GITHUB_TOKEN GitHub Actions dispatch and runtime-data persistence.
+          5. Dispatch acknowledges request only; Page17 scheduler history is authority for actual results.
+          6. This fix does not bypass Page07 H126 authorization or promise profit.
+          7. Do not overwrite runtime-data, configurations, JSON, secrets, or credentials.
+          8. If a same-batch required upstream job fails/warns, Page07 recommendation is blocked.
+          EOF
+          python - <<'PY'
+          from pathlib import Path
+          import zipfile, hashlib
+          paths=[
+              'godpick_auto_scheduler.py',
+              'pages/17_系統健康檢查.py',
+              'tools/run_godpick_auto_scheduler_v191.py',
+              'tests/test_h155_page17_full_macro_pipeline.py',
+              'H155_README.txt',
+          ]
+          p=Path('StockApp_V191_H155_Page17MacroParity.zip')
+          with zipfile.ZipFile(p,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as out:
+              for rel in paths: out.write(Path('patch')/rel,rel)
+          print('ZIP',p,'bytes',p.stat().st_size,'sha256',hashlib.sha256(p.read_bytes()).hexdigest())
+          with zipfile.ZipFile(p) as z:
+              assert z.testzip() is None
+              assert z.namelist()==paths
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: StockApp_V191_H155_Page17MacroParity
+          path: StockApp_V191_H155_Page17MacroParity.zip
+          retention-days: 30
