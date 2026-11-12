@@ -17617,6 +17617,19 @@ def _build_excel_bytes_fast_h85(
     _h126_manager_tabs = {
         '00_主管重點觀察榜', '00_H126主管決策',
     }
+
+    if 'h153_ranked' in locals() and 'h152_opportunities' in locals():
+        # H154: reconcile THIS export's H85 decision tables and H153 research.
+        # Different pools need explicit source labels; none may be promoted to H126.
+        from godpick_h154_export_parity import reconcile_run as _h154_reconcile
+        _h154_run_id = str((locals().get('_h145_ctx') or {}).get('run_id') or '')
+        _h154_scan_id = str((st.session_state.get(_k('scan_run_id')) if 'st' in globals() and '_k' in globals() else '') or '')
+        _h154_audit = _h154_reconcile(
+            tables=tables, ranked=h153_ranked, watch=_h1535_watchlist,
+            research=h152_named_research, plans=h152_opportunities,
+            six_summary=h149_summary, h145_status=_h145_bridge.get('status',''),
+            run_id=_h154_run_id, scan_run_id=_h154_scan_id,
+            scan_report=scan_report)
     for name, frame, fallback in sheets:
         _write_df_to_ws_fast_h84(wb, name, frame, fallback)
         if name == "00_主管重點觀察榜":
@@ -17740,6 +17753,16 @@ def _build_excel_bytes_fast_h85(
         h145_status=str(locals().get('_h145_bridge',{}).get('status','')))
     _h1537_validate(wb,_h1537_report,
         research=locals().get('h152_named_research',pd.DataFrame()))
+    if locals().get('_h154_audit'):
+        # H154: real system waiting/radar vs researched ranks are different lists.
+        # Only the same-run tables used for this Excel qualify; no historical JSON
+        # or network fetch is permitted during workbook generation.
+        from godpick_h154_export_parity import (
+            append_audit_summary as _h154_append_summary,
+            append_audit_and_overview as _h154_overview,
+            tag_six_pillar_stage as _h154_stage)
+        _h154_overview(wb,_h154_audit)
+        h149_summary = _h154_stage(h149_summary)
     h152_research_summary = pd.concat([h152_research_summary,pd.DataFrame([
         {'檢查項目':'H153.7主管首頁實際具名研究列','結果':_h1537_report['a_b_rows'],
          '說明':'00首頁A/B可篩選具名排名表；與01表同代號同研究，不是H126買進'},
@@ -17748,6 +17771,8 @@ def _build_excel_bytes_fast_h85(
         {'檢查項目':'H153.7 H126正式授權列','結果':_h1537_report['h126_authorized'],
          '說明':'未授權0檔時空白屬正常風控，第二表仍展示禁止買進與理由'},
     ])],ignore_index=True)
+    if locals().get('_h154_audit'):
+        h152_research_summary = _h154_append_summary(h152_research_summary,_h154_audit)
     # H151 category-separated manager workbook: each evidence category has
     # one header row, one AutoFilter and its own freeze pane. Keep H126 as
     # worksheet #2 for legacy readers that rely on its stable position.
@@ -17769,6 +17794,10 @@ def _build_excel_bytes_fast_h85(
     # exists. A green pytest result is not enough when manager cells are empty.
     from godpick_h1537_manager_visible import validate_exported_cross_tab as _h1537_cross_tab
     _h1537_cross_tab(wb,_h1537_report)
+    if locals().get('_h154_audit'):
+        from godpick_h154_export_parity import verify_final_xlsx as _h154_verify
+        _h154_verify(wb,_h154_audit)
+
     try:
         wb.active = 0
     except Exception:
