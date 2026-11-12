@@ -471,6 +471,62 @@ def h155_verify_same_run_dependencies(executed: list[dict[str, Any]]) -> tuple[b
     return True, ""
 
 
+# H156: manual Page17 refresh has two explicit scopes, independent of the
+# user's unattended schedule and independently editable permanent run order.
+H156_CORE_REFRESH_AND_RECOMMEND = (*H155_REQUIRED_REFRESH_JOBS, "godpick_recommendation")
+H156_MANUAL_BATCH_MODES = ("market_refresh_and_recommend", "full_refresh_and_recommend")
+
+
+def h156_plan_manual_batch(settings: dict[str, Any], mode: str) -> list[str]:
+    """Return an exact, fixed dependency order for a one-time Page17 batch.
+
+    CORE avoids unrelated historical/performance network runs; FULL preserves
+    the earlier H155 meaning (all currently enabled work, plus the six required
+    items). Neither plan changes a permanently saved setting.
+    """
+    if mode not in H156_MANUAL_BATCH_MODES:
+        raise ValueError(f"不支援的17頁更新模式：{mode}")
+    if mode == "market_refresh_and_recommend":
+        return list(H156_CORE_REFRESH_AND_RECOMMEND)
+    normalized = normalize_settings(settings)
+    jobs = normalized.get("jobs") or {}
+    enabled = {
+        key for key in JOB_LABELS
+        if bool((jobs.get(key) or {}).get("enabled", False))
+    } | set(H156_CORE_REFRESH_AND_RECOMMEND)
+    # Use the known canonical dependency order only for THIS manual dispatch.
+    # Force recommendation last even when the saved custom rank has it first.
+    order = [key for key in DEFAULT_EXECUTION_ORDER if key in enabled and key != "godpick_recommendation"]
+    order.extend(key for key in JOB_LABELS if key in enabled and key not in order and key != "godpick_recommendation")
+    return [*order, "godpick_recommendation"]
+
+
+def h156_manual_batch_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Derived outcome: dispatched / refreshed / recommended are not synonyms."""
+    latest = {str(r.get("job") or ""): str(r.get("status") or "") for r in rows if isinstance(r, dict)}
+    essentials = {k: latest.get(k, "NOT_RUN") for k in H155_REQUIRED_REFRESH_JOBS}
+    recommendation = latest.get("godpick_recommendation", "NOT_RUN")
+    all_fresh = all(s == "SUCCESS" for s in essentials.values())
+    return {
+        "essential_jobs": essentials,
+        "essential_success": all_fresh,
+        "recommendation_status": recommendation,
+        "recommendation_executed": recommendation in {"SUCCESS", "WARNING"},
+        "all_success": all_fresh and recommendation == "SUCCESS",
+        "unfinished_jobs": [k for k, v in latest.items() if v not in {"SUCCESS", "WARNING"}],
+    }
+
+
+def h156_verify_full_batch_predecessors(executed: list[dict[str, Any]], planned: list[str]) -> tuple[bool, str]:
+    """FULL means all requested enabled predecessor jobs, not five core jobs."""
+    latest = {str(r.get("job") or ""): str(r.get("status") or "") for r in executed if isinstance(r, dict)}
+    missing = [JOB_LABELS.get(job, job) + " (" + (latest.get(job) or "NOT_RUN") + ")"
+               for job in planned if job != "godpick_recommendation" and latest.get(job) != "SUCCESS"]
+    if missing:
+        return False, "H156全模組本輪尚有更新失敗／警示，停止本輪07重新推薦：" + "、".join(missing)
+    return True, ""
+
+
 def _recommendation_final_gate(global_cfg: dict[str, Any], status: dict[str, Any], now: datetime, job: str, *, force: bool = False) -> tuple[bool, str]:
     """H28: recommendation waits for every enabled predecessor's final daily slot.
 
@@ -747,8 +803,17 @@ def _emit_progress(progress_callback, event: dict[str, Any]) -> None:
         return
 
 
-def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simulate:bool=False, selected_jobs:list[str]|None=None, progress_callback=None, temporary_enable_jobs:list[str]|None=None, strict_same_run:bool=False) -> dict[str,Any]:
+def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simulate:bool=False, selected_jobs:list[str]|None=None, progress_callback=None, temporary_enable_jobs:list[str]|None=None, strict_same_run:bool=False, execution_order_override:list[str]|None=None, manual_batch_mode:str="") -> dict[str,Any]:
     now=(now or now_tw()).astimezone(TZ); cfg=load_settings(); status=load_status(); history=load_history()
+    # H156: fixed one-run order. Do not persist this override to scheduler JSON.
+    if execution_order_override:
+        cfg=copy.deepcopy(cfg)
+        cfg["execution_order"]=_normalize_execution_order(execution_order_override)
+        cfg["recommendation_run_last_after_all_enabled"]=True
+    if manual_batch_mode and manual_batch_mode not in H156_MANUAL_BATCH_MODES:
+        raise ValueError(f"無效的17頁手動批次模式：{manual_batch_mode}")
+    batch_id=(str(os.environ.get("GITHUB_RUN_ID") or "").strip() + "." + str(os.environ.get("GITHUB_RUN_ATTEMPT") or "1")) if os.environ.get("GITHUB_RUN_ID") else f"local-{now.strftime('%Y%m%dT%H%M%S')}-{os.getpid()}"
+
     # H155: a Page17 explicitly requested full refresh must run every *required*
     # dependency in this batch, even when its unattended schedule is disabled.
     # This in-memory override never modifies permanently saved scheduler settings.
@@ -834,6 +899,7 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
         if not resumed_force:
             status["active_run"]={
                 "mode":"force_all" if force_all_enabled else "scheduled",
+                "batch_id":batch_id,"batch_mode":manual_batch_mode or ("force_all" if force_all_enabled else "scheduled"),
                 "started_at":now_text(now),"updated_at":now_text(now),"pid":os.getpid(),"host":socket.gethostname(),
                 "pending_jobs":list(planned_order),"planned_jobs":list(planned_order),"completed_jobs":[],"failed_jobs":[],"blocked_jobs":[],
                 "current_job":"","current_job_started_at":"","last_progress_at":now_text(now),
@@ -884,9 +950,14 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
                     "slot":slot.strftime("%Y-%m-%d %H:%M"),"started_at":now_text(now) if simulate else now_text(),
                     **_progress_counts,
                 })
-                deps_ok,deps_msg=_dependency_check(job_cfg,status,now)
-                if deps_ok and strict_same_run and job=="godpick_recommendation":
+                if strict_same_run and job=="godpick_recommendation":
+                    # A complete H156 manual batch proves its own dependencies;
+                    # stale/missing earlier-day status never substitutes for it.
                     deps_ok,deps_msg=h155_verify_same_run_dependencies(executed)
+                    if deps_ok and manual_batch_mode == "full_refresh_and_recommend":
+                        deps_ok,deps_msg=h156_verify_full_batch_predecessors(executed, list(selected_jobs or []))
+                else:
+                    deps_ok,deps_msg=_dependency_check(job_cfg,status,now)
                 if deps_ok:
                     deps_ok,deps_msg=_recommendation_final_gate(cfg,status,now,job,force=force_all_enabled)
                 started=now_text(now) if simulate else now_text()
@@ -905,6 +976,7 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
                 else:
                     result=_execute_one(job,job_cfg,cfg)
                 row={
+                    "batch_id":batch_id,"batch_mode":manual_batch_mode or ("force_all" if force_all_enabled else "scheduled"),
                     "run_key":key,"job":job,"job_label":JOB_LABELS.get(job,job),"slot":slot.strftime("%Y-%m-%d %H:%M"),
                     "started_at":started,"finished_at":result.get("finished_at") or now_text(),"status":("WARNING" if result.get("ok") and result.get("warning") else ("SUCCESS" if result.get("ok") else ("BLOCKED" if result.get("blocked") else "FAILED"))),
                     "message":str(result.get("message") or ""),"duration_seconds":result.get("duration_seconds"),"attempt":result.get("attempt"),"details":result.get("details",{}),
@@ -972,6 +1044,14 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
         history=history[-int(cfg.get("history_keep",400)):]
         summary={"executed":len(executed),"success":sum(1 for x in executed if x["status"]=="SUCCESS"),"warning":sum(1 for x in executed if x["status"]=="WARNING"),"failed":sum(1 for x in executed if x["status"]=="FAILED"),"blocked":sum(1 for x in executed if x["status"]=="BLOCKED"),"in_progress":False}
         status["updated_at"]=now_text(); status["last_progress_at"]=status["updated_at"]; status["last_summary"]=summary
+        if manual_batch_mode:
+            status["last_manual_batch"]={
+                "batch_id":batch_id,"batch_mode":manual_batch_mode,
+                "started_at":now_text(now),"finished_at":now_text(),
+                "planned_jobs":list(planned_order),"summary":summary,
+                "validation":h156_manual_batch_summary(executed),
+                "remote_confirmation":"PENDING_TERMINAL_CHECKPOINT",
+            }
         status["last_wakeup_result"]="COMPLETED" if overall else "COMPLETED_WITH_FAILURE"
         status["last_wakeup_message"]=(
             f"本輪完成：成功 {summary['success']}／警示 {summary['warning']}／失敗 {summary['failed']}／前置阻擋 {summary['blocked']}"
@@ -1002,7 +1082,7 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
             **{k:summary.get(k,0) for k in ("success","warning","failed","blocked")},
             "finished_at":now_text(now) if simulate else now_text(),
         })
-        return {"ok":overall,"message":f"V191排程{resume_text}本輪執行 {len(executed)} 項：成功 {summary['success']}／警示 {summary['warning']}／失敗 {summary['failed']}／前置阻擋 {summary['blocked']}","executed":executed,"settings":cfg,"status":status,"resumed_force_batch":resumed_force,"repaired_failed_run_keys":repaired_count,"repaired_future_run_keys":repaired_future_count}
+        return {"ok":overall,"message":f"V191排程{resume_text}本輪執行 {len(executed)} 項：成功 {summary['success']}／警示 {summary['warning']}／失敗 {summary['failed']}／前置阻擋 {summary['blocked']}","executed":executed,"settings":cfg,"status":status,"batch_id":batch_id,"manual_batch_mode":manual_batch_mode,"resumed_force_batch":resumed_force,"repaired_failed_run_keys":repaired_count,"repaired_future_run_keys":repaired_future_count}
     finally:
         if not simulate: _release_lock()
 

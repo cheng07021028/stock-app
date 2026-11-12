@@ -149,8 +149,15 @@ def task_super_ai_context(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
         payload, diagnostics = refresh_super_ai_market_context(fetch_etf=bool(cfg.get("fetch_etf", True)))
         has_margin = bool((payload or {}).get("margin_by_stock"))
         has_taifex = bool((payload or {}).get("taifex"))
-        ok = has_margin or has_taifex
-        return _report(ok, f"SuperAI融資券/期貨/PCR/ETF情境更新 {'完成' if ok else '資料不足'}", details={"diagnostics": diagnostics[-30:], "margin_count": len((payload or {}).get("margin_by_stock", {})), "taifex": (payload or {}).get("taifex", {}), "etf": (payload or {}).get("etf", {})}, changed_files=["super_ai_market_context.json"], started=t0)
+        # H156: previously `margin OR taifex` returned a false green SUCCESS.
+        # Partial provider data is preserved for research, but must not authorize
+        # a full same-batch recommendation. ETF is advisory (not a hard gate).
+        complete = has_margin and has_taifex
+        partial = has_margin or has_taifex
+        msg = ("SuperAI融資券與期貨/PCR情境完整更新" if complete else
+               "SuperAI資料僅部分可用：融資券/期貨缺一，不得視為完整更新" if partial else
+               "SuperAI融資券與期貨/PCR來源皆無有效資料")
+        return _report(partial, msg, details={"diagnostics": diagnostics[-30:], "margin_count": len((payload or {}).get("margin_by_stock", {})), "taifex": (payload or {}).get("taifex", {}), "etf": (payload or {}).get("etf", {}), "complete": complete}, changed_files=["super_ai_market_context.json"] if partial else [], started=t0, warning=not complete and partial)
     except Exception as exc:
         return _report(False, f"SuperAI市場情境更新失敗：{type(exc).__name__}: {exc}", started=t0)
 

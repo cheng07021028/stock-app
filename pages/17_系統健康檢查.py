@@ -75,7 +75,7 @@ st.set_page_config(page_title="17_系統健康檢查", layout="wide")
 inject_pro_theme()
 
 st.title("17_系統健康檢查 / 全模組一鍵更新中心")
-st.caption("V191-H71｜官方因子中央權威：排程/手動更新/執行狀態統一由 V191 GitHub worker＋runtime-data 控制；舊版21:00排程降為唯讀相容資訊。H70/H69/H39既有治理完整保留。")
+st.caption("V191-H156｜中央 worker 真正執行：核心6項完整更新／全模組更新分流、固定前置次序、本輪批次身分與資料成功驗證；保留 H155、H71、H39 及既有所有功能。")
 
 
 # ---------------------------------------------------------------------------
@@ -514,7 +514,7 @@ if callable(load_auto_scheduler_settings):
         with st.expander("最近自動更新履歷", expanded=False):
             if _hist:
                 _hdf = pd.DataFrame(_hist[-120:][::-1])
-                _cols = [c for c in ["finished_at", "job_label", "status", "duration_seconds", "attempt", "message"] if c in _hdf.columns]
+                _cols = [c for c in ["batch_id", "batch_mode", "finished_at", "job_label", "status", "duration_seconds", "attempt", "message"] if c in _hdf.columns]
                 st.dataframe(_hdf[_cols], use_container_width=True, hide_index=True, height=420)
             else:
                 st.caption("尚無 V191 自動執行履歷。")
@@ -638,31 +638,64 @@ with st.sidebar:
             st.success("已永久保存全域更新設定。")
         else:
             st.error(msg)
-    # H155: full authoritative path uses the worker's Page01 v70 *whole*
-    # update, the usual official/AI prerequisites, and Page07 canonical run.
-    # The legacy fast refresh remains available unchanged for diagnostics.
-    st.markdown("#### H155｜完整資料更新 → 同輪核對 → 股神重新推薦")
-    st.caption("全量模式：股票主檔 → 01大盤加權/櫃買/法人/外盤/期貨/隔夜國際盤及橋接 → 官方因子 → SuperAI → 自選股 → 既有績效/學習步驟 → 07正式推薦。由中央 GitHub worker 執行，不在網頁執行大量網路工作。")
-    if st.button("🚀 一鍵完整更新 01 大盤所有必要資料並重新推薦", key="h155_page17_full_update", use_container_width=True, type="primary"):
+    # H156: keep the original H155 full 14-job mode and ADD a fast core-only
+    # option. Both dispatch to the same canonical GitHub worker; neither runs
+    # an expensive stock scan on Streamlit's UI thread.
+    st.markdown("#### H156｜一鍵更新分流：核心6項／全模組（含績效、學習）")
+    st.caption("核心6項：股票主檔 → 01大盤所有必要資料及橋接 → 16官方因子 → SuperAI → 自選股 → 07股神重新推薦。全模組：上述六項，再加上目前已啟用的歷史績效、T+1、AI學習及永久化工作。兩者皆強制推薦最後、前置必須本輪全部SUCCESS，不永久改動自動排程。")
+
+    def _h156_dispatch_refresh(_manual_job: str) -> None:
         if not callable(dispatch_auto_scheduler_wakeup):
-            st.error("中央 worker 派送服務未載入；沒有執行選股。")
+            st.error("中央 worker 派送服務未載入；未進行資料更新或選股。")
+            return
+        try:
+            _token = str(st.secrets.get("GITHUB_TOKEN", "") or "").strip()
+            _owner = str(st.secrets.get("GITHUB_REPO_OWNER", "cheng07021028") or "cheng07021028").strip()
+            _repo = str(st.secrets.get("GITHUB_REPO_NAME", "stock-app") or "stock-app").strip()
+            _branch = str(st.secrets.get("GITHUB_CODE_BRANCH", "main") or "main").strip()
+            _ok, _msg = dispatch_auto_scheduler_wakeup(
+                token=_token, owner=_owner, repo=_repo, branch=_branch,
+                wakeup_source="page17_h156_" + _manual_job,
+                manual_job=_manual_job,
+            )
+            st.session_state["h156_last_dispatch"] = {
+                "ok": bool(_ok), "mode": _manual_job,
+                "time": time.strftime("%Y-%m-%d %H:%M:%S"), "message": str(_msg),
+            }
+            if _ok:
+                st.info(_msg + "｜僅代表已派送，並非完成。請查看下方『最近完整更新批次』與履歷，需五項前置SUCCESS、07推薦SUCCESS才算完整成功。")
+            else:
+                st.error(_msg)
+        except Exception as _exc:
+            st.error(f"中央更新派送失敗；未開始選股：{type(_exc).__name__}: {_exc}")
+
+    _core_btn, _all_btn = st.columns(2)
+    if _core_btn.button("🚀 完整更新01＋重新推薦（核心6項）", key="h156_page17_core_update", use_container_width=True, type="primary"):
+        _h156_dispatch_refresh("market_refresh_and_recommend")
+    if _all_btn.button("🧩 全模組更新＋重新推薦（含績效／學習）", key="h155_page17_full_update", use_container_width=True):
+        _h156_dispatch_refresh("full_refresh_and_recommend")
+
+    _dispatch_state = st.session_state.get("h156_last_dispatch")
+    if isinstance(_dispatch_state, dict) and _dispatch_state:
+        st.caption(f"本頁最近派送：{_dispatch_state.get('time')}｜{_dispatch_state.get('mode')}｜{'已受理，待 worker 執行' if _dispatch_state.get('ok') else '派送失敗'}")
+    _full_last = (_auto_status.get("last_manual_batch") or {}) if isinstance(_auto_status, dict) else {}
+    if isinstance(_full_last, dict) and _full_last:
+        _batch_validator = _full_last.get("validation") if isinstance(_full_last.get("validation"), dict) else {}
+        _batch_summary = _full_last.get("summary") if isinstance(_full_last.get("summary"), dict) else {}
+        st.markdown("##### 最近完整更新批次（以中央紀錄為準）")
+        st.caption(f"批次ID：{_full_last.get('batch_id', '—')}｜模式：{_full_last.get('batch_mode', '—')}｜完成：{_full_last.get('finished_at', '—')}")
+        _a, _b, _c, _d = st.columns(4)
+        _a.metric("五項必要資料", "全部成功" if _batch_validator.get("essential_success") else "未完全成功")
+        _b.metric("07推薦", str(_batch_validator.get("recommendation_status") or "未執行"))
+        _c.metric("本輪成功", _batch_summary.get("success", 0))
+        _d.metric("警示／失敗／阻擋", f"{_batch_summary.get('warning', 0)}/{_batch_summary.get('failed', 0)}/{_batch_summary.get('blocked', 0)}")
+        _essential = _batch_validator.get("essential_jobs") or {}
+        if _essential:
+            st.dataframe(pd.DataFrame([{"前置工作": key, "本輪狀態": value} for key,value in _essential.items()]), use_container_width=True, hide_index=True)
+        if _batch_validator.get("all_success"):
+            st.success("本批次必要資料及07推薦全部成功；其他已啟用的績效工作仍請查閱履歷。")
         else:
-            try:
-                _token = str(st.secrets.get("GITHUB_TOKEN", "") or "").strip()
-                _owner = str(st.secrets.get("GITHUB_REPO_OWNER", "cheng07021028") or "cheng07021028").strip()
-                _repo = str(st.secrets.get("GITHUB_REPO_NAME", "stock-app") or "stock-app").strip()
-                _branch = str(st.secrets.get("GITHUB_CODE_BRANCH", "main") or "main").strip()
-                _ok, _msg = dispatch_auto_scheduler_wakeup(
-                    token=_token, owner=_owner, repo=_repo, branch=_branch,
-                    wakeup_source="page17_h155_full_macro_recommend",
-                    manual_job="full_refresh_and_recommend",
-                )
-                if _ok:
-                    st.info(_msg + "｜此訊息僅代表已送出工作；真正成功與否請以本頁『最近自動更新履歷』及同輪前置項目狀態為準。")
-                else:
-                    st.error(_msg)
-            except Exception as _exc:
-                st.error(f"完整更新派送失敗，未啟動推薦：{type(_exc).__name__}: {_exc}")
+            st.warning("本批次未達全綠標準：派送成功、單項更新完成或推薦WARNING，都不等於全部資料已更新並完成遠端確認。")
     st.caption("原本的快速更新流程仍保留如下。快速完成不代表01所有資料、同輪推薦都已更新。")
     run_global_update_now = st.button("⚡ 快速更新既有全域資料（不重新選股）", use_container_width=True, help="原有快速更新功能完整保留：快取/大盤快照/官方因子/績效/健康檢查；此按鈕不等於完整大盤更新與股神重算。")
     if st.button("🧹 解除逾時更新鎖定", use_container_width=True, help="只在畫面長時間卡住且已確認沒有其他人正在更新時使用。"):
@@ -671,6 +704,11 @@ with st.sidebar:
             lock_path = Path(__file__).resolve().parents[1] / lock_name
             try:
                 if lock_path.exists():
+                    _age = max(0.0, time.time() - lock_path.stat().st_mtime)
+                    _ttl = 15 * 60 if lock_name == ".godpick_global_update.lock" else 30 * 60
+                    if _age < _ttl:
+                        st.warning(f"{lock_name} 才存在 {_age/60:.1f} 分鐘，可能仍在執行；拒絕解除活躍鎖定。")
+                        continue
                     lock_path.unlink()
                     removed.append(lock_name)
             except Exception as exc:
@@ -685,7 +723,14 @@ if 'do_super_context' in locals() and do_super_context:
     if callable(refresh_super_ai_market_context):
         with st.spinner("正在更新 TWSE/TPEx 融資券、TAIFEX 期貨/PCR 與 ETF 情境..."):
             _ctx, _ctx_msgs = refresh_super_ai_market_context(fetch_etf=True)
-        st.success(f"SuperAI市場情境更新完成｜融資個股 {len((_ctx or {}).get('margin_by_stock', {}))} 筆")
+        _margin_n = len((_ctx or {}).get("margin_by_stock", {}))
+        _taifex_ready = bool((_ctx or {}).get("taifex"))
+        if _margin_n and _taifex_ready:
+            st.success(f"SuperAI融資券及期貨/PCR皆有有效資料｜融資個股 {_margin_n} 筆")
+        elif _margin_n or _taifex_ready:
+            st.warning(f"SuperAI僅部分更新｜融資個股 {_margin_n} 筆／期貨資料 {'有' if _taifex_ready else '無'}；不得當作完整成功。")
+        else:
+            st.error("SuperAI來源未取得有效融資券及期貨/PCR資料；本次更新不能視為成功。")
         for _m in (_ctx_msgs or [])[:12]: st.caption(str(_m))
     else:
         st.error("SuperAI市場情境服務未載入。")
@@ -747,10 +792,10 @@ if 'run_global_update_now' in locals() and run_global_update_now:
         progress_table.dataframe(pd.DataFrame(all_rows).drop(columns=["明細"], errors="ignore"), use_container_width=True, hide_index=True)
     with st.status("正在更新全模組資料；大盤與官方因子均有硬性逾時保護，不會無限運轉...", expanded=True) as update_status:
         global_result = run_global_update(Path(__file__).resolve().parents[1], global_settings, progress_callback=_on_global_progress)
-        if global_result.get("message") and not global_result.get("steps"):
-            update_status.update(label=global_result.get("message"), state="error", expanded=True)
+        if not global_result.get("ok") or not global_result.get("steps"):
+            update_status.update(label=global_result.get("message") or "快速更新失敗或沒有執行任何步驟", state="error", expanded=True)
         else:
-            update_status.update(label="全模組資料更新流程已完成", state="complete", expanded=False)
+            update_status.update(label="快速全域更新步驟已執行；請依下方資料鏈檢查確認", state="complete", expanded=False)
     if g_invalidate_cache:
         try:
             st.cache_data.clear()
@@ -759,10 +804,12 @@ if 'run_global_update_now' in locals() and run_global_update_now:
     steps_df = pd.DataFrame(global_result.get("steps", []))
     ok_count = int((steps_df.get("狀態") == "OK").sum()) if not steps_df.empty and "狀態" in steps_df.columns else 0
     fail_count = int((steps_df.get("狀態") != "OK").sum()) if not steps_df.empty and "狀態" in steps_df.columns else 0
-    if fail_count == 0:
-        st.success(f"全域更新完成：{ok_count} 個步驟成功。")
+    if not global_result.get("ok") or not ok_count:
+        st.error(f"快速更新未達成功標準：{ok_count} 個步驟成功、{fail_count} 項需檢查。{global_result.get('message') or ''}")
+    elif fail_count:
+        st.warning(f"快速更新部分完成：{ok_count} 個步驟成功，{fail_count} 個步驟需檢查；不代表所有資料完整更新。")
     else:
-        st.warning(f"全域更新完成：{ok_count} 個步驟成功，{fail_count} 個步驟需檢查。")
+        st.success(f"快速更新流程 {ok_count} 個步驟成功；此模式不包含完整01及07重新推薦。")
     st.dataframe(steps_df.drop(columns=["明細"], errors="ignore"), use_container_width=True, hide_index=True)
     try:
         audit_step = next((x for x in global_result.get("steps", []) if "資料鏈完整性檢查" in str(x.get("步驟", ""))), {})

@@ -59,8 +59,8 @@ def test_real_page01_canonical_runner_is_still_used():
 def test_page17_dispatch_and_worker_paths_match():
     page = (ROOT / "pages" / "17_系統健康檢查.py").read_text(encoding="utf-8")
     runner = (ROOT / "tools" / "run_godpick_auto_scheduler_v191.py").read_text(encoding="utf-8")
-    assert 'manual_job="full_refresh_and_recommend"' in page
-    assert 'manual_job == "full_refresh_and_recommend"' in runner
+    assert '_h156_dispatch_refresh("full_refresh_and_recommend")' in page
+    assert 'manual_job in H156_MANUAL_BATCH_MODES' in runner
     assert 'strict_same_run=True' in runner
     assert 'temporary_enable_jobs=' in runner
     assert 'run_global_update(' in page  # the old fast path remains
