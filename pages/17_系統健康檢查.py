@@ -638,7 +638,33 @@ with st.sidebar:
             st.success("已永久保存全域更新設定。")
         else:
             st.error(msg)
-    run_global_update_now = st.button("🚀 一鍵依序更新股神所需資訊", use_container_width=True, type="primary", help="沿用本按鈕依序更新：核心→股票主檔→大盤→官方因子→自選股→最新推薦/清單/紀錄績效→績效回饋→推薦就緒度→全模組表格快取。")
+    # H155: full authoritative path uses the worker's Page01 v70 *whole*
+    # update, the usual official/AI prerequisites, and Page07 canonical run.
+    # The legacy fast refresh remains available unchanged for diagnostics.
+    st.markdown("#### H155｜完整資料更新 → 同輪核對 → 股神重新推薦")
+    st.caption("全量模式：股票主檔 → 01大盤加權/櫃買/法人/外盤/期貨/隔夜國際盤及橋接 → 官方因子 → SuperAI → 自選股 → 既有績效/學習步驟 → 07正式推薦。由中央 GitHub worker 執行，不在網頁執行大量網路工作。")
+    if st.button("🚀 一鍵完整更新 01 大盤所有必要資料並重新推薦", key="h155_page17_full_update", use_container_width=True, type="primary"):
+        if not callable(dispatch_auto_scheduler_wakeup):
+            st.error("中央 worker 派送服務未載入；沒有執行選股。")
+        else:
+            try:
+                _token = str(st.secrets.get("GITHUB_TOKEN", "") or "").strip()
+                _owner = str(st.secrets.get("GITHUB_REPO_OWNER", "cheng07021028") or "cheng07021028").strip()
+                _repo = str(st.secrets.get("GITHUB_REPO_NAME", "stock-app") or "stock-app").strip()
+                _branch = str(st.secrets.get("GITHUB_CODE_BRANCH", "main") or "main").strip()
+                _ok, _msg = dispatch_auto_scheduler_wakeup(
+                    token=_token, owner=_owner, repo=_repo, branch=_branch,
+                    wakeup_source="page17_h155_full_macro_recommend",
+                    manual_job="full_refresh_and_recommend",
+                )
+                if _ok:
+                    st.info(_msg + "｜此訊息僅代表已送出工作；真正成功與否請以本頁『最近自動更新履歷』及同輪前置項目狀態為準。")
+                else:
+                    st.error(_msg)
+            except Exception as _exc:
+                st.error(f"完整更新派送失敗，未啟動推薦：{type(_exc).__name__}: {_exc}")
+    st.caption("原本的快速更新流程仍保留如下。快速完成不代表01所有資料、同輪推薦都已更新。")
+    run_global_update_now = st.button("⚡ 快速更新既有全域資料（不重新選股）", use_container_width=True, help="原有快速更新功能完整保留：快取/大盤快照/官方因子/績效/健康檢查；此按鈕不等於完整大盤更新與股神重算。")
     if st.button("🧹 解除逾時更新鎖定", use_container_width=True, help="只在畫面長時間卡住且已確認沒有其他人正在更新時使用。"):
         removed = []
         for lock_name in [".godpick_global_update.lock", "macro_startup_update.lock"]:
