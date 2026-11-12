@@ -452,6 +452,25 @@ def _dependency_check(job_cfg:dict[str,Any],status:dict[str,Any],now:datetime)->
     return True,""
 
 
+# H155: exact same-batch dependency proof, not "it succeeded sometime today".
+H155_REQUIRED_REFRESH_JOBS = (
+    "stock_master", "macro_full", "official_factors",
+    "super_ai_context", "watchlist_runtime",
+)
+
+
+def h155_verify_same_run_dependencies(executed: list[dict[str, Any]]) -> tuple[bool, str]:
+    statuses = {
+        str(row.get("job") or ""): str(row.get("status") or "")
+        for row in (executed or []) if isinstance(row, dict)
+    }
+    missing = [JOB_LABELS.get(job, job) + " (" + (statuses.get(job) or "NOT_RUN") + ")"
+               for job in H155_REQUIRED_REFRESH_JOBS if statuses.get(job) != "SUCCESS"]
+    if missing:
+        return False, "H155本輪前置未全部成功，停止推薦重算；不得使用今日較早的成功結果冒充本輪：" + "、".join(missing)
+    return True, ""
+
+
 def _recommendation_final_gate(global_cfg: dict[str, Any], status: dict[str, Any], now: datetime, job: str, *, force: bool = False) -> tuple[bool, str]:
     """H28: recommendation waits for every enabled predecessor's final daily slot.
 
@@ -728,8 +747,16 @@ def _emit_progress(progress_callback, event: dict[str, Any]) -> None:
         return
 
 
-def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simulate:bool=False, selected_jobs:list[str]|None=None, progress_callback=None) -> dict[str,Any]:
+def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simulate:bool=False, selected_jobs:list[str]|None=None, progress_callback=None, temporary_enable_jobs:list[str]|None=None, strict_same_run:bool=False) -> dict[str,Any]:
     now=(now or now_tw()).astimezone(TZ); cfg=load_settings(); status=load_status(); history=load_history()
+    # H155: a Page17 explicitly requested full refresh must run every *required*
+    # dependency in this batch, even when its unattended schedule is disabled.
+    # This in-memory override never modifies permanently saved scheduler settings.
+    if temporary_enable_jobs:
+        cfg=copy.deepcopy(cfg)
+        for _required_job in temporary_enable_jobs:
+            if _required_job in JOB_LABELS:
+                cfg.setdefault("jobs", {}).setdefault(_required_job, {})["enabled"]=True
     status.setdefault("version",VERSION); status.setdefault("jobs",{}); status.setdefault("completed_run_keys",[])
     repaired_count=_repair_failed_completed_keys(status)
     repaired_future_count=_repair_future_completed_keys(status, now)
@@ -858,6 +885,8 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
                     **_progress_counts,
                 })
                 deps_ok,deps_msg=_dependency_check(job_cfg,status,now)
+                if deps_ok and strict_same_run and job=="godpick_recommendation":
+                    deps_ok,deps_msg=h155_verify_same_run_dependencies(executed)
                 if deps_ok:
                     deps_ok,deps_msg=_recommendation_final_gate(cfg,status,now,job,force=force_all_enabled)
                 started=now_text(now) if simulate else now_text()
