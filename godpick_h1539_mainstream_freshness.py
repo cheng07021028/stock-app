@@ -23,6 +23,7 @@ NEW_COLUMNS=(
  'H153原研究排名','H1539主流證據等級','H1539同輪族群相對強度',
  'H1539跨日快照次數','H1539跨日快照來源','H1539新證據狀態',
  'H1539排序理由','H1539主流認證說明',
+ 'H154研究排序分','H154順位調整說明',
 )
 
 
@@ -178,6 +179,14 @@ def audit_mainstream_repetition(ranked, diagnosis, *, research_day, snapshots=No
         repeated_stale=bool(repeat is not None and repeat>=2 and not has_new and not veto)
         key=(0 if grade.startswith('A') else 1 if grade.startswith('B') else
              2 if grade.startswith('I') else 3)
+        # H154: a 37-point stock may otherwise appear at rank 16 below 31-point
+        # stocks with no *visible* adjusted score. Keep the H153 original as
+        # immutable evidence, and expose the finite research-only adjustment.
+        original_score=_number(r.get('研究證據分'))
+        repeat_penalty=7 if repeated_stale else 0
+        adjusted_score=round(original_score-repeat_penalty,2) if original_score is not None else None
+        adjust_note=(f'原始{original_score:g}分；歷史輪動快照至少兩次且缺同輪新佐證，研究順位調整-{repeat_penalty}分（非正式評分）'
+                     if repeat_penalty else '原始研究分不調整；資料缺失不能推定當日首次上榜')
         reason=(grade+'；'+recent_status+'；'+evidence_status)
         row=dict(r)
         row.update({'H153原研究排名':r.get('研究排名'),
@@ -189,6 +198,8 @@ def audit_mainstream_repetition(ranked, diagnosis, *, research_day, snapshots=No
                     'H1539新證據狀態':evidence_status,
                     'H1539排序理由':reason,
                     'H1539主流認證說明':'同輪相對強度僅描述性證據；H108/法人/集保來源必須逐項核對；不代表預測或買進',
+                    'H154研究排序分':adjusted_score,
+                    'H154順位調整說明':adjust_note,
                     '__rank_grade':key,'__repeat_stale':int(repeated_stale)})
         # Existing H109 /H126/ scores stay unchanged; integrate MAINSTREAM
         # directly into the existing research explanation and Excel report.
@@ -196,10 +207,10 @@ def audit_mainstream_repetition(ranked, diagnosis, *, research_day, snapshots=No
         rows.append(row)
     tier=lambda r:({'A':0,'B':1,'C':2}.get(_s(r.get('排名等級'))[:1],3))
     def sortkey(r):
-        # Stable in-tier priorities: mainstream verification > unsupported
-        # repeats > existing score. Code only stabilizes equal display order.
-        return (tier(r),int(r['__rank_grade']),int(r['__repeat_stale']),
-                -(_number(r.get('研究證據分')) or 0),_code(r.get('股票代號')))
+        # H154: the actual sortable numeric score is EXPOSED in Excel.
+        # Mainstream grade remains evidence-first; no false probability.
+        return (tier(r),int(r['__rank_grade']),
+                -(_number(r.get('H154研究排序分')) or 0),_code(r.get('股票代號')))
     rows.sort(key=sortkey)
     last=None;rank=0
     for i,r in enumerate(rows,1):

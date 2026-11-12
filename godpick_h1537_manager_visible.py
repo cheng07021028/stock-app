@@ -101,12 +101,15 @@ def _named_rows(ranked: Any, watch: Any, research: Any, h126_buyable: int, resea
     for r in valid:
         normal_rows.append([
             _text(r.get('研究排名'),20), _code(r.get('股票代號')),_text(r.get('股票名稱'),35),
-            _text(r.get('排名等級'),65),_text(r.get('研究證據分'),20),
+            _text(r.get('排名等級'),65),
+            (f"{_text(r.get('研究證據分'),10)}｜排序{_text(r.get('H154研究排序分'),10)}"
+             if _text(r.get('H154研究排序分')) else _text(r.get('研究證據分'),20)),
             (_first(r,'研究主題','H153成長與技術主題')+'｜'+_first(r,'H1539主流證據等級'))[:125] or '研究主題待核',
             _technical(r),_finance(r),
             _first(r,'H109風控','H109證據分類','H109決策權威')[:95] or '風控待核',
             trade_note,_first(r,'研究交易日','行情證據日','H114行情日期') or day,
-            _first(r,'反證與待補','H1539排序理由','H153來源與反證','尚需驗證與不得買進原因')[:230] or '需複核當日資料及交易資格'])
+            (('順位：'+_text(r.get('H154順位調整說明'),100)+'；') if _text(r.get('H154順位調整說明')) else '')
+            + (_first(r,'反證與待補','H1539排序理由','H153來源與反證','尚需驗證與不得買進原因')[:150] or '需複核當日資料及交易資格')])
     watch_rows=[]
     for r in w:
         watch_rows.append([
