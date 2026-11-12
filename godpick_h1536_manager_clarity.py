@@ -88,7 +88,16 @@ def clarify_manager_board(wb:Any, *, ranked:Any=None, watch:Any=None,
     ws.cell(4,1,'具名研究／核查優先')
     ws.cell(4,2,f'正式研究A/B {len(normal_codes)} 檔；W核查 {len(watch_codes)} 檔；01表可見唯一代號 {len(named_codes)} 檔（不同池不可直接相加）')
     ws.cell(6,1,'今天優先確認事項')
+    # H153.9: make "mainstream verified" vs "technical-only repeat" explicit
+    # on the manager first page; unknown data must never become a negative vote.
+    mainstream=normal.get('H1539主流證據等級',pd.Series(dtype=str)).fillna('').astype(str)
+    verified_mainstream=int(mainstream.str.startswith('A｜').sum())
+    internal_mainstream=int(mainstream.str.startswith(('B｜','I｜')).sum())
+    unknown_mainstream=int(mainstream.str.startswith('U｜').sum())
+    repeat_series=pd.to_numeric(normal.get('H1539跨日快照次數',pd.Series(dtype=float)),errors='coerce')
+    repeats=int((repeat_series>=2).sum())
     points=[f'H153研究前五：{top or "無合格A/B候選"}',
+            f'H153.9主流交叉佐證{verified_mainstream}／內部族群線索{internal_mainstream}／主流未驗證{unknown_mainstream}；歷史重複至少2次{repeats}（無歷史不等於新股）',
             f'W非交易補證前五：{watch_top or "沒有額外具名候選"}',
             f'H145：{status}（{coverage_note}，未通過不得下單）',
             f'技術來源：同日K標記{valid_h114}／H153.2完整型態{valid_h1532}；缺85根有效日K不能加技術分',
@@ -105,6 +114,9 @@ def clarify_manager_board(wb:Any, *, ranked:Any=None, watch:Any=None,
         style.wrap_text=True;style.vertical='center'
         ws.cell(r,2).alignment=style
     audit=[
+        {'檢查項目':'H153.9主管研究主流交叉佐證','結果':verified_mainstream,'說明':'有H108跨期兩指標與有日期的法人或集保交叉；研究仍非H126'},
+        {'檢查項目':'H153.9主管研究主流未驗證','結果':unknown_mainstream,'說明':'資料不足不能稱非主流，亦不能稱新主流'},
+        {'檢查項目':'H153.9歷史快照重複至少2次','結果':repeats,'說明':'僅以可讀既有輪動快照分析；無歷史不等於新股'},
         {'檢查項目':'H153.6研究日','結果':day_str,'說明':'研究日不等於 Excel 匯出時間；未更新的次日行情不能充當新預測'},
         {'檢查項目':'H153.6可排列研究A','結果':a,'說明':'H153技術／基本面研究，非H126交易授權'},
         {'檢查項目':'H153.6可排列研究B','結果':b,'說明':'基本面或風控證據待補，不得認定可買進'},
