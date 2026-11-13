@@ -38,7 +38,15 @@ jobs:
             git pull --rebase origin main
             git push origin HEAD:main
           fi
-      - name: Explicitly report missing official sources
+      # H157: a green GitHub Action with ZERO accepted official data was a
+      # dangerous false success. Preserve partial market coverage but never
+      # report SUCCESS when both official importers failed.
+      - name: Explicitly fail if no official margins were imported
         if: steps.twse.outcome != 'success' && steps.tpex.outcome != 'success'
         run: |
-          echo '::warning::No official margin data saved. Do not certify three-rises.'
+          echo '::error::Both official quarterly margin sources failed or returned no valid rows. No three-rises certification is allowed.'
+          exit 1
+      - name: Warn on partial official market coverage
+        if: (steps.twse.outcome == 'success' && steps.tpex.outcome != 'success') || (steps.twse.outcome != 'success' && steps.tpex.outcome == 'success')
+        run: |
+          echo '::warning::Only one of TWSE / TPEx margin sources imported; other market is UNVERIFIED. Do not infer complete coverage.'
