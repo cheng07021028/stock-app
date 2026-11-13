@@ -14,6 +14,8 @@ DEFAULT = {
     'H1532布林收斂': '未驗證', 'H1532布林帶寬%': None,
     'H1532OBV量價背離': '未驗證', 'H1532OBV近10日方向': '未驗證',
     'H1532ADX': None, 'H1532DMI方向': '未驗證',
+    'H157_RSI14': None, 'H157_MACD': '未驗證',
+    'H157_ATR14_PCT': None, 'H157_VOLUME_BREAKOUT': '未驗證',
     'H1532技術來源': '日K資料或成交量單位不足',
     'H1532技術反證': '收斂可能向下突破；OBV不能證明大戶鎖碼；ADX不預測漲跌',
 }
@@ -80,5 +82,39 @@ def evaluate_prebreakout(frame: Any) -> dict[str, Any]:
         out['H1532ADX']=round(float(adx),2)
         out['H1532DMI方向']=('多向(+DI>-DI)' if pdi.iloc[-1]>mdi.iloc[-1] else
                               '空向(+DI<-DI)' if pdi.iloc[-1]<mdi.iloc[-1] else '方向不明')
+    # H157: RSI14, MACD 12/26/9, ATR14 and a volume-backed 20-day
+    # price breakout are independent *descriptive* signals. The input gate
+    # above already checked 85 unique, sorted, non-future daily OHLCV bars.
+    diff=c.diff()
+    gain=diff.clip(lower=0).ewm(alpha=1/14,adjust=False,min_periods=14).mean()
+    loss=(-diff.clip(upper=0)).ewm(alpha=1/14,adjust=False,min_periods=14).mean()
+    av_gain=float(gain.iloc[-1]);av_loss=float(loss.iloc[-1])
+    if _finite(av_gain) and _finite(av_loss):
+        value=(50.0 if av_loss==0 and av_gain==0 else
+               100.0 if av_loss==0 else 100.0-100.0/(1.0+av_gain/av_loss))
+        out['H157_RSI14']=round(value,2)
+    ema12=c.ewm(span=12,adjust=False,min_periods=12).mean()
+    ema26=c.ewm(span=26,adjust=False,min_periods=26).mean()
+    macd=ema12-ema26
+    signal=macd.ewm(span=9,adjust=False,min_periods=9).mean()
+    histogram=macd-signal
+    a=float(histogram.iloc[-2]); b=float(histogram.iloc[-1])
+    if _finite(a) and _finite(b):
+        out['H157_MACD']=('MACD柱由負轉正（多方交叉待確認）' if a<=0<b else
+                           'MACD柱由正轉負（空方交叉警示）' if a>=0>b else
+                           'MACD多方區但未新交叉' if b>0 else
+                           'MACD空方區但未新交叉' if b<0 else 'MACD柱體接近零')
+    latest_atr=float(atr.iloc[-1])
+    if _finite(latest_atr) and c.iloc[-1]>0:
+        out['H157_ATR14_PCT']=round(latest_atr/float(c.iloc[-1])*100,2)
+    prior20=d.iloc[-21:-1]
+    avg_lots=float(prior20['lots'].mean())
+    ceiling=float(prior20['high'].max())
+    if _finite(avg_lots) and avg_lots>0:
+        out['H157_VOLUME_BREAKOUT']=(
+            '前20日高點放量突破（非買進資格）' if c.iloc[-1]>ceiling and
+                float(v.iloc[-1])>=avg_lots*1.5 else
+            '價格破20日高但量未放大（防假突破）' if c.iloc[-1]>ceiling else
+            '未站上前20日最高價')
     out['H1532技術來源']='同股同日H114已驗證OHLCV／連續85根／張數單位明確'
     return out

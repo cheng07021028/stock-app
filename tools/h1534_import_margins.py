@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.request import urlopen, Request
 sys.path.insert(0,str(Path(__file__).resolve().parent.parent))
-from godpick_h115_pit_evidence import append_quarterly_margins, TZ_TW
+from godpick_h115_pit_evidence import append_quarterly_margins, _canonical as _validate_h115, TZ_TW
 
 TWSE_URL='https://openapi.twse.com.tw/v1/opendata/t187ap17_L'
 # TPEx provides the same 187ap17 category but the endpoint may be unavailable;
@@ -42,11 +42,19 @@ def parse_rows(data, *, source: str, source_url: str, observed_at: str):
             om=float(str(get(r,'營業利益率(%)') or '').replace(',',''))
             nm=float(str(get(r,'稅後純益率(%)') or '').replace(',',''))
         except (ValueError,TypeError):continue
-        out.append({'code':code,'year_quarter':f'{int(year)}Q{int(q)}',
+        # H157: one invalid official row must not poison the entire snapshot.
+        # Check every fact against H115's exact canonical financial / as-of
+        # constraints *before* handing the full batch to its atomic writer.
+        candidate={'code':code,'year_quarter':f'{int(year)}Q{int(q)}',
             'gross_margin_pct':gm,'operating_margin_pct':om,'net_margin_pct':nm,
             'industry_type':'GENERAL','statement_basis':'SINGLE_QUARTER',
             'source':source,'source_url':source_url,'available_at':observed_at,
-            'availability_basis':'FIRST_OBSERVED'})
+            'availability_basis':'FIRST_OBSERVED'}
+        try:
+            _validate_h115(candidate, 'quarterly_margin')
+        except (ValueError, TypeError, OverflowError):
+            continue  # NaN, inf, bad percentages, invalid quarters, bad source
+        out.append(candidate)
     return out
 
 def main():
@@ -71,6 +79,7 @@ def main():
         url=TWSE_URL if args.market=='TWSE' else TPEX_URL
         chunks.extend(parse_rows(payload,source=args.market,source_url=url,observed_at=now))
     if not chunks:raise SystemExit('FAIL: 官方快照沒有可解析的單季三率，未寫入任何資料')
+    print(f'H157 official row-level validation: {len(chunks)} valid quarterly margin rows accepted; invalid rows skipped')
     result=append_quarterly_margins(args.store,chunks)
     print('H153.4 official first-observed snapshot:',result, 'at',now)
     print('注意：此快照不構成舊季度的提前可得證據，須永久保存帳本並回讀確認。')

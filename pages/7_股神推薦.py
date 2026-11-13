@@ -17798,6 +17798,15 @@ def _build_excel_bytes_fast_h85(
         from godpick_h154_export_parity import verify_final_xlsx as _h154_verify
         _h154_verify(wb,_h154_audit)
 
+    # H157: preserve all legacy tabs and H126 decision authority; append only
+    # two compact, source-labeled research/audit tabs AFTER H154 cross-tab gate.
+    from godpick_h157_trader_audit import render_trader_audit as _h157_audit
+    _h157_report = _h157_audit(
+        wb, research_day=locals().get('_h148_research_day'),
+        h145_status=str(locals().get('_h145_bridge', {}).get('status','')),
+        h126_buyable=h144_focus_meta.get('h126_buyable',0),
+        run_id=(locals().get('_h154_audit') or {}).get('run_id',''))
+
     try:
         wb.active = 0
     except Exception:
