@@ -20,7 +20,7 @@ import socket
 import threading
 import time
 
-VERSION = "godpick_auto_scheduler_v191_20260817_hotfix39_rank_editor_persistence"
+VERSION = "godpick_auto_scheduler_v191_h159_page17_remote_truth"
 # Compatibility lineage marker retained for H11 smoke/contracts: hotfix11_dual_wakeup
 BASE_DIR = Path(__file__).resolve().parent
 TZ = ZoneInfo("Asia/Taipei")
@@ -501,7 +501,7 @@ def h156_plan_manual_batch(settings: dict[str, Any], mode: str) -> list[str]:
     return [*order, "godpick_recommendation"]
 
 
-def h156_manual_batch_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+def h156_manual_batch_summary(rows: list[dict[str, Any]], planned_jobs: list[str] | None = None) -> dict[str, Any]:
     """Derived outcome: dispatched / refreshed / recommended are not synonyms."""
     latest = {str(r.get("job") or ""): str(r.get("status") or "") for r in rows if isinstance(r, dict)}
     essentials = {k: latest.get(k, "NOT_RUN") for k in H155_REQUIRED_REFRESH_JOBS}
@@ -512,7 +512,12 @@ def h156_manual_batch_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "essential_success": all_fresh,
         "recommendation_status": recommendation,
         "recommendation_executed": recommendation in {"SUCCESS", "WARNING"},
-        "all_success": all_fresh and recommendation == "SUCCESS",
+        # H159: FULL mode cannot report complete success when its Page10,
+        # performance, T+1 or durability predecessor has failed or warned.
+        "all_success": all_fresh and recommendation == "SUCCESS" and (
+            all(latest.get(job) == "SUCCESS" for job in planned_jobs)
+            if planned_jobs is not None else True
+        ),
         "unfinished_jobs": [k for k, v in latest.items() if v not in {"SUCCESS", "WARNING"}],
     }
 
@@ -808,7 +813,19 @@ def _h1533_remote_failure(job: str, result: dict[str, Any]) -> bool:
     if job not in _H1533_REMOTE_FANOUT or bool(result.get("ok")):
         return False
     message = str(result.get("message") or "")
-    return any(x in message for x in ("永久同步失敗", "同步失敗", "永久化失敗"))
+    if not any(x in message for x in ("永久同步失敗", "同步失敗", "永久化失敗")):
+        return False
+    # H159: a generic failed remote confirmation may be a transient GitHub
+    # conflict/timeout. Do not stop every later Page10 tracker on that basis.
+    # Open the safety circuit only when an actual persistent credentials/rights
+    # failure is evidenced. Preserve each per-job failure in history regardless.
+    details = result.get("details") if isinstance(result.get("details"), dict) else {}
+    report = " ".join(str(v) for v in (details.get("sync_messages") or []))
+    text = (message + " " + report).lower()
+    hard_markers = ("http 401", "http 403", "401 unauthorized", "403 forbidden",
+                    "token 未設定", "token missing", "invalid token", "bad credentials",
+                    "permission denied", "resource not accessible by integration")
+    return any(marker in text for marker in hard_markers)
 
 
 def _emit_progress(progress_callback, event: dict[str, Any]) -> None:
@@ -976,13 +993,21 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
                     # stale/missing earlier-day status never substitutes for it.
                     deps_ok,deps_msg=h155_verify_same_run_dependencies(executed)
                     if deps_ok and manual_batch_mode == "full_refresh_and_recommend":
-                        deps_ok,deps_msg=h156_verify_full_batch_predecessors(executed, list(selected_jobs or []))
+                        _full_ok, _full_msg = h156_verify_full_batch_predecessors(executed, list(selected_jobs or []))
+                        if not _full_ok:
+                            # H159: after five verified core sources, optional
+                            # performance/sync failures are warnings to the 07
+                            # research run, not an infinite block. The FULL
+                            # batch remains NOT all-success in its validation.
+                            _h158_advisory_warning = "H159全模組非核心工作未全數成功：" + _full_msg
                 else:
                     deps_ok,deps_msg=_dependency_check(job_cfg,status,now)
                 if deps_ok:
                     deps_ok,deps_msg=_recommendation_final_gate(cfg,status,now,job,force=force_all_enabled)
                     if deps_ok and job == "godpick_recommendation":
-                        _h158_advisory_warning = str(deps_msg or "")
+                        _h158_advisory_warning = "｜".join(
+                            x for x in (_h158_advisory_warning, str(deps_msg or "")) if x
+                        )
                 started=now_text(now) if simulate else now_text()
                 if not deps_ok:
                     result={"ok":False,"blocked":True,"message":deps_msg,"finished_at":now_text(now) if simulate else now_text()}
@@ -1078,7 +1103,7 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
                 "batch_id":batch_id,"batch_mode":manual_batch_mode,
                 "started_at":now_text(now),"finished_at":now_text(),
                 "planned_jobs":list(planned_order),"summary":summary,
-                "validation":h156_manual_batch_summary(executed),
+                "validation":h156_manual_batch_summary(executed, planned_jobs=list(planned_order)),
                 "remote_confirmation":"PENDING_TERMINAL_CHECKPOINT",
             }
         status["last_wakeup_result"]="COMPLETED" if overall else "COMPLETED_WITH_FAILURE"

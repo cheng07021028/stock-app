@@ -75,7 +75,7 @@ st.set_page_config(page_title="17_系統健康檢查", layout="wide")
 inject_pro_theme()
 
 st.title("17_系統健康檢查 / 全模組一鍵更新中心")
-st.caption("V191-H158｜SuperAI期交所官方資料／08永久同步確認／非核心歷史阻擋／假日到期狀態修復；H156 中央 worker 真正執行：核心6項完整更新／全模組更新分流、固定前置次序、本輪批次身分與資料成功驗證；保留 H155、H71、H39 及既有所有功能。")
+st.caption("V191-H159｜Page17中央Worker派送、推薦清單遠端核實、暫時性同步失敗不連鎖阻擋、全批次誠實告警；保留H158｜SuperAI期交所官方資料／08永久同步確認／非核心歷史阻擋／假日到期狀態修復；H156 中央 worker 真正執行：核心6項完整更新／全模組更新分流、固定前置次序、本輪批次身分與資料成功驗證；保留 H155、H71、H39 及既有所有功能。")
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +85,18 @@ if callable(load_auto_scheduler_settings):
     _auto_cfg = load_auto_scheduler_settings(refresh_remote=True)
     _auto_status = load_auto_scheduler_status(refresh_remote=True) if callable(load_auto_scheduler_status) else {}
     with st.expander("⏰ V191｜中央自動排程中心（每日自動更新＋永久記錄＋自動股神推薦）", expanded=True):
+        st.caption("H159 狀態說明：頁面上的派送／等待不等於執行成功；最後成功、最後失敗與本輪 Worker 應以 runtime-data 永久紀錄為準。H159 已將手動實際執行移到中央 GitHub Worker。")
+        _h159_job_rows = (_auto_status.get("jobs") or {}) if isinstance(_auto_status, dict) else {}
+        _h159_failures = [
+            {"工作": AUTO_JOB_LABELS.get(_jid, _jid), "最後狀態": _j.get("last_status"),
+             "執行日期": _j.get("last_run_at", ""), "實際原因": str(_j.get("last_message") or "")[:500]}
+            for _jid, _j in _h159_job_rows.items()
+            if isinstance(_j, dict) and str(_j.get("last_status") or "") in {"FAILED", "BLOCKED", "WARNING"}
+        ]
+        if _h159_failures:
+            with st.expander("🔎 中央遠端最新異常原因（不必橫向捲動尋找最後訊息）", expanded=True):
+                st.caption("此處是 runtime-data 最新持久化的各工作最後狀態；不是目前按鈕派送成功的證明。")
+                st.dataframe(pd.DataFrame(_h159_failures), use_container_width=True, hide_index=True)
         _rank_flash = st.session_state.pop("_v191_rank_save_flash", None)
         if isinstance(_rank_flash, dict):
             if bool(_rank_flash.get("ok")):
@@ -411,6 +423,34 @@ if callable(load_auto_scheduler_settings):
 
             return run_auto_due_jobs(force_all_enabled=force_all, progress_callback=_on_progress)
 
+        # H159: the Streamlit request is not the unattended worker. Running 14
+        # jobs here creates a local RUNNING state that is lost on page rerun and
+        # can disagree with runtime-data (observed on the 2026-11-14 weekend).
+        # Keep all three controls, but route real work to GitHub Actions.
+        def _h159_dispatch_central(*, manual_job: str, wake_source: str):
+            if not callable(dispatch_auto_scheduler_wakeup):
+                st.error("H159 中央 Worker 派送服務未載入；未在 Streamlit 執行大型任務。")
+                return
+            try:
+                _token = str(st.secrets.get("GITHUB_TOKEN", "") or "").strip()
+                _owner = str(st.secrets.get("GITHUB_REPO_OWNER", "cheng07021028") or "cheng07021028").strip()
+                _repo = str(st.secrets.get("GITHUB_REPO_NAME", "stock-app") or "stock-app").strip()
+                _branch = str(st.secrets.get("GITHUB_CODE_BRANCH", "main") or "main").strip()
+                _ok, _msg = dispatch_auto_scheduler_wakeup(
+                    token=_token, owner=_owner, repo=_repo, branch=_branch,
+                    wakeup_source=wake_source, manual_job=manual_job,
+                )
+                st.session_state["h159_worker_dispatch"] = {
+                    "ok": bool(_ok), "manual_job": manual_job,
+                    "time": time.strftime("%Y-%m-%d %H:%M:%S"), "message": str(_msg),
+                }
+                if _ok:
+                    st.info(str(_msg) + "｜僅確認派送成功，不代表14項已完成；請以下方遠端批次履歷和最後訊息為準。")
+                else:
+                    st.error(_msg)
+            except Exception as _exc:
+                st.error(f"H159 Worker 派送失敗：{type(_exc).__name__}: {_exc}")
+
         _b1, _b2, _b3 = st.columns(3)
         if _b1.button("🧭 模擬目前到期項目（不執行）", use_container_width=True):
             _sim = run_auto_due_jobs(simulate=True)
@@ -419,18 +459,20 @@ if callable(load_auto_scheduler_settings):
             else:
                 st.info(_sim.get("message"))
         if _b2.button("▶ 執行目前已到期項目", use_container_width=True):
-            _run = _run_v191_with_live_progress(force_all=False)
-            _has_warning = any(str(x.get("status")) == "WARNING" for x in (_run.get("executed") or []) if isinstance(x, dict))
-            (st.warning if _has_warning or not _run.get("ok") else st.success)(_run.get("message"))
-            if _run.get("executed"):
-                st.dataframe(pd.DataFrame(_run.get("executed", [])), use_container_width=True, hide_index=True)
+            _h159_dispatch_central(manual_job="", wake_source="page17_h159_due_only")
+            st.caption("交易日到期排程由 GitHub worker 執行；若今日為週末，Worker 將依原設定安全略過。")
         _force_confirm = _b3.checkbox("允許本次強制跑全部已啟用工作", value=False, help="會包含第7頁股神推薦，可能需要數分鐘；只用於部署驗證。Hotfix2 使用獨立 FORCE 執行鍵，不會佔用今天尚未到時的正式排程時段。")
         if st.button("🧪 強制執行全部已啟用工作（部署驗證）", disabled=not _force_confirm, use_container_width=True):
-            _runall = _run_v191_with_live_progress(force_all=True)
-            _has_warning_all = any(str(x.get("status")) == "WARNING" for x in (_runall.get("executed") or []) if isinstance(x, dict))
-            (st.warning if _has_warning_all or not _runall.get("ok") else st.success)(_runall.get("message"))
-            if _runall.get("executed"):
-                st.dataframe(pd.DataFrame(_runall.get("executed", [])), use_container_width=True, hide_index=True)
+            _h159_dispatch_central(
+                manual_job="full_refresh_and_recommend",
+                wake_source="page17_h159_force_all_worker",
+            )
+            st.caption("本鍵保留全部已啟用工作、固定推薦最後；由 GitHub Worker 執行並永久保存，不在 Streamlit UI 跑大型任務。")
+        _h159_last_dispatch = st.session_state.get("h159_worker_dispatch")
+        if isinstance(_h159_last_dispatch, dict):
+            st.caption("最近 Worker 派送：" + str(_h159_last_dispatch.get("time")) + "｜" + (
+                "已受理，待遠端確認" if _h159_last_dispatch.get("ok") else "派送失敗"
+            ))
 
         def _dispatch_page17_autocatchup() -> tuple[bool, str]:
             """Send one external wake; never run heavy 07/08 work in Streamlit UI thread."""

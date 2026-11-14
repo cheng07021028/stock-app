@@ -1894,10 +1894,20 @@ def _sync_records(df: pd.DataFrame) -> tuple[bool, list[str]]:
         st.session_state[_k("last_sync_msgs")] = messages
         return True, messages
 
-    # Update only the matching current recommendation rows in Page08 authority.
+    # H159: the unattended GitHub worker must not claim that the entire Page10
+    # update has been permanently saved when the historic Page08 authority was
+    # merely queued for an asynchronous GitHub write. This also makes a
+    # headless full-batch resilient to worker shutdown after the final job.
+    import os as _h159_os
+    _h159_worker = (
+        str(_h159_os.environ.get("GITHUB_ACTIONS") or "").lower() == "true"
+        or str(_h159_os.environ.get("GODPICK_PAGE17_FULL_REFRESH") or "") == "1"
+    )
+    # Update only matching current rows; keep the H3 non-destructive upsert.
     rec_report, rec_stats = upsert_records_authority_fast(
         work.to_dict(orient="records"),
-        reason="Page10 tracking metrics incremental upsert (V191-H3)",
+        reason="Page10 tracking metrics incremental upsert (V191-H3/H159)",
+        require_remote_confirm=_h159_worker,
     )
     messages.extend([
         f"推薦紀錄增量｜before={rec_stats.get('before',0)} after={rec_stats.get('after',0)} "
@@ -1951,7 +1961,10 @@ def _sync_records(df: pd.DataFrame) -> tuple[bool, list[str]]:
     st.session_state[_k("last_sync_msgs")] = messages
     # Local authority preservation is mandatory; remote list/snapshot failures
     # are surfaced instead of silently declaring full success.
-    return bool(rec_report.local_ok and list_report.permanent_ok and latest_report_ok), messages
+    _h159_history_ok = bool(rec_report.permanent_ok) if _h159_worker else bool(rec_report.local_ok)
+    if _h159_worker and not _h159_history_ok:
+        messages.append("H159 08歷史權威尚未取得遠端永久確認；10清單即使已保存，也不可視為整體同步成功。")
+    return bool(_h159_history_ok and list_report.permanent_ok and latest_report_ok), messages
 
 def _recommend_sources_signature_v171() -> str:
     parts = []

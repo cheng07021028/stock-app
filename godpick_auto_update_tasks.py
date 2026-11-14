@@ -450,9 +450,12 @@ def task_recommend_list_performance(cfg: dict[str, Any] | None = None) -> dict[s
             df=df_after
         msgs.extend(msgs_after[-8:])
         sync_ok,sync_msgs=ns["_sync_records"](df)
-        ok=bool((result or {}).get("ok",True) and sync_ok)
+        perf_ok=bool((result or {}).get("ok",True))
+        ok=bool(perf_ok and sync_ok)
         no_data=bool(df.empty)
-        return _report(ok,f"推薦清單績效更新完成；{'0筆安全略過（未清空歷史）' if no_data else ('永久同步成功' if sync_ok else '永久同步失敗')}",details={"performance":result,"load_messages":msgs[-10:],"sync_messages":sync_msgs[-20:]},changed_files=["godpick_recommend_list.json","godpick_records.json"],started=t0,warning=bool(no_data and ok))
+        _sync_label = "0筆安全略過（未清空歷史）" if no_data else ("永久同步成功" if sync_ok else "永久同步失敗")
+        _failure_hint = "" if ok else "；原因：" + (_h1533_remote_failure_hint(sync_msgs) if not sync_ok else "推薦績效計算未通過，請查performance明細")
+        return _report(ok,f"推薦清單績效{'更新完成' if perf_ok else '計算失敗'}；{_sync_label}{_failure_hint}",details={"performance":result,"load_messages":msgs[-10:],"sync_messages":sync_msgs[-20:]},changed_files=["godpick_recommend_list.json","godpick_records.json"],started=t0,warning=bool(no_data and ok))
     except Exception as exc:
         return _report(False,f"推薦清單績效更新失敗：{type(exc).__name__}: {exc}",started=t0)
 
