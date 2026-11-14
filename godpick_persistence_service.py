@@ -634,6 +634,34 @@ def ensure_records_local_authority_current() -> tuple[list[dict[str, Any]], list
                 item[0], item[1], fallback=item[2], rows=item[3]
             ),
         )
+        # H161: a locally re-stamped partial non-destructive snapshot must not
+        # outrank an independently verified 2,632-row remote authority merely
+        # because its file/metadata timestamp is newer.  Deliberate *verified*
+        # deletions are not resurrected by this count reconciliation.
+        _local_delete_claim = _records_state_is_destructive_mutation(local_state)
+        _remote_verified_same_hash = any(
+            item[0] != "local" and _safe_str((item[1] or {}).get("payload_hash")) == local_hash
+            for item in candidates
+        )
+        _local_delete_unverified = bool(
+            _local_delete_claim and local_state.get("github_pending") and not _remote_verified_same_hash
+        )
+        if not _local_delete_claim or _local_delete_unverified:
+            local_business = _latest_record_recommendation_date(local_rows)
+            remote_supersets = [item for item in candidates if (
+                item[0] != "local"
+                and int((item[1] or {}).get("count") or 0) > len(local_rows)
+                and _recommendation_date_text((item[1] or {}).get("latest_recommendation_date")) >= local_business
+            )]
+            if remote_supersets:
+                supersede = max(remote_supersets, key=lambda item: (
+                    _recommendation_date_text((item[1] or {}).get("latest_recommendation_date")),
+                    int((item[1] or {}).get("count") or 0),
+                    _authority_freshness_key(item[0], item[1], fallback=item[2], rows=item[3])[1],
+                ))
+                if source == "local" or int((newest_state or {}).get("count") or 0) < int((supersede[1] or {}).get("count") or 0):
+                    source, newest_state, newest_fallback, newest_rows_hint = supersede
+                    details.append(f"H161不採用局部權威：本機 {len(local_rows)} 筆，{source} 摘要 {int(newest_state.get('count') or 0)} 筆；須核實完整內容後恢復，禁止縮水覆蓋。")
         local_key = _authority_freshness_key("local", local_state, fallback=(local_mtime if local_valid else datetime.min), rows=local_rows)
         newest_key = _authority_freshness_key(source, newest_state, fallback=newest_fallback, rows=newest_rows_hint)
         details.append(f"新鮮度比較：local={local_key[:4]}｜{source}={newest_key[:4]}")
@@ -694,6 +722,22 @@ def ensure_records_local_authority_current() -> tuple[list[dict[str, Any]], list
             "updated_at_epoch": _state_epoch(remote_state) or _now_epoch(),
             "revision": int(remote_state.get("revision") or time.time_ns()),
         })
+        if local_rows and local_hash != remote_hash:
+            # An unsynced edit in the smaller local view may still be useful to
+            # an operator. Preserve it locally as diagnostic evidence; NEVER
+            # auto-merge it into the newer canonical history.
+            try:
+                cache_dir = project_path(".cache/h161_authority_pre_restore")
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                backup_name = f"local_{local_hash[:16]}.json"
+                backup_path = cache_dir / backup_name
+                if not backup_path.exists():
+                    temp_backup = backup_path.with_name(backup_path.name + ".tmp")
+                    temp_backup.write_text(json.dumps(local_rows, ensure_ascii=False, default=str), encoding="utf-8")
+                    temp_backup.replace(backup_path)
+                details.append(f"H161局部快照已備份供稽核（非永久權威）：{backup_name}")
+            except Exception as backup_exc:
+                details.append(f"H161局部備份失敗（不影響遠端證據）：{type(backup_exc).__name__}")
         ok1, msg1 = write_local_json_atomic(RECORDS_FILE, remote_rows)
         ok2, msg2 = write_local_json_atomic(RECORDS_STATE_FILE, remote_state)
         if ok1 and ok2:
@@ -1301,6 +1345,8 @@ def write_github_json(path_name: str, payload: Any, message: str = "update durab
             sha, meta_status, meta_msg = _github_meta_sha(path_name, cfg)
             if meta_status not in (200, 404):
                 last_error = meta_msg
+                if meta_status in (401, 403):
+                    return False, f"H161 GitHub權限不足 HTTP {meta_status}：需確認 Token 所選 stock-app 儲存庫與 Contents: Read and write；未重試大型備份。{path_name}"
                 time.sleep(min(3.0, 0.7 * (attempt + 1)))
                 continue
             try:
@@ -1359,6 +1405,14 @@ def write_github_json(path_name: str, payload: Any, message: str = "update durab
                     return False, (
                         f"GitHub 文件過大 HTTP 422：{path_name}｜{size_mb:.1f} MB｜"
                         "需使用 H127 壓縮分片，不再做無效 CAS 重傳"
+                    )
+                elif response.status_code in (401, 403):
+                    # Permission is not a CAS race; retrying a 500KB shard 5x
+                    # cannot grant the missing Contents permission.
+                    return False, (
+                        f"H161 GitHub寫入權限不足 HTTP {response.status_code}：{path_name}｜"
+                        "請更新 Streamlit Secrets 使用的 Token：stock-app → Contents: Read and write；"
+                        "並確認 GitHub runtime-data 分支。資料未完成遠端保存。"
                     )
                 elif response.status_code in (409, 422):
                     conflict_count += 1
@@ -2061,21 +2115,24 @@ def _records_github_sync_worker() -> None:
         # One bounded worker-level retry complements the per-PUT CAS loop.  It
         # handles the case where another process completes an entire records+
         # state transaction while this worker was uploading.  Never infinite.
-        if not ok and ("版本衝突" in msg or "state" in msg or "CAS" in msg):
+        if not ok and ("版本衝突 HTTP 409" in msg or "CAS衝突" in msg or "版本衝突 HTTP 422" in msg):
             retry_count = 1
             time.sleep(1.5)
             ok, retry_msg = _sync_records_github_snapshot_v191_h8(records, state, f"{reason} | H8 retry")
             msg = f"{msg}｜H8自動重試：{retry_msg}"
+        # 401/403 is a permanent credential/access failure, not a transient
+        # shard/CAS race. Keep it visible until the operator fixes Secrets.
+        permission_denied = bool(not ok and any(mark in msg for mark in ("HTTP 401", "HTTP 403")))
         write_local_json_atomic(
             RECORDS_GITHUB_SYNC_STATUS_FILE,
             {
-                "status": "success" if ok else "retry_pending",
+                "status": "success" if ok else ("blocked_permission" if permission_denied else "retry_pending"),
                 "reason": reason,
                 "count": len(records),
                 "payload_hash": state.get("payload_hash"),
                 "finished_at": _now_text(),
                 "message": msg,
-                "auto_retry": not ok,
+                "auto_retry": not ok and not permission_denied,
                 "auto_retry_count": retry_count,
                 "version": "V191-H8-CAS",
             },
@@ -2274,11 +2331,17 @@ def write_records_firestore_mutation(
         return False, f"Firestore records 增量寫入失敗：{exc}"
 
 
-def _h141_prevent_remote_rollback(records: list[dict[str, Any]], *, deleted_ids: Iterable[str] | None = None) -> tuple[bool, str]:
-    """H141: before any mutation, verify against surviving remote authority.
+def _h141_prevent_remote_rollback(
+    records: list[dict[str, Any]], *, deleted_ids: Iterable[str] | None = None,
+    previous_rows: list[dict[str, Any]] | None = None,
+    previous_count: int | None = None,
+) -> tuple[bool, str]:
+    """H161: fail-closed compare-and-delete against the complete authority.
 
-    A rebooted local checkout must never publish a smaller July snapshot over
-    a verified October one. Fail CLOSED if no remote is available.
+    The pre-delete snapshot, not the already-shortened result, must match the
+    remote payload hash.  This permits deleting the last/newest date but NEVER
+    assumes that 100 selected IDs justify silently omitting 74 unrelated rows.
+    No GitHub/Firestore permission => no local destructive mutation either.
     """
     from godpick_h141_integrity_guard import record_snapshot_guard
     cfg = github_config()
@@ -2288,30 +2351,63 @@ def _h141_prevent_remote_rollback(records: list[dict[str, Any]], *, deleted_ids:
             "H141保護：未設定 GITHUB_TOKEN/Firestore，只有暫存本機歷史。"
             "已阻止正式紀錄修改及遠端回寫；請先設 Streamlit Secrets，恢復遠端權威。"
         )
+    deleted = {_safe_str(x) for x in (deleted_ids or []) if _safe_str(x)}
     states: list[tuple[str, dict[str, Any]]] = []
     if cfg.get("token"):
         gh_state, gh_msg = read_github_json(RECORDS_STATE_FILE, {})
-        if isinstance(gh_state, dict) and gh_state.get('payload_hash'):
+        if isinstance(gh_state, dict) and gh_state.get("payload_hash"):
             states.append(("GitHub runtime-data", gh_state))
         elif not has_firestore:
-            return False, f"H141保護：GitHub 尚未提供可驗證推薦歷史摘要（{gh_msg}）；禁止用本機快照覆蓋。"
+            return False, (
+                f"H161 GitHub遠端權威無法驗證（{gh_msg}）；禁止刪除或以本機舊快照回寫。"
+                "若HTTP 403，請確認 Fine-grained Token 已選 stock-app 並授予 Contents: Read and write。"
+            )
     if has_firestore:
         fs_state, fs_msg = _read_records_firestore_summary()
-        if isinstance(fs_state, dict) and fs_state.get('payload_hash'):
+        if isinstance(fs_state, dict) and fs_state.get("payload_hash"):
             states.append(("Firestore", fs_state))
         elif not states:
             return False, f"H141保護：Firestore 無法驗證推薦摘要（{fs_msg}）；禁止寫入。"
-    deleted = {str(x).strip() for x in (deleted_ids or []) if str(x).strip()}
+    if deleted:
+        # An explicit delete must start with the *complete exact* same identity
+        # set as the persisted authority; shrinking row count is not consent to
+        # remove unseen rows. A human-friendly record count alone is insufficient.
+        if previous_rows is None:
+            return False, "H161刪除驗證未取得刪除前完整權威，已停止；請重新載入。"
+        before = records_as_rows_exact(previous_rows)
+        before_ids = [_safe_str(x.get("record_id")) for x in before]
+        after_ids = [_safe_str(x.get("record_id")) for x in records]
+        if (not before or len(before_ids) != len(set(before_ids)) or
+                len(after_ids) != len(set(after_ids)) or
+                not deleted.issubset(set(before_ids)) or
+                set(after_ids) != set(before_ids) - deleted):
+            return False, "H161刪除身分對帳失敗：只允許精確 record_id 刪除，其他歷史筆數/ID 不可變動。"
+        if previous_count is not None and int(previous_count) != len(before):
+            return False, f"H161刪除前筆數已變動：原畫面 {previous_count}，權威 {len(before)}；請重新載入。"
+        if not states:
+            return False, "H161刪除前沒有可驗證的遠端權威（不允許只更新本機）。"
+        before_hash = _json_hash(before)
+        for source, state in states:
+            good, why = record_snapshot_guard(before, state, destructive=False)
+            if not good:
+                return False, f"H161刪除前資料不完整：{source}｜{why}；請先重新載入完整權威。"
+            remote_count = int(state.get("count") or 0)
+            if remote_count != len(before):
+                return False, (
+                    f"H161刪除前資料不完整：畫面 {len(before)} 筆，{source} {remote_count} 筆，"
+                    f"差 {remote_count-len(before):+d} 筆；先重新載入完整權威再重新勾選。"
+                )
+            remote_hash = _safe_str(state.get("payload_hash"))
+            if remote_hash != before_hash:
+                return False, (
+                    f"H161刪除前版本不一致：{source} 的內容Hash與本機不同；"
+                    "為避免覆蓋其他人的新資料，請重新載入完整權威。"
+                )
+        return True, f"H161精確刪除預檢成功：原權威 {len(before)} 筆，僅刪 {len(deleted)} 個明確record_id"
     for source, state in states:
-        good, why = record_snapshot_guard(records, state, destructive=bool(deleted))
+        good, why = record_snapshot_guard(records, state, destructive=False)
         if not good:
             return False, f"{source}｜{why}"
-        if deleted:
-            count = int(state.get('count') or 0)
-            # If the displayed pre-delete snapshot was already partial, do not
-            # allow the user to delete against it and republish the subset.
-            if count and len(records) + len(deleted) < count:
-                return False, f"H141保護：{source} 存有 {count} 筆，本次刪除前畫面最多 {len(records)+len(deleted)} 筆；請先回讀完整遠端紀錄。"
     return True, "已核對遠端權威，禁止較舊資料回寫"
 
 
@@ -2341,10 +2437,27 @@ def save_records_mutation_fast(
             report.updated_at = _now_text()
             return report
     records = records_as_rows_exact(payload)
-    _h141_ok, _h141_reason = _h141_prevent_remote_rollback(records, deleted_ids=deleted_ids)
+    requested_deleted_ids = [_safe_str(x) for x in (deleted_ids or []) if _safe_str(x)]
+    pre_delete_rows = None
+    if requested_deleted_ids:
+        pre_delete_payload, _, _ = read_local_json(RECORDS_FILE, [])
+        pre_delete_rows = records_as_rows_exact(pre_delete_payload)
+        # The Streamlit editor is a *view* with fewer columns than the canonical
+        # historical JSON. It is authoritative only for which IDs the user
+        # selected, never for rewriting the remaining 2,000+ records.
+        selected = set(requested_deleted_ids)
+        ui_remaining = {_safe_str(r.get("record_id")) for r in records}
+        source_ids = {_safe_str(r.get("record_id")) for r in pre_delete_rows}
+        if not source_ids or not selected.issubset(source_ids) or ui_remaining != (source_ids - selected):
+            message = "H161刪除表格與原權威 record_id 不一致；本輪未變更資料，請重新載入後再選。"
+            return PersistenceReport(local_ok=False, permanent_ok=False, local_message=message, github_message=message, firestore_message=message, updated_at=_now_text())
+        records = [dict(r) for r in pre_delete_rows if _safe_str(r.get("record_id")) not in selected]
+    _h141_ok, _h141_reason = _h141_prevent_remote_rollback(
+        records, deleted_ids=requested_deleted_ids,
+        previous_rows=pre_delete_rows, previous_count=previous_count,
+    )
     if not _h141_ok:
         return PersistenceReport(local_ok=False, permanent_ok=False, local_message=_h141_reason, github_message=_h141_reason, firestore_message=_h141_reason, updated_at=_now_text())
-    requested_deleted_ids = [_safe_str(x) for x in (deleted_ids or []) if _safe_str(x)]
     requested_upsert_rows = [dict(x) for x in (upsert_rows or []) if isinstance(x, dict)]
     mutation_kind = "destructive" if requested_deleted_ids else "upsert"
     state = _new_state(
@@ -2360,6 +2473,67 @@ def save_records_mutation_fast(
     )
     report = PersistenceReport(payload_hash=state["payload_hash"], updated_at=state["updated_at"])
 
+    # H161: stage the *exact* requested document changes before mutation.  A
+    # failed remote write must not leave a locally deleted snapshot that the
+    # next Streamlit reboot silently resurrects.
+    effective_deleted_ids = set(requested_deleted_ids)
+    effective_upsert_rows = list(requested_upsert_rows)
+    repaired_rows = [row for row in records if _safe_str(row.get("record_id修復狀態"))]
+    for row in repaired_rows:
+        legacy_id = _safe_str(row.get("原始record_id"))
+        if legacy_id:
+            effective_deleted_ids.add(legacy_id)
+        effective_upsert_rows.append(dict(row))
+    _upsert_map = {_safe_str(r.get("record_id")): r for r in effective_upsert_rows if _safe_str(r.get("record_id"))}
+    effective_upsert_rows = list(_upsert_map.values())
+
+    if requested_deleted_ids and require_remote_confirm:
+        # Firestore is a small incremental delete; otherwise H127 synchronous
+        # compressed snapshot is the only durable available authority.
+        fs_ok, fs_msg = False, "Firebase 未設定"
+        if firebase_configured():
+            fs_ok, fs_msg = write_records_firestore_mutation(
+                records, state, deleted_ids=effective_deleted_ids,
+                upsert_rows=effective_upsert_rows, expected_previous_count=previous_count,
+            )
+        report.firestore_ok, report.firestore_message = bool(fs_ok), fs_msg
+        cfg = github_config()
+        gh_ok, gh_msg = False, "GitHub 未設定"
+        if cfg.get("token") and not fs_ok:
+            state["github_pending"] = False  # direct H127 publish is not a queued upload
+            gh_ok, gh_msg = _sync_records_github_snapshot_v191_h8(records, state, f"{reason} | H161 verified-delete")
+        if not fs_ok and not gh_ok:
+            report.local_message = "H161遠端刪除未獲確認，未更動本機權威；請修正Token/Firestore或重新載入。"
+            report.github_message = gh_msg
+            report.permanent_ok = False
+            return report
+        # Remote confirmed first. A local failure now requires a reload from
+        # the already durable authority, not a rollback of a committed delete.
+        ok1, msg1 = write_local_json_atomic(RECORDS_FILE, records)
+        ok2, msg2 = write_local_json_atomic(RECORDS_STATE_FILE, state)
+        ok3, msg3 = write_local_json_atomic(RECORDS_MANIFEST_FILE, _records_manifest(records, state["payload_hash"])) if ok1 and ok2 else (False, "本機前置失敗")
+        report.local_ok = bool(ok1 and ok2 and ok3)
+        report.local_message = f"{msg1}｜{msg2}｜{msg3}"
+        report.github_ok = bool(gh_ok)
+        report.github_message = gh_msg if gh_ok else "GitHub 待同步；Firestore 已完成精確刪除"
+        if fs_ok and cfg.get("token") and report.local_ok:
+            queued, queue_msg = schedule_records_github_sync(records, state, reason)
+            report.github_pending = bool(queued)
+            report.github_message = queue_msg
+        elif gh_ok and report.local_ok:
+            # A prior 403 blocked_permission flag must not linger after a
+            # *verified* synchronous GitHub delete has succeeded.
+            write_local_json_atomic(RECORDS_GITHUB_SYNC_STATUS_FILE, {
+                "status": "success", "reason": reason, "count": len(records),
+                "payload_hash": state.get("payload_hash"),
+                "finished_at": _now_text(), "auto_retry": False,
+                "message": gh_msg, "version": "V191-H161-VERIFIED-DELETE",
+            })
+        if not report.local_ok:
+            report.local_message += "｜H161遠端已刪除但本機保存失敗，請立即重新載入權威" 
+        report.permanent_ok = bool(report.local_ok and (report.firestore_ok or report.github_ok))
+        return report
+
     ok1, msg1 = write_local_json_atomic(RECORDS_FILE, records)
     ok2, msg2 = write_local_json_atomic(RECORDS_STATE_FILE, state)
     ok3, msg3 = write_local_json_atomic(RECORDS_MANIFEST_FILE, _records_manifest(records, state["payload_hash"])) if ok1 and ok2 else (False, "前置寫入失敗，未建立manifest")
@@ -2370,22 +2544,6 @@ def save_records_mutation_fast(
         report.firestore_message = "本機原子寫入失敗，未執行遠端 mutation"
         report.permanent_ok = False
         return report
-
-    # V178 legacy-ID migration: if this snapshot contains repaired IDs, make the
-    # Firestore mutation self-contained. Delete collided legacy doc IDs and upsert
-    # every surviving repaired row so a user can safely edit/delete before an
-    # explicit full sync.
-    effective_deleted_ids = set(requested_deleted_ids)
-    effective_upsert_rows = list(requested_upsert_rows)
-    repaired_rows = [row for row in records if _safe_str(row.get("record_id修復狀態"))]
-    for row in repaired_rows:
-        legacy_id = _safe_str(row.get("原始record_id"))
-        if legacy_id:
-            effective_deleted_ids.add(legacy_id)
-        effective_upsert_rows.append(dict(row))
-    # de-duplicate upserts by the now-unique record_id
-    _upsert_map = {_safe_str(r.get("record_id")): r for r in effective_upsert_rows if _safe_str(r.get("record_id"))}
-    effective_upsert_rows = list(_upsert_map.values())
 
     fs_ok = False
     fs_msg = "Firebase 未設定"

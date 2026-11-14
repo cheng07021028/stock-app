@@ -6357,7 +6357,7 @@ def main():
         subtitle="追蹤 7_股神推薦 推薦股票，支援 GitHub + Firestore 雙寫、每日更新、實際交易分析、績效統計、Excel 匯出，並可匯入 4_自選股中心。",
     )
     st.caption(f"目前8頁修正版：{RECORD_FIX_VERSION}")
-    st.caption(f"刪除修正版：{DELETE_FIX_VERSION}｜V162 表單批次送出＋本機先行刪除＋遠端不阻塞")
+    st.caption(f"刪除修正版：{DELETE_FIX_VERSION}｜H161精確record_id核驗＋先遠端確認再刪本機；未授權/版本不一致不變動歷史")
     st.caption(f"運算加速修正版：{RECORD_SPEED_FIX_VERSION}")
     st.caption(f"最新價／損益修正版：{LATEST_PRICE_PNL_FIX_VERSION}｜V179 交易所整體盤後快照＋實際成交雙軌｜保存行情日期／來源／計算狀態")
     st.caption(f"7/8/9 起漲欄位版：{PRELAUNCH_789_VERSION}")
@@ -6384,6 +6384,26 @@ def main():
             st.error("H141 重大資料保護：目前未連上 GitHub／Firestore 權威。畫面可能是 2026/07/09 舊紀錄，禁止把它保存、批次刪除或當成最新績效。請先在 Streamlit Secrets 設定 GITHUB_TOKEN，指定 runtime-data，然後重新載入。")
     except Exception:
         st.error("H141 重大資料保護：未能確認推薦紀錄的遠端來源，請勿儲存或刪除。")
+
+    # H161: provide the actionable explanation at the top of Page08, not only
+    # deep in a 9-shard background log. Never reveal any token values.
+    try:
+        _h161_ghstate = {}
+        if callable(read_local_json):
+            _h161_ghstate, _, _ = read_local_json("godpick_records_github_sync_status.json", {})
+        _h161_last_detail = st.session_state.get(_k("last_sync_detail"), []) or []
+        _h161_permission_blocked = (
+            isinstance(_h161_ghstate, dict) and _h161_ghstate.get("status") == "blocked_permission"
+        ) or any("HTTP 403" in str(v) or "HTTP 401" in str(v) for v in _h161_last_detail)
+        if _h161_permission_blocked:
+            st.error(
+                "H161｜GitHub 推薦歷史寫入被 HTTP 401/403 拒絕：請至 Streamlit Cloud Secrets "
+                "更新 GITHUB_TOKEN。Fine-grained Token 須選 stock-app，授予 Contents: Read and write，"
+                "並確認 GITHUB_RUNTIME_DATA_BRANCH=runtime-data。權限修復後先按『重新載入』，"
+                "等完整遠端權威完成筆數/Hash驗證，再重新勾選要刪的 record_id。"
+            )
+    except Exception:
+        pass
 
     # V174：任何按鈕執行前，先同步唯一權威檔。舊畫面不得回寫覆蓋新紀錄。
     _authority_df_v174, _authority_details_v174, _authority_restored_v174 = _sync_authority_before_actions()
@@ -6898,7 +6918,15 @@ def main():
     if active_tab == "📋 總表管理":
         render_pro_section("推薦紀錄總表", "先篩選再編輯，減少 data_editor 負擔。支援欄位順序永久保存、重新整理不還原。")
         if st.session_state.get(_k("last_delete_msg")):
-            st.success(st.session_state.pop(_k("last_delete_msg")))
+            _h161_del_msg = st.session_state.pop(_k("last_delete_msg"))
+            _h161_del_kind = (
+                "warning" if any(t in _h161_del_msg for t in ("請先勾選", "目前篩選結果沒有", "僅本機"))
+                else "info" if any(t in _h161_del_msg for t in ("已勾選目前顯示", "已取消所有刪除勾選"))
+                else "error" if any(t in _h161_del_msg for t in ("未執行", "未確認", "未完成", "沒有刪到", "失敗"))
+                else "success" if st.session_state.get(_k("last_mutation_permanent_ok"), False)
+                else "warning"
+            )
+            getattr(st, _h161_del_kind)(_h161_del_msg)
 
         opt_top = st.columns([1.2, 1.2, 1.2, 2.8])
         with opt_top[0]:
@@ -7231,7 +7259,15 @@ def main():
                      else f"本機暫時移除 {deleted_n} 筆，但遠端權威未確認！Reboot 仍可能恢復；請立即檢查同步明細並重試。")
                 )
             else:
-                st.session_state[_k("last_delete_msg")] = "本機保存失敗，為避免畫面與檔案不一致，本次未切換資料。"
+                _detail = st.session_state.get(_k("last_sync_detail"), []) or []
+                _reason = next((str(x) for x in _detail if any(k in str(x) for k in ("H161", "H141", "403", "權限", "版本"))), "")
+                st.session_state[_k("last_mutation_local_ok")] = False
+                st.session_state[_k("last_mutation_permanent_ok")] = False
+                st.session_state[_k("last_delete_msg")] = (
+                    "H161刪除未執行：本機/遠端權威保持原樣。" + _reason[:450]
+                    + "｜若 GitHub 403，請確認 Streamlit GITHUB_TOKEN 對 stock-app 有 Contents: Read and write，"
+                    "再按『重新載入』取得完整遠端權威後重新勾選。"
+                )
             st.rerun()
 
         if clear_filter_clicked:
@@ -7254,7 +7290,14 @@ def main():
             if local_ok:
                 _save_state_df(new_df)
                 _reset_record_editor_for_bulk_delete(show_cols_mode, delete_ids=[], import_ids=[])
-                st.session_state[_k("last_delete_msg")] = f"已清空 {deleted_n} 筆並完成本機保存；遠端狀態請看同步明細。"
+                st.session_state[_k("last_delete_msg")] = (
+                    f"已清空 {deleted_n} 筆；" + ("遠端確認通過。" if st.session_state.get(_k("last_mutation_permanent_ok"), False)
+                                           else "僅本機暫存，未完成遠端確認！")
+                )
+            else:
+                st.session_state[_k("last_mutation_local_ok")] = False
+                st.session_state[_k("last_mutation_permanent_ok")] = False
+                st.session_state[_k("last_delete_msg")] = "H161清空未執行：遠端權威或權限未驗證；原始紀錄保留。請檢查儲存同步明細。"
             st.rerun()
 
     if active_tab == "🧠 股神決策":
