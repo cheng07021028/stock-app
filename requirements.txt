@@ -13,3 +13,8 @@ plotly>=5.20.0
 firebase-admin>=6.5.0
 google-cloud-firestore>=2.16.0
 google-cloud-storage>=2.16.0
+
+# H158: pandas.read_html fallback and TAIFEX legacy HTML tables
+lxml>=5.4,<7
+beautifulsoup4>=4.12,<5
+html5lib>=1.1,<2

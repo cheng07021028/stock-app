@@ -547,6 +547,11 @@ def _recommendation_final_gate(global_cfg: dict[str, Any], status: dict[str, Any
     except ValueError:
         return True, ""
     waiting: list[str] = []
+    # H158: the five market/authority dependencies remain hard SUCCESS gates;
+    # history/learning/remote-sync jobs are ordered advisory predecessors.
+    # After they have ACTUALLY attempted their final slot, their failure must
+    # remain a visible warning rather than block Page07 forever.
+    advisory: list[str] = []
     jobs_cfg = (global_cfg or {}).get("jobs") if isinstance((global_cfg or {}).get("jobs"), dict) else {}
     status_jobs = status.get("jobs") if isinstance(status.get("jobs"), dict) else {}
     for dep in order[:rec_index]:
@@ -562,15 +567,30 @@ def _recommendation_final_gate(global_cfg: dict[str, Any], status: dict[str, Any
             waiting.append(f"{label}（最後時段 {latest_slot.strftime('%H:%M')} 尚未到）")
             continue
         key = _run_key(dep, latest_slot)
-        if _already_done(status, key):
-            continue
         dep_state = status_jobs.get(dep) if isinstance(status_jobs.get(dep), dict) else {}
         last_status = str(dep_state.get("last_status") or "尚未完成")
         last_slot = str(dep_state.get("last_slot") or "")
+        # Success/warning completion keys are authoritative only for this slot.
+        if _already_done(status, key):
+            if dep not in H155_REQUIRED_REFRESH_JOBS and last_status == "WARNING" and last_slot == latest_slot.strftime("%Y-%m-%d %H:%M"):
+                advisory.append(f"{label}(WARNING)")
+            continue
+        # A fresh, attempted failure is not the same as never running.  Do not
+        # let failed historical GitHub/Firestore sync permanently suppress a
+        # fully verified five-source stock study.  Retain the warning and H126.
+        attempted_this_slot = (
+            last_slot == latest_slot.strftime("%Y-%m-%d %H:%M")
+            and str(dep_state.get("last_run_at") or "")[:10] == now.strftime("%Y-%m-%d")
+        )
+        if dep not in H155_REQUIRED_REFRESH_JOBS and attempted_this_slot and last_status in {"FAILED", "BLOCKED"}:
+            advisory.append(f"{label}({last_status})")
+            continue
         suffix = f"{last_status} {last_slot}".strip()
         waiting.append(f"{label}（{latest_slot.strftime('%H:%M')} 最終時段未完成；{suffix}）")
     if waiting:
         return False, "H28最終推薦閘門等待：" + "、".join(waiting)
+    if advisory:
+        return True, "H158研究前置非核心工作未完全成功，07僅能標記警示並保留交易授權規則：" + "、".join(advisory)
     return True, ""
 
 
@@ -950,6 +970,7 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
                     "slot":slot.strftime("%Y-%m-%d %H:%M"),"started_at":now_text(now) if simulate else now_text(),
                     **_progress_counts,
                 })
+                _h158_advisory_warning = ""
                 if strict_same_run and job=="godpick_recommendation":
                     # A complete H156 manual batch proves its own dependencies;
                     # stale/missing earlier-day status never substitutes for it.
@@ -960,6 +981,8 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
                     deps_ok,deps_msg=_dependency_check(job_cfg,status,now)
                 if deps_ok:
                     deps_ok,deps_msg=_recommendation_final_gate(cfg,status,now,job,force=force_all_enabled)
+                    if deps_ok and job == "godpick_recommendation":
+                        _h158_advisory_warning = str(deps_msg or "")
                 started=now_text(now) if simulate else now_text()
                 if not deps_ok:
                     result={"ok":False,"blocked":True,"message":deps_msg,"finished_at":now_text(now) if simulate else now_text()}
@@ -975,6 +998,12 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
                     result={"ok":True,"simulated":True,"message":"模擬：到期且前置條件已通過，未實際執行。","finished_at":now_text(now)}
                 else:
                     result=_execute_one(job,job_cfg,cfg)
+                if _h158_advisory_warning and result.get("ok") and not simulate:
+                    result["warning"] = True
+                    result["message"] = str(result.get("message") or "") + "｜" + _h158_advisory_warning
+                    result.setdefault("details", {})
+                    if isinstance(result["details"], dict):
+                        result["details"]["h158_advisory_predecessors"] = _h158_advisory_warning
                 row={
                     "batch_id":batch_id,"batch_mode":manual_batch_mode or ("force_all" if force_all_enabled else "scheduled"),
                     "run_key":key,"job":job,"job_label":JOB_LABELS.get(job,job),"slot":slot.strftime("%Y-%m-%d %H:%M"),
@@ -1187,6 +1216,9 @@ def next_run_rows(settings:dict[str,Any]|None=None,status:dict[str,Any]|None=Non
     active_age=None if progress_dt is None else max(0.0,(now-progress_dt).total_seconds()/60.0)
     live_active=bool(active_pending) and (active_age is None or active_age<=70)
     configured_order=_ordered_job_keys(cfg)
+    # H158: Page17 must not show Saturday/Sunday slots as "overdue" when the
+    # actual central worker correctly returned SKIPPED_WEEKEND.
+    trading_day_today = bool(not cfg.get("weekdays_only", True) or now.weekday() < 5)
 
     for job in configured_order:
         jc=(cfg.get("jobs") or {}).get(job) or {}
@@ -1196,7 +1228,7 @@ def next_run_rows(settings:dict[str,Any]|None=None,status:dict[str,Any]|None=Non
         latest_past=max(past) if past else None
         overdue=False
         overdue_slot=None
-        if bool(jc.get("enabled")) and latest_past is not None:
+        if bool(jc.get("enabled")) and trading_day_today and latest_past is not None:
             key=_run_key(job,latest_past)
             if key not in completed and (catch_up or now<=latest_past+timedelta(minutes=grace)):
                 overdue=True; overdue_slot=latest_past
@@ -1210,7 +1242,7 @@ def next_run_rows(settings:dict[str,Any]|None=None,status:dict[str,Any]|None=Non
         nxt=min(candidates) if candidates else None
         js=(status.get("jobs",{}) or {}).get(job,{})
         next_text=now_text(overdue_slot)+"（到期待執行/補跑）" if overdue and overdue_slot else (now_text(nxt) if nxt else "—")
-        due_state=("到期待執行" if overdue_slot and now<=overdue_slot+timedelta(minutes=grace) else "漏點待補跑") if overdue else "等待下次時段"
+        due_state=("到期待執行" if overdue_slot and now<=overdue_slot+timedelta(minutes=grace) else "漏點待補跑") if overdue else ("非交易日暫停（下個工作日）" if not trading_day_today else "等待下次時段")
         batch_order=""
         if job in active_planned:
             try: batch_order=f"{active_planned.index(job)+1}/{len(active_planned)}"

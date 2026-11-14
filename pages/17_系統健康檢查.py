@@ -75,7 +75,7 @@ st.set_page_config(page_title="17_系統健康檢查", layout="wide")
 inject_pro_theme()
 
 st.title("17_系統健康檢查 / 全模組一鍵更新中心")
-st.caption("V191-H156｜中央 worker 真正執行：核心6項完整更新／全模組更新分流、固定前置次序、本輪批次身分與資料成功驗證；保留 H155、H71、H39 及既有所有功能。")
+st.caption("V191-H158｜SuperAI期交所官方資料／08永久同步確認／非核心歷史阻擋／假日到期狀態修復；H156 中央 worker 真正執行：核心6項完整更新／全模組更新分流、固定前置次序、本輪批次身分與資料成功驗證；保留 H155、H71、H39 及既有所有功能。")
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +117,24 @@ if callable(load_auto_scheduler_settings):
         _last_wakeup_text = str((_auto_status or {}).get("last_wakeup_at") or "")
         _m4.metric("最後喚醒", _last_wakeup_text or "尚未執行")
         _m5.metric("喚醒來源", str((_auto_status or {}).get("last_wakeup_source") or "未標記"))
+        # H158: central heartbeat success is NOT the same as completed Page07.
+        # Surface the last authoritative per-job result without rewriting history.
+        _h158_jobs = (_auto_status.get("jobs") or {}) if isinstance(_auto_status, dict) else {}
+        _h158_recommend = (_h158_jobs.get("godpick_recommendation") or {}) if isinstance(_h158_jobs, dict) else {}
+        _h158_super = (_h158_jobs.get("super_ai_context") or {}) if isinstance(_h158_jobs, dict) else {}
+        _h158_perf = (_h158_jobs.get("record_performance") or {}) if isinstance(_h158_jobs, dict) else {}
+        if _h158_recommend.get("last_status") in {"BLOCKED", "FAILED"}:
+            st.error(
+                "07 股神推薦尚未完成：" + str(_h158_recommend.get("last_message") or "原因待查")
+                + "｜最近成功：" + str(_h158_recommend.get("last_success_at") or "無可驗證成功紀錄")
+                + "。排程喚醒成功不等於股神選股成功。"
+            )
+        if _h158_super.get("last_status") in {"WARNING", "FAILED"}:
+            st.warning("17 SuperAI 最近未完整更新：" + str(_h158_super.get("last_message") or "來源未驗證")
+                       + "。H158 優先使用期交所官方 OpenAPI（PCR／外資臺指期淨未平倉），不捏造缺漏數值。")
+        if _h158_perf.get("last_status") == "FAILED":
+            st.warning("08 推薦績效最近永久同步未確認：" + str(_h158_perf.get("last_message") or "待查")
+                       + "。H158 會要求當次遠端確認；未確認的資料不會被標為成功。")
         _last_wakeup_result = str((_auto_status or {}).get("last_wakeup_result") or "").strip()
         _last_wakeup_message = str((_auto_status or {}).get("last_wakeup_message") or "").strip()
         _last_wakeup_run_id = str((_auto_status or {}).get("last_wakeup_run_id") or "").strip()

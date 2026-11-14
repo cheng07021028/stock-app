@@ -147,17 +147,22 @@ def task_super_ai_context(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     try:
         from godpick_super_ai_market_context import refresh_super_ai_market_context
         payload, diagnostics = refresh_super_ai_market_context(fetch_etf=bool(cfg.get("fetch_etf", True)))
-        has_margin = bool((payload or {}).get("margin_by_stock"))
-        has_taifex = bool((payload or {}).get("taifex"))
-        # H156: previously `margin OR taifex` returned a false green SUCCESS.
-        # Partial provider data is preserved for research, but must not authorize
-        # a full same-batch recommendation. ETF is advisory (not a hard gate).
+        from godpick_h158_taifex_openapi import complete as _taifex_verified
+        from godpick_super_ai_market_context import _last_completed_trade_date
+        margin_count = len((payload or {}).get("margin_by_stock") or {})
+        market_margin = (payload or {}).get("market_margin") or {}
+        margin_date = str(market_margin.get("TWSE融資券資料日期") or "")
+        expected_margin = _last_completed_trade_date().strftime("%Y-%m-%d")
+        # H158: an HTTP 200 or nonempty map is not freshness proof.  Pre-21:30
+        # the latest completed margin session can legitimately be the prior day.
+        has_margin = margin_count >= 100 and margin_date >= expected_margin
+        has_taifex = _taifex_verified((payload or {}).get("taifex") or {})
         complete = has_margin and has_taifex
-        partial = has_margin or has_taifex
+        partial = margin_count > 0 or bool((payload or {}).get("taifex"))
         msg = ("SuperAI融資券與期貨/PCR情境完整更新" if complete else
                "SuperAI資料僅部分可用：融資券/期貨缺一，不得視為完整更新" if partial else
                "SuperAI融資券與期貨/PCR來源皆無有效資料")
-        return _report(partial, msg, details={"diagnostics": diagnostics[-30:], "margin_count": len((payload or {}).get("margin_by_stock", {})), "taifex": (payload or {}).get("taifex", {}), "etf": (payload or {}).get("etf", {}), "complete": complete}, changed_files=["super_ai_market_context.json"] if partial else [], started=t0, warning=not complete and partial)
+        return _report(partial, msg, details={"diagnostics": diagnostics[-30:], "margin_count": margin_count, "margin_date": margin_date, "expected_margin_date": expected_margin, "taifex": (payload or {}).get("taifex", {}), "etf": (payload or {}).get("etf", {}), "complete": complete}, changed_files=["super_ai_market_context.json"] if partial else [], started=t0, warning=not complete and partial)
     except Exception as exc:
         return _report(False, f"SuperAI市場情境更新失敗：{type(exc).__name__}: {exc}", started=t0)
 
@@ -274,10 +279,25 @@ def task_record_performance(cfg: dict[str, Any] | None = None) -> dict[str, Any]
             process_all=bool(cfg.get("process_all", True)),
         )
         rows, load_msgs, _ = _ensure_records_authority_safe()
-        report = save_records_sync_fast(rows or authority_rows, reason="V191-H3 scheduled Page8 performance + save sync")
+        # H158: background GitHub "queued" is NOT a verified permanent write.
+        # Under Actions, request synchronous remote confirmation when Firestore
+        # did not confirm, instead of re-running all historical calculations
+        # every 10 minutes while the independent H7 outbox eventually succeeds.
+        report = save_records_sync_fast(
+            rows or authority_rows,
+            reason="V191-H158 scheduled Page8 performance + verified save sync",
+            require_remote_confirm=True,
+        )
         persist_ok = bool(getattr(report, "permanent_ok", False))
-        ok = bool((result or {}).get("ok", True) and persist_ok)
-        return _report(ok, f"推薦後績效更新完成；推薦紀錄永久同步 {'成功' if persist_ok else '失敗'}", details={"performance": result, "authority_messages": authority_msgs[-20:], "authority_restored": authority_restored, "load_messages": load_msgs[-10:], "persistence": getattr(report, "__dict__", str(report))}, changed_files=["godpick_records.json", "godpick_recommend_list.json", "godpick_latest_recommendations.json", "godpick_calibration_samples.json"], started=t0)
+        perf_ok = bool((result or {}).get("ok", True))
+        ok = bool(perf_ok and persist_ok)
+        pending = bool(getattr(report, "github_pending", False))
+        failure_hint = (str(getattr(report, "firestore_message", "") or "") + "｜" +
+                        str(getattr(report, "github_message", "") or ""))[:650]
+        msg = ("推薦後績效更新完成；推薦紀錄永久同步成功（遠端已確認）" if ok else
+               "推薦後績效計算完成，但永久同步未確認（保留資料，待H7重試）：" + failure_hint if perf_ok else
+               "推薦後績效計算未通過；不宣稱同步完成")
+        return _report(ok, msg, details={"performance": result, "authority_messages": authority_msgs[-20:], "authority_restored": authority_restored, "load_messages": load_msgs[-10:], "persistence": getattr(report, "__dict__", str(report)), "github_pending": pending}, changed_files=["godpick_records.json", "godpick_recommend_list.json", "godpick_latest_recommendations.json", "godpick_calibration_samples.json"], started=t0)
     except Exception as exc:
         return _report(False, f"推薦後績效/儲存同步失敗：{type(exc).__name__}: {exc}", started=t0)
 

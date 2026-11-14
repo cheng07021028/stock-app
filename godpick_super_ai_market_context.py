@@ -221,6 +221,12 @@ def _flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def fetch_taifex_context(*, timeout: int = 12) -> tuple[dict[str, Any], list[str]]:
+    # H158: official schema-controlled OpenAPI before the legacy HTML/Excel parser.
+    # Legacy data is research-only: positional HTML columns must not certify OI.
+    from godpick_h158_taifex_openapi import fetch_taifex_openapi, complete
+    api_result, api_diag = fetch_taifex_openapi(timeout=timeout)
+    if complete(api_result):
+        return api_result, api_diag
     result: dict[str, Any] = {}
     diag: list[str] = []
     try:
@@ -260,7 +266,15 @@ def fetch_taifex_context(*, timeout: int = 12) -> tuple[dict[str, Any], list[str
         diag.append("TAIFEX futures OK" if found else "TAIFEX futures row not found")
     except Exception as exc:
         diag.append(f"TAIFEX futures failed: {exc}")
-    return result, diag
+    # H158: do not let the old positional guess impersonate official TX net OI.
+    # The source remains visible only as unverified fallback context.
+    if result:
+        diag.append("舊版 HTML/Excel 備援屬研究線索，非正式TAIFEX認證來源")
+        result["來源"] = "TAIFEX_LEGACY_UNVERIFIED"
+    if api_result:
+        api_result.update({k: v for k, v in result.items() if k not in api_result and k not in {"來源", "外資臺指期未平倉淨口數"}})
+        return api_result, api_diag + diag
+    return result, api_diag + diag
 
 
 def _history_score(df: pd.DataFrame) -> dict[str, Any]:
@@ -327,8 +341,8 @@ def refresh_super_ai_market_context(*, fetch_etf: bool = False) -> tuple[dict[st
         "provenance": {
             "TWSE融資融券": TWSE_MARGIN_URL,
             "TPEx融資融券": TPEX_MARGIN_URL,
-            "TAIFEX期貨": TAIFEX_FUT_URL,
-            "TAIFEX_PCR": TAIFEX_PC_URL,
+            "TAIFEX期貨": "https://openapi.taifex.com.tw/v1/MarketDataOfMajorInstitutionalTradersDetailsOfFuturesContractsBytheDate",
+            "TAIFEX_PCR": "https://openapi.taifex.com.tw/v1/PutCallRatio",
             "ETF": "TWSE/TPEx price history via existing history service",
         },
     }

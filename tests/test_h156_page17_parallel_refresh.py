@@ -131,8 +131,13 @@ def test_full_batch_recommendation_must_wait_every_predecessor():
 
 def test_super_ai_partial_not_green(monkeypatch):
     import godpick_auto_update_tasks as tasks
-    fake = types.SimpleNamespace(refresh_super_ai_market_context=lambda fetch_etf: (
-        {"margin_by_stock": {"2330": {"x": 1}}, "taifex": {}, "etf": {}}, ["TAIFEX failed"]))
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    fake = types.SimpleNamespace(
+        refresh_super_ai_market_context=lambda fetch_etf: (
+            {"margin_by_stock": {"2330": {"x": 1}}, "taifex": {}, "etf": {}}, ["TAIFEX failed"]),
+        _last_completed_trade_date=lambda: datetime.now(ZoneInfo("Asia/Taipei")),
+    )
     monkeypatch.setitem(sys.modules, "godpick_super_ai_market_context", fake)
     res = tasks.task_super_ai_context({"fetch_etf": True})
     assert res["ok"] and res["warning"] and not res["details"]["complete"]
@@ -140,8 +145,19 @@ def test_super_ai_partial_not_green(monkeypatch):
 
 def test_super_ai_complete_success(monkeypatch):
     import godpick_auto_update_tasks as tasks
-    fake = types.SimpleNamespace(refresh_super_ai_market_context=lambda fetch_etf: (
-        {"margin_by_stock": {"2330": {}}, "taifex": {"PCR": 99.0}, "etf": {}}, ["OK"]))
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    day = datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d")
+    fake = types.SimpleNamespace(
+        refresh_super_ai_market_context=lambda fetch_etf: (
+            {"margin_by_stock": {str(i): {} for i in range(1000, 1150)},
+             "market_margin": {"TWSE融資券資料日期": day},
+             "taifex": {"PCR成交量比%": 99.0, "PCR未平倉量比%": 67.0,
+                        "外資臺指期未平倉淨口數": -4000,
+                        "TAIFEX_PCR資料日期": day, "TAIFEX期貨資料日期": day,
+                        "來源": "TAIFEX_OPENAPI_VERIFIED"}, "etf": {}}, ["OK"]),
+        _last_completed_trade_date=lambda: datetime.now(ZoneInfo("Asia/Taipei")),
+    )
     monkeypatch.setitem(sys.modules, "godpick_super_ai_market_context", fake)
     res = tasks.task_super_ai_context({})
     assert res["ok"] and not res["warning"] and res["details"]["complete"]
@@ -149,8 +165,13 @@ def test_super_ai_complete_success(monkeypatch):
 
 def test_super_ai_both_missing_failed(monkeypatch):
     import godpick_auto_update_tasks as tasks
-    fake = types.SimpleNamespace(refresh_super_ai_market_context=lambda fetch_etf: (
-        {"margin_by_stock": {}, "taifex": {}, "etf": {}}, ["failed"]))
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    fake = types.SimpleNamespace(
+        refresh_super_ai_market_context=lambda fetch_etf: (
+            {"margin_by_stock": {}, "taifex": {}, "etf": {}}, ["failed"]),
+        _last_completed_trade_date=lambda: datetime.now(ZoneInfo("Asia/Taipei")),
+    )
     monkeypatch.setitem(sys.modules, "godpick_super_ai_market_context", fake)
     res = tasks.task_super_ai_context({})
     assert not res["ok"] and not res["warning"]
