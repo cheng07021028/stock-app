@@ -118,3 +118,14 @@ jobs:
             echo "Operational truth remains in Page17 / runtime-data heartbeat and scheduler history."
           } >> "$GITHUB_STEP_SUMMARY"
           echo "V191-H33 wake completed; operational failures remain diagnostic, workflow stays green to suppress routine Actions failure mail."
+
+      # H159: explicit manual requests must show a truthful GitHub Actions
+      # verdict, while every 10-minute unattended wake keeps H33 soft-fail.
+      - name: H159 explicit manual batch truth (routine wakes unaffected)
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && github.event.inputs.manual_job != '' }}
+        env:
+          H159_EXPECTED_RUN_ID: ${{ github.run_id }}
+          H159_MANUAL_JOB: ${{ github.event.inputs.manual_job }}
+          H159_REMOTE_VERIFIER_OUTCOME: ${{ steps.verify.outcome }}
+        shell: bash
+        run: python tools/h159_manual_verdict.py
