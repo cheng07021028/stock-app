@@ -83,11 +83,13 @@ def _named_rows(ranked: Any, watch: Any, research: Any, h126_buyable: int, resea
         c=_code(r.get('股票代號'))
         if not c or c in seen: continue
         seen.add(c);valid.append(r)
-    # Input rank order is already evidence-ranked by H153. Maintain competition
-    # ranks and only use code as stable display order, never as new score.
-    valid.sort(key=lambda r:(float(_text(r.get('研究排名'))) if _text(r.get('研究排名')).replace('.','',1).isdigit() else math.inf,
-                             -float(_text(r.get('研究證據分'))) if _text(r.get('研究證據分')).replace('.','',1).isdigit() else 0,
-                             _code(r.get('股票代號'))))
+    # H160: H153.9 has ALREADY sorted equal competition ranks using its
+    # visible adjusted H154 score and tie-breaker. Re-sorting equal ranks by
+    # raw H153 scores here changes the 00 workbook order while 01/03 retain
+    # the canonical same-run order, causing a false H154 export rejection.
+    # Python's sort is stable: normalize rank order only, keeping exact source
+    # sequence *within each competition rank*, including adjustment ties.
+    valid.sort(key=lambda r:(float(_text(r.get('研究排名'))) if _text(r.get('研究排名')).replace('.','',1).isdigit() else math.inf))
     w=[];seen_w=set()
     for r in _records(watch):
         c=_code(r.get('股票代號'))

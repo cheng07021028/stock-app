@@ -132,7 +132,17 @@ def verify_final_xlsx(wb,audit:dict):
             scores.append(str(manager.cell(r,5).value or ''))
     expected=audit['ranked_codes']
     if codes!=expected:
-        raise ValueError(f'H154主管研究與實際本輪排名不同：00={codes[:8]} 來源={expected[:8]}')
+        # H160: first eight can agree while a tie farther down was reordered.
+        # Preserve the strict same-run fail-closed gate, but locate the exact
+        # discrepancy so the operator can distinguish sorting from missing rows.
+        position=next((i for i,(left,right) in enumerate(zip(codes,expected))
+                       if left!=right),min(len(codes),len(expected)))
+        left=codes[position] if position<len(codes) else '缺項'
+        right=expected[position] if position<len(expected) else '缺項'
+        raise ValueError(
+            f'H154主管研究與實際本輪排名不同：首次差異第{position+1}檔 '
+            f'00={left} 來源={right}；00共{len(codes)}檔／來源共{len(expected)}檔。'
+            ' 請檢查同名次內H154排序分／輸出時是否重排，不得跳過對帳。')
     headers=[c.value for c in research[1]]
     for field in ('研究排名','股票代號','研究證據分'):
         if field not in headers:raise ValueError('H154研究表缺少：'+field)

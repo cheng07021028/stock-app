@@ -52,7 +52,10 @@ def _config(provided_secrets: Mapping[str, Any] | None = None) -> dict[str, str]
         "token": get("GITHUB_TOKEN"),
         "owner": get("GITHUB_REPO_OWNER", "cheng07021028"),
         "repo": get("GITHUB_REPO_NAME", "stock-app"),
-        "branch": get("GITHUB_RUNTIME_DATA_BRANCH") or get("GITHUB_REPO_BRANCH", "runtime-data"),
+        # H160: scan-setting authority lives ONLY on runtime-data.  The
+        # generic GITHUB_REPO_BRANCH may point at main (app code) and must not
+        # redirect permanent settings to the wrong branch.
+        "branch": get("GITHUB_RUNTIME_DATA_BRANCH") or "runtime-data",
     }
 
 
@@ -62,24 +65,43 @@ def _url(cfg: Mapping[str, str]) -> str:
 
 
 def _headers(cfg: Mapping[str, str]) -> dict[str, str]:
-    return {
+    headers = {
         "Accept": "application/vnd.github+json",
-        "Authorization": f"Bearer {cfg['token']}",
         "X-GitHub-Api-Version": "2022-11-28",
     }
+    # A public repository can be READ without a token. Never send Bearer "".
+    if cfg.get("token"):
+        headers["Authorization"] = f"Bearer {cfg['token']}"
+    return headers
+
+
+def _github_failure(code: int, cfg: Mapping[str, str], *, writing: bool) -> str:
+    if code == 401:
+        return "GitHub HTTP 401：GITHUB_TOKEN 無效或過期；請更新 Streamlit Cloud Secrets"
+    if code == 403:
+        return ("GitHub HTTP 403：可能缺少儲存庫 Contents: Read and write 權限、"
+                "分支寫入受保護或觸及API限制；Page17 Actions:Write 不等於設定保存權限"
+                if writing else
+                "GitHub HTTP 403：Token讀取權限不足或API被限流；請檢查 Contents: Read")
+    if code == 404:
+        return (f"GitHub HTTP 404：請檢查 {cfg['owner']}/{cfg['repo']} 的"
+                f" {cfg['branch']} 分支及Token可見性；不得改寫 main 代替 runtime-data")
+    if code == 422 and writing:
+        return "GitHub HTTP 422：可能為 SHA 並行衝突或資料格式拒絕；請查看排程與設定保存明細"
+    return f"GitHub HTTP {code}：{'保存' if writing else '讀取'}未完成"
 
 
 def _remote_get(cfg: dict[str, str], transport=requests) -> tuple[int, dict[str, Any], str, str]:
     """HTTP status, document, blob sha, error (never exposes credentials)."""
-    if not cfg.get("token"):
-        return 0, {}, "", "未設定 GITHUB_TOKEN，無法驗證跨 Reboot 永久保存"
+    # H160: read-only verification of a public repository does not need a
+    # token.  A missing token still MUST fail every remote WRITE, below.
     try:
         import base64
         r = transport.get(_url(cfg), headers=_headers(cfg), params={"ref": cfg["branch"]}, timeout=12)
         if r.status_code == 404:
             return 404, {}, "", "遠端尚未建立 H111 設定"
         if r.status_code != 200:
-            return r.status_code, {}, "", f"GitHub 讀取失敗 HTTP {r.status_code}"
+            return r.status_code, {}, "", _github_failure(r.status_code, cfg, writing=False)
         raw = r.json()
         if not isinstance(raw, dict) or not raw.get("content"):
             return 422, {}, "", "GitHub 設定缺少檔案內容"
@@ -144,7 +166,10 @@ def save_scan_settings(settings: dict[str, Any], *, project_root: str | Path,
         return AuthorityResult(False, {}, "none", "拒絕保存空白或格式錯誤的推薦設定")
     cfg = _config(provided_secrets)
     if not cfg["token"]:
-        return AuthorityResult(False, copy.deepcopy(settings), "local_unverified", "永久保存失敗：未設定 GITHUB_TOKEN；沒有把暫存寫入當成成功")
+        return AuthorityResult(False, copy.deepcopy(settings), "local_unverified",
+            "永久保存失敗：Streamlit Cloud Secrets 未設定 GITHUB_TOKEN。"
+            "需要存取 stock-app/runtime-data 的 Contents: Read and write 權限；"
+            "原有 Page17 Actions: Write 無法代替設定寫入；暫存不是成功。")
     document = {
         "schema": SCHEMA,
         "revision": secure_random.token_hex(12),
@@ -171,7 +196,8 @@ def save_scan_settings(settings: dict[str, Any], *, project_root: str | Path,
         if r.status_code in (409, 422) and attempt < 2:
             continue  # Concurrent update; re-read SHA, never overwrite blindly.
         if r.status_code not in (200, 201):
-            return AuthorityResult(False, copy.deepcopy(settings), "remote_error", f"永久保存失敗：GitHub HTTP {r.status_code}")
+            return AuthorityResult(False, copy.deepcopy(settings), "remote_error",
+                "永久保存失敗：" + _github_failure(r.status_code, cfg, writing=True))
         # A queued task / a success HTTP code is not enough. Verify readback.
         for _ in range(3):
             code2, got, _sha2, _msg2 = _remote_get(cfg, transport)
