@@ -28,6 +28,12 @@ from typing import Any, Iterable
 import pandas as pd
 import requests
 import streamlit as st
+from godpick_h163_firestore_quota_guard import firestore_read_guard as _H163_FS_GUARD
+
+
+def get_firestore_read_guard_status() -> dict[str, Any]:
+    """Safe, non-credential Page08 diagnostics; does not touch the network."""
+    return _H163_FS_GUARD.status()
 
 try:
     import firebase_admin
@@ -681,17 +687,58 @@ def ensure_records_local_authority_current() -> tuple[list[dict[str, Any]], list
 
         remote_rows: list[dict[str, Any]] = []
         remote_state: dict[str, Any] = dict(newest_state or {})
+        _h163_gh_hash = _safe_str(remote_state.get("payload_hash")) if source == "github" else ""
+        _h163_gh_count = int(remote_state.get("count") or 0) if source == "github" else 0
+        _h163_firestore_twin = next((dict(item[1] or {}) for item in candidates if (
+            item[0] == "firestore" and _h163_gh_hash and
+            _safe_str((item[1] or {}).get("payload_hash")) == _h163_gh_hash and
+            int((item[1] or {}).get("count") or 0) == _h163_gh_count)), None)
         if source == "firestore":
-            fs_rows, fs_full_msg, _, fs_full_state = _read_records_firestore_full()
-            details.append(f"Firestore完整資料：{fs_full_msg}")
-            remote_rows = records_as_rows_exact(fs_rows)
-            if isinstance(fs_full_state, dict) and fs_full_state:
-                remote_state.update(fs_full_state)
-        elif source == "github":
+            # H163: a valid canonical local snapshot with the SAME remote hash
+            # is already the full authority. Streaming 2,632 Firestore documents
+            # on every rerun cannot add evidence and consumes read quota.
+            fs_hash = _safe_str(remote_state.get("payload_hash"))
+            fs_count = int(remote_state.get("count") or 0)
+            if local_valid and fs_hash and fs_hash == local_hash and fs_count == len(local_rows):
+                details.append(f"H163 Firestore摘要與本機 {len(local_rows)} 筆同Hash；略過整個Collection讀取")
+                return local_rows, details + [f"權威來源：local/Firestore同Hash｜{len(local_rows)}筆"], False
+            # If BOTH remote sources certify the identical hash/count, prefer
+            # H127 GitHub compressed snapshot over thousands of billed reads.
+            gh_twin = next((item for item in candidates if (
+                item[0] == "github" and fs_hash and
+                _safe_str((item[1] or {}).get("payload_hash")) == fs_hash and
+                int((item[1] or {}).get("count") or 0) == fs_count)), None)
+            if gh_twin is not None:
+                _h163_firestore_twin = dict(remote_state)
+                source, newest_state, newest_fallback, newest_rows_hint = gh_twin
+                remote_state = dict(newest_state or {})
+                details.append("H163 GitHub和Firestore摘要同Hash，改由H127 GitHub權威完整讀取，避免Firestore全表計費")
+            else:
+                fs_key = f"{fs_hash}:{fs_count}:{_safe_str(remote_state.get('revision'))}"
+                fs_rows, fs_full_msg, _, fs_full_state = _read_records_firestore_full(snapshot_key=fs_key)
+                details.append(f"Firestore完整資料：{fs_full_msg}")
+                remote_rows = records_as_rows_exact(fs_rows)
+                if isinstance(fs_full_state, dict) and fs_full_state:
+                    remote_state.update(fs_full_state)
+        if source == "github":
             gh_path = _secret("GODPICK_RECORDS_GITHUB_PATH", RECORDS_FILE) or RECORDS_FILE
             gh_payload, gh_msg = read_github_json(gh_path, [])
             details.append(f"GitHub完整資料：{gh_msg}")
             remote_rows = records_as_rows_exact(gh_payload)
+            if not remote_rows and _h163_firestore_twin:
+                # GitHub state and FS summary certify the same hash, but H127
+                # content is unreadable. One quota-bounded Firestore read is
+                # justified to avoid losing legitimate remote recovery.
+                _fs_same_hash = _safe_str(_h163_firestore_twin.get("payload_hash"))
+                _fs_key = f"{_fs_same_hash}:{int(_h163_firestore_twin.get('count') or 0)}:{_safe_str(_h163_firestore_twin.get('revision'))}"
+                recovered_fs, recovered_msg, _, recovered_state = _read_records_firestore_full(snapshot_key=_fs_key)
+                details.append(f"H163 GitHub快照不可讀時的Firestore安全備援：{recovered_msg}")
+                if recovered_fs:
+                    source = "firestore"
+                    remote_state = dict(_h163_firestore_twin)
+                    if isinstance(recovered_state, dict):
+                        remote_state.update(recovered_state)
+                    remote_rows = records_as_rows_exact(recovered_fs)
 
         if not remote_rows:
             details.append(f"遠端 {source} 摘要較新，但完整資料為空；保留本機，不做回退。")
@@ -1460,6 +1507,11 @@ def firebase_configured() -> bool:
 
 
 def _init_firebase_app():
+    # H163: one exhausted Cloud quota must not turn each Streamlit rerun into
+    # another failed Firestore request; callers safely fall back to GitHub.
+    _quota_note = _H163_FS_GUARD.quota_reason()
+    if _quota_note:
+        raise RuntimeError(_quota_note)
     if firebase_admin is None or credentials is None or firestore is None:
         raise RuntimeError("firebase-admin 未安裝或不可用")
     try:
@@ -1578,6 +1630,7 @@ def _read_watchlist_firestore_full() -> tuple[dict[str, list[dict[str, str]]], s
             }
         return normalized, "已讀取 Firestore watchlists（相容模式）", latest, state
     except Exception as exc:
+        _H163_FS_GUARD.note_error(exc, "watchlist_read")
         return {}, f"Firestore watchlist 讀取失敗：{exc}", datetime.min, {}
 
 
@@ -1641,6 +1694,7 @@ def write_watchlist_firestore(payload: dict[str, list[dict[str, str]]], state: d
             return False, "Firestore watchlist 快照回讀驗證不一致"
         return True, "Firestore watchlist 完整快照與群組明細寫入並回讀驗證"
     except Exception as exc:
+        _H163_FS_GUARD.note_error(exc, "watchlist_write")
         return False, f"Firestore watchlist 寫入失敗：{exc}"
 
 @dataclass
@@ -1896,9 +1950,17 @@ def normalize_records(payload: Any) -> list[dict[str, Any]]:
     )
 
 
-def _read_records_firestore_full() -> tuple[list[dict[str, Any]], str, datetime, dict[str, Any]]:
+def _read_records_firestore_full(*, snapshot_key: str = "") -> tuple[list[dict[str, Any]], str, datetime, dict[str, Any]]:
     if not firebase_configured():
         return [], "Firebase 未設定", datetime.min, {}
+    # H163: explicit, bounded full reload only. Never bypass the quota fuse.
+    _quota_msg = _H163_FS_GUARD.quota_reason()
+    if _quota_msg:
+        return [], _quota_msg, datetime.min, {}
+    _full_key = snapshot_key or "legacy_full_without_summary"
+    _failed_cooldown = _H163_FS_GUARD.full_read_blocked(_full_key)
+    if _failed_cooldown:
+        return [], _failed_cooldown, datetime.min, {}
     try:
         _init_firebase_app()
         db = firestore.client()
@@ -1928,11 +1990,18 @@ def _read_records_firestore_full() -> tuple[list[dict[str, Any]], str, datetime,
             state["summary_payload_hash"] = state.get("payload_hash")
         # The fully streamed collection is authoritative for its own hash/count/date;
         # a legacy or partially updated summary must not invalidate a successful reload.
+        _summary_claimed_rows = int(state.get("count") or 0)
         state["count"] = len(normalized_rows)
         state["latest_recommendation_date"] = _latest_record_recommendation_date(normalized_rows)
         state["payload_hash"] = _json_hash(normalized_rows)
-        return normalized_rows, "已讀取 Firestore godpick_records", latest, state
+        if not normalized_rows and _summary_claimed_rows > 0:
+            _H163_FS_GUARD.note_full_failure(_full_key)
+            return [], "H163 Firestore全表讀取結果為空且摘要非空，未確認權威", datetime.min, {}
+        _H163_FS_GUARD.note_full_success()
+        return normalized_rows, "已讀取 Firestore godpick_records（H163僅必要時全量）", latest, state
     except Exception as exc:
+        _H163_FS_GUARD.note_full_failure(_full_key)
+        _H163_FS_GUARD.note_error(exc, "godpick_records_full")
         return [], f"Firestore records 讀取失敗：{exc}", datetime.min, {}
 
 
@@ -1986,8 +2055,10 @@ def write_records_firestore(records: list[dict[str, Any]], state: dict[str, Any]
         summary_data = summary.to_dict() or {}
         if _safe_str(summary_data.get("payload_hash")) != state["payload_hash"]:
             return False, "Firestore records 摘要回讀驗證不一致"
+        _H163_FS_GUARD.note_summary(state)
         return True, f"Firestore records 分批寫入 {len(normalized)} 筆並驗證"
     except Exception as exc:
+        _H163_FS_GUARD.note_error(exc, "godpick_records_full_write")
         return False, f"Firestore records 寫入失敗：{exc}"
 
 
@@ -2192,19 +2263,27 @@ def _records_manifest(records: list[dict[str, Any]], payload_hash: str = "") -> 
 
 
 def _read_records_firestore_summary() -> tuple[dict[str, Any], str]:
-    """Read the small summary and repair legacy freshness metadata in memory."""
+    """H163: cheap hashed summary, bounded in-memory TTL and 429 circuit."""
     if not firebase_configured():
         return {}, "Firebase 未設定"
+    # Each Streamlit session is rerun often. Cache only metadata (never row
+    # contents) to avoid charging a document read on each eight-second rerun.
+    _quota_msg = _H163_FS_GUARD.quota_reason()
+    if _quota_msg:
+        return {}, _quota_msg
+    _cached = _H163_FS_GUARD.cached_summary()
+    if _cached is not None:
+        return _cached, "H163 Firestore小型權威摘要快取命中（90秒TTL），未連線讀取"
     try:
         _init_firebase_app()
         db = firestore.client()
         snap = db.collection("system").document("godpick_records_summary").get()
         data = (snap.to_dict() or {}) if snap.exists else {}
-        messages = ["已讀取 Firestore 推薦紀錄摘要"]
+        messages = ["H163 已讀取 Firestore 推薦紀錄小型摘要"]
 
         # Legacy writers stored only count/updated_at.  Query one newest record so
         # startup can still recognize that Firestore is newer than the 7/9 repo file.
-        if not _recommendation_date_text(data.get("latest_recommendation_date")):
+        if not _recommendation_date_text(data.get("latest_recommendation_date")) and int(data.get("count") or 0) > 0:
             try:
                 query_direction = getattr(getattr(firestore, "Query", None), "DESCENDING", "DESCENDING")
                 query = (
@@ -2230,8 +2309,10 @@ def _read_records_firestore_summary() -> tuple[dict[str, Any], str]:
                     data["updated_at_epoch"] = float(updated.timestamp())
             except Exception:
                 pass
+        _H163_FS_GUARD.note_summary(data)
         return data, "｜".join(messages)
     except Exception as exc:
+        _H163_FS_GUARD.note_error(exc, "godpick_records_summary")
         return {}, f"Firestore 摘要讀取失敗：{exc}"
 
 def load_records_github_sync_status() -> tuple[dict[str, Any], str]:
@@ -2331,12 +2412,14 @@ def write_records_firestore_mutation(
             if remaining:
                 return False, f"Firestore mutation 刪除回讀仍存在：{','.join(remaining[:10])}"
 
+        _H163_FS_GUARD.note_summary(state)
         mismatch_note = "｜已修復遠端摘要筆數落差" if count_mismatch else ""
         return True, (
             f"Firestore 增量同步完成：刪除 {len(delete_set)} 筆、"
             f"更新 {len(normalized_upserts)} 筆、目前 {normalized_count} 筆{mismatch_note}"
         )
     except Exception as exc:
+        _H163_FS_GUARD.note_error(exc, "godpick_records_incremental_write")
         return False, f"Firestore records 增量寫入失敗：{exc}"
 
 
@@ -2771,10 +2854,28 @@ def save_records_permanent(
     report.local_ok = bool(ok1 and ok2 and ok3)
     report.local_message = f"{msg1}｜{msg2}｜{msg3}"
 
-    # Firestore is written before the large GitHub file so one slow GitHub
-    # request cannot prevent the primary remote backup from completing.
-    fs_ok, fs_msg = write_records_firestore(records, state)
-    report.firestore_ok = fs_ok
+    # H163: full-save compatibility path MUST check the small FS summary.
+    # Previously an unchanged 2,632-row file triggered one full collection
+    # scan and thousands of writes even with an identical remote hash.
+    # This optimization never treats missing/429 summary as success.
+    if firebase_configured():
+        fs_head, fs_head_msg = _read_records_firestore_summary()
+        try:
+            fs_same = bool(
+                _safe_str((fs_head or {}).get("payload_hash")) == state["payload_hash"] and
+                int((fs_head or {}).get("count") or -1) == len(records)
+            )
+        except Exception:
+            fs_same = False
+        if fs_same:
+            fs_ok, fs_msg = True, f"H163 Firestore摘要同Hash/筆數，略過整份{len(records)}筆讀寫"
+        else:
+            fs_ok, fs_msg = write_records_firestore(records, state)
+            if not fs_ok:
+                fs_msg += f"｜摘要檢查：{fs_head_msg}"
+    else:
+        fs_ok, fs_msg = False, "Firestore 未設定"
+    report.firestore_ok = bool(fs_ok)
     report.firestore_message = fs_msg
 
     gh_ok, gh_msg = _sync_records_github_snapshot_v191_h8(records, state, reason)
@@ -2882,7 +2983,26 @@ def load_records_permanent() -> tuple[list[dict[str, Any]], list[str]]:
     gh_payload, gh_msg = read_github_json(gh_path, [])
     gh_state, gh_state_msg = read_github_json(RECORDS_STATE_FILE, {})
 
-    fs_payload, fs_msg, fs_mtime, fs_state = _read_records_firestore_full()
+    fs_payload: list[dict[str, Any]] = []
+    fs_msg = "H163未執行不必要的Firestore全量讀取"
+    fs_mtime = datetime.min
+    fs_state: dict[str, Any] = {}
+    if firebase_configured():
+        _fss, _fsm = _read_records_firestore_summary()
+        _fsh = _safe_str((_fss or {}).get("payload_hash"))
+        _fsc = int((_fss or {}).get("count") or 0)
+        _local_exact = records_as_rows_exact(local_payload)
+        _gh_exact = records_as_rows_exact(gh_payload)
+        _already_verified = bool(_fsh and (
+            (_fsh == _json_hash(_local_exact) and _fsc == len(_local_exact)) or
+            (_fsh == _json_hash(_gh_exact) and _fsc == len(_gh_exact))))
+        if _already_verified:
+            fs_msg = "H163 Firestore摘要Hash與本機/GitHub相同，省略全表讀取"
+        elif _fss or (not _local_exact and not _gh_exact and not _H163_FS_GUARD.quota_reason()):
+            _fskey = f"{_fsh}:{_fsc}:{_safe_str((_fss or {}).get('revision'))}"
+            fs_payload, fs_msg, fs_mtime, fs_state = _read_records_firestore_full(snapshot_key=_fskey)
+        else:
+            fs_msg = "H163 Firestore無可驗證摘要，優先使用現有資料；不盲目重讀整表｜" + _fsm
     raw_candidates = [
         ("local", local_payload, local_state, local_mtime),
         ("github", gh_payload, gh_state, datetime.min),
@@ -2910,6 +3030,23 @@ def load_records_permanent() -> tuple[list[dict[str, Any]], list[str]]:
         chosen = _merge_record_sources_v178([rows for _, rows, _, _ in candidates])
         source = "legacy_merge_v178"
         chosen_state = _new_state("godpick_records_durable_v178_recovery", chosen, count=len(chosen), migrated_from=source)
+
+    # H163: when the fallback parser runs during a Firestore 429, do NOT
+    # manufacture a new local revision (especially an empty one) that could
+    # appear newer than the real remote authority after quota reset.
+    if _H163_FS_GUARD.status()["quota_blocked"]:
+        if source == "legacy_merge_v178" and not chosen:
+            return records_as_rows_exact(local_payload), [
+                authority_fallback_msg,
+                "H163 Firestore配額冷卻，沒有任何可驗證完整遠端權威；保留本機原貌，不進行空白覆蓋。",
+                f"Firestore：{fs_msg}",
+            ]
+        if source == "local" and _state_is_valid(local_payload, local_state):
+            return chosen, [
+                authority_fallback_msg,
+                "H163 Firestore配額冷卻，原本本機Hash有效；維持現有版本，不重建權威revision。",
+                f"Firestore：{fs_msg}",
+            ]
 
     restored_state = dict(chosen_state or {})
     restored_state.update({
@@ -2971,6 +3108,7 @@ def _read_named_firestore(doc_name: str, default: Any) -> tuple[Any, str, dateti
             return copy.deepcopy(default), f"Firestore system/{doc_name} 雜湊驗證失敗", datetime.min, {}
         return payload, f"已讀取 Firestore system/{doc_name}", _firestore_time(data.get("updated_at")), state
     except Exception as exc:
+        _H163_FS_GUARD.note_error(exc, "named_json_read")
         return copy.deepcopy(default), f"Firestore 讀取失敗：{exc}", datetime.min, {}
 
 
@@ -3013,6 +3151,7 @@ def _write_named_firestore(doc_name: str, payload: Any, state: dict[str, Any]) -
             return False, f"Firestore system/{doc_name} 回讀驗證不一致"
         return True, f"Firestore system/{doc_name} 寫入並回讀驗證"
     except Exception as exc:
+        _H163_FS_GUARD.note_error(exc, "named_json_write")
         return False, f"Firestore 系統設定寫入失敗：{exc}"
 
 

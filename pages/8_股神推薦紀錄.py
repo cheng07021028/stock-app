@@ -44,6 +44,7 @@ try:
         ensure_records_local_authority_current,
         records_authority_signature,
         records_authority_status,
+        get_firestore_read_guard_status,
         upsert_records_authority_fast,
     )
 except Exception:
@@ -68,6 +69,7 @@ except Exception:
     ensure_records_local_authority_current = None
     records_authority_signature = None
     records_authority_status = None
+    get_firestore_read_guard_status = None
     upsert_records_authority_fast = None
 
 try:
@@ -6688,6 +6690,28 @@ def main():
         )
 
     _render_action_results()
+
+    # H163: quota monitor is local-only and never triggers a Firestore call.
+    # Do not claim that a cached summary is new remote verification.
+    if callable(get_firestore_read_guard_status):
+        try:
+            _h163_budget = get_firestore_read_guard_status() or {}
+            if _h163_budget.get("quota_blocked"):
+                st.warning(
+                    "H163 Firestore 429 配額冷卻中：本程序暫停 Firestore 讀寫約 "
+                    f"{(_h163_budget.get('quota_remaining_seconds', 0) + 59) // 60} 分鐘；"
+                    "將使用可驗證的 GitHub／本機權威，不會自動刪除歷史，"
+                    "也不會把未確認的遠端保存標為成功。"
+                )
+            with st.expander("H163｜Firestore 讀取效率／配額保護狀態", expanded=False):
+                st.caption(
+                    "小型摘要快取命中 " + str(_h163_budget.get("summary_cache_hits", 0)) + " 次｜"
+                    "阻止重複全量讀取 " + str(_h163_budget.get("full_read_prevented", 0)) + " 次｜"
+                    "配額冷卻略過請求 " + str(_h163_budget.get("quota_calls_prevented", 0)) + " 次。"
+                    "這是本程序統計，不是 Firebase 官方計費數據。"
+                )
+        except Exception:
+            pass
 
     _authority_auto_details_v174 = st.session_state.get(_k("authority_auto_sync_details_v174"), [])
     if _authority_auto_details_v174:
