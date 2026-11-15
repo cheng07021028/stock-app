@@ -896,10 +896,19 @@ def upsert_records_authority_fast(
         }
 
 def _secret(name: str, default: str = "") -> str:
-    # V186: runtime_branch_bootstrap writes the runtime-data branch to the
-    # environment before page modules load.  Prefer that process-level guard,
-    # then Streamlit Secrets.  This keeps durable business data off the code
-    # branch even if a page imports this service outside the home-page wrapper.
+    # H162: in the Streamlit app, the UI dispatcher and Page08 persistence MUST
+    # use the same effective token after Secrets rotation. An older exported
+    # environment variable may still exist and must not shadow st.secrets.
+    # GitHub Actions/headless workers retain the environment-only fallback.
+    if name == "GITHUB_TOKEN":
+        try:
+            secret_token = _safe_str(st.secrets.get(name, ""))
+            if secret_token:
+                return secret_token
+        except Exception:
+            pass
+    # V186: the runtime-data branch safety guard still wins for branch keys;
+    # only the token uses Secrets-first precedence, never a code branch change.
     env_value = _safe_str(os.getenv(name, ""))
     if env_value:
         return env_value
