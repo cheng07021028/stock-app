@@ -77,6 +77,58 @@ inject_pro_theme()
 st.title("17_系統健康檢查 / 全模組一鍵更新中心")
 st.caption("V191-H159｜Page17中央Worker派送、推薦清單遠端核實、暫時性同步失敗不連鎖阻擋、全批次誠實告警；保留H158｜SuperAI期交所官方資料／08永久同步確認／非核心歷史阻擋／假日到期狀態修復；H156 中央 worker 真正執行：核心6項完整更新／全模組更新分流、固定前置次序、本輪批次身分與資料成功驗證；保留 H155、H71、H39 及既有所有功能。")
 
+# H162: admin-only credential/Contents diagnostic. Never access records, never
+# render the token, and never write anything until a confirmed button click.
+try:
+    from godpick_h162_github_auth_diagnostic import (
+        run_readonly_probe as _h162_readonly_probe,
+        run_write_probe as _h162_write_probe,
+    )
+except Exception:
+    _h162_readonly_probe = _h162_write_probe = None
+
+with st.expander("🔐 H162｜GitHub 安全授權診斷（runtime-data／僅管理員）", expanded=False):
+    st.caption("只檢查目前 Streamlit 生效的憑證來源、儲存庫及資料分支；不顯示 Token 或任何憑證摘要。"
+               "唯讀模式不寫入；寫入模式只建立唯一小型測試檔，回讀後立即清除，不碰推薦紀錄、H126、設定或歷史。")
+    if str(st.session_state.get("auth_role") or "").strip().lower() != "admin":
+        st.info("此項涉及 GitHub 寫入權限，僅登入管理員可以執行。")
+    elif not callable(_h162_readonly_probe) or not callable(_h162_write_probe):
+        st.error("H162 授權診斷服務未載入；請確認 godpick_h162_github_auth_diagnostic.py 已部署。")
+    else:
+        _h162_confirm = st.checkbox(
+            "我了解：小型寫入測試會在 runtime-data 建立專用臨時檔，驗證後自動清除",
+            key="h162_confirm_temporary_contents_probe",
+        )
+        _h162_c1, _h162_c2 = st.columns(2)
+        if _h162_c1.button("🔎 檢查目前憑證與儲存庫（唯讀）",
+                          key="h162_readonly_github_auth", use_container_width=True):
+            st.session_state["h162_auth_diagnostic_result"] = _h162_readonly_probe(secrets=st.secrets)
+        if _h162_c2.button("🧪 測試 Contents 寫入／回讀／清除",
+                          key="h162_write_github_auth", disabled=not _h162_confirm,
+                          use_container_width=True):
+            st.session_state["h162_auth_diagnostic_result"] = _h162_write_probe(secrets=st.secrets)
+        _h162_report = st.session_state.get("h162_auth_diagnostic_result")
+        if isinstance(_h162_report, dict):
+            _h162_public = _h162_report.get("config") or {}
+            if _h162_public:
+                st.dataframe(pd.DataFrame([
+                    {"檢查": k, "狀態": str(v)} for k, v in _h162_public.items()
+                ]), use_container_width=True, hide_index=True)
+            _h162_steps = _h162_report.get("steps") or []
+            if _h162_steps:
+                st.dataframe(pd.DataFrame(_h162_steps), use_container_width=True, hide_index=True)
+            if _h162_report.get("ok"):
+                st.success(str(_h162_report.get("message") or "授權測試完成"))
+            else:
+                st.error(str(_h162_report.get("message") or "授權測試未完成"))
+            if _h162_public.get("兩處憑證不同"):
+                st.warning("H162 發現環境變數與 Streamlit Secrets 的 Token 不同；"
+                           "推薦紀錄保存已改為 Secrets 優先，若需排除舊憑證請檢查雲端部署環境。")
+            if _h162_report.get("probe_path"):
+                st.error("測試檔未確認清除；請在 runtime-data 分支檢查此專用探針路徑："
+                         + str(_h162_report["probe_path"]))
+
+
 
 # ---------------------------------------------------------------------------
 # V191 Central Scheduler UI
