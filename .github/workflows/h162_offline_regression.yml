@@ -1,0 +1,61 @@
+name: H162 Page17 GitHub auth diagnostic regression
+on:
+  push:
+    branches:
+      - fix/h162-github-auth-diagnostics
+    paths:
+      - "pages/17_系統健康檢查.py"
+      - "godpick_persistence_service.py"
+      - "godpick_h162_github_auth_diagnostic.py"
+      - "tests/test_h162_github_auth_diagnostic.py"
+      - "H162_README.txt"
+      - ".github/workflows/h162_offline_regression.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install minimal offline test dependencies
+        run: python -m pip install --disable-pip-version-check requests
+      - name: H162 compile-only regression
+        run: |
+          python -m py_compile godpick_h162_github_auth_diagnostic.py godpick_persistence_service.py "pages/17_系統健康檢查.py" tests/test_h162_github_auth_diagnostic.py
+      - name: H162 isolated GitHub simulation
+        run: python tests/test_h162_github_auth_diagnostic.py
+      - name: Build minimal H162 patch
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import zipfile, hashlib
+          paths = [
+              'pages/17_系統健康檢查.py',
+              'godpick_persistence_service.py',
+              'godpick_h162_github_auth_diagnostic.py',
+              'tests/test_h162_github_auth_diagnostic.py',
+              'H162_README.txt',
+          ]
+          out = Path('StockApp_V191_H162_GitHubAuthDiagnostic.zip')
+          with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+              for path in paths:
+                  z.write(path, path)
+          with zipfile.ZipFile(out) as z:
+              assert z.testzip() is None
+              assert z.namelist() == paths
+          print('artifact:', out.name, 'size:', out.stat().st_size)
+          print('sha256:', hashlib.sha256(out.read_bytes()).hexdigest())
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: StockApp_V191_H162_GitHubAuthDiagnostic
+          path: StockApp_V191_H162_GitHubAuthDiagnostic.zip
+          if-no-files-found: error
+          retention-days: 7
