@@ -250,6 +250,12 @@ def render_trader_audit(wb: Any, *, research_day: Any, h145_status: str='',
             cell.alignment=Alignment(vertical='center',wrap_text=True)
         if '高位追價警示' in str(row[keys.index('跌市抗跌')].value or ''):
             row[keys.index('跌市抗跌')].fill=PatternFill('solid',fgColor='FCE7EA')
+    # H164: append the trader's evidence-only priority queue to existing Sheet11.
+    # Keep all 14 legacy sheets, H126 and H154 cross-table data unchanged.
+    from godpick_h164_trader_focus import append_focus_to_overview
+    result['h164_focus'] = append_focus_to_overview(
+        wb, result, research_day=research_day, h145_status=h145_status, run_id=run_id
+    )
     return result
 
 
