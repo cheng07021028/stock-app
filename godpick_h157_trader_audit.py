@@ -85,9 +85,13 @@ def analyze_research_rows(rows: list[dict], *, research_day: Any,
         market=_n(r.get('大盤同日漲跌%')); stock=_n(r.get('個股同日漲跌%'))
         relative=_n(r.get('相對強度pp'))
         market_label=_s(r.get('對照指數'))
+        # H165: missing or mismatched OTC/market benchmark evidence cannot
+        # produce a verified relative strength, even when arithmetic matches.
+        _bench_state=_s(r.get('多日抗跌來源狀態'))
         valid_relative=(same_day and market is not None and stock is not None
             and relative is not None and abs((stock-market)-relative)<=0.06
-            and market_label not in {'','同日基準未證或不適用'})
+            and market_label not in {'','同日基準未證或不適用'}
+            and '上櫃或市場未證' not in _bench_state)
         if valid_relative and market<=-1.5 and stock>=-0.5 and relative>=2:
             if stock>=8:resilience='逆勢大漲｜高位追價警示'
             elif stock>0:resilience='逆勢收紅｜需確認續強'
@@ -255,6 +259,13 @@ def render_trader_audit(wb: Any, *, research_day: Any, h145_status: str='',
     from godpick_h164_trader_focus import append_focus_to_overview
     result['h164_focus'] = append_focus_to_overview(
         wb, result, research_day=research_day, h145_status=h145_status, run_id=run_id
+    )
+    # H165 is appended *after* H164; all original 14 worksheets and prior
+    # score/rank/permissions remain untouched, including H154 consistency.
+    from godpick_h165_evidence_gate import append_h165_review
+    result['h165_evidence'] = append_h165_review(
+        wb, research_day=research_day, h145_status=h145_status,
+        h126_buyable=h126_buyable,
     )
     return result
 

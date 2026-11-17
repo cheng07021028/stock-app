@@ -35,7 +35,7 @@ RANK_COLUMNS = (
     'H157_RSI14','H157_MACD','H157_ATR14_PCT','H157_VOLUME_BREAKOUT',
     'H1534三率三升狀態','H1534毛利率%','H1534營益率%','H1534稅後淨利率%',
     'H1534三率同比變化pp','H1534三率季增','H1534毛利營益突破',
-    'H1534財報季別','H1534財報可用時間','H1534三率來源反證',
+    'H1534財報季別','H1534財報可用時間','H1534三率來源反證','H165主升起漲研究核查',
     'H153原研究排名','H1539主流證據等級','H1539同輪族群相對強度',
     'H1539跨日快照次數','H1539跨日快照來源','H1539新證據狀態','H1539排序理由','H1539主流認證說明',
 )
@@ -189,6 +189,13 @@ def build_growth_setup_ranking(*, diagnosis_frame: Any, research_frame: Any,
             counts['無可核對蓄勢／黃金交叉／箱型／抗跌證據']+=1;continue
         if ret5>12 or today>8:
             counts['已有大幅上漲／非優先預發動']+=1;continue
+        # H165: extreme negative 5-day momentum is NOT a pre-launch setup.
+        # The stock remains in diagnosis/missed-opportunity ledgers; it is
+        # excluded only from this priority ranking, never silently deleted.
+        from godpick_h165_evidence_gate import severe_fall_reason
+        shock=severe_fall_reason(five_day=ret5,today=today)
+        if shock:
+            counts['H165極端跌勢隔離／待止跌認證']+=1;continue
         inst=_s(r.get('H123法人實證狀態')) or 'PENDING_EVIDENCE'
         tdcc=_s(r.get('H124大戶實證狀態')) or 'PENDING_EVIDENCE'
         risk=_s(r.get('H109決策權威')) or 'UNKNOWN'
@@ -251,6 +258,18 @@ def build_growth_setup_ranking(*, diagnosis_frame: Any, research_frame: Any,
         if growth:score+=14;evidence.append('公告營收年增與三月動能同向')
         if revenue_verified and f.get('H114營收創高')=='近12月新高':score+=7;evidence.append('已公布營收近12月新高')
         if cheap:score+=8;evidence.append('官方同日同業PE折價達15%')
+        # H165: an independently auditable *research* gate, never a promise
+        # of main-wave continuation and never H126 buy authority.
+        from godpick_h165_evidence_gate import leader_start_gate
+        leader_status=leader_start_gate(
+            yoy_margin_two=bool(margins['yoy_two']),
+            profit_breakout=bool(margins['breakout']),
+            revenue_verified=bool(revenue_verified),
+            revenue_yoy=yoy, revenue_3m_yoy=yoy3,
+            price_cross=bool(golden or breakout), volume_ratio=ratio,
+            price_bars=r.get('H114K線有效根數'),
+            macd_status=_s(r.get('H157_MACD')),
+            five_day=ret5)
         if inst=='PROVEN_FLOW':score+=4;evidence.append('H123法人來源已證')
         if tdcc=='VERIFIED_RISING':score+=4;evidence.append('H124週資料已證，非鎖單證明')
         # Do not mislabel high EPS: positive EPS alone is not peer-high EPS.
@@ -335,6 +354,7 @@ def build_growth_setup_ranking(*, diagnosis_frame: Any, research_frame: Any,
             'H1534財報季別':margins['quarter'],
             'H1534財報可用時間':margins['available_at'],
             'H1534三率來源反證':margins['reason'],
+            'H165主升起漲研究核查':leader_status,
         })
     # Verified research clearance ranks ahead of unknown; formal H126 stays untouched.
     tier_num=lambda x:int({'A':0,'B':1,'C':2}.get(str(x['排名等級'])[:1],3))
