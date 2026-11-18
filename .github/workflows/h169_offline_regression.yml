@@ -30,7 +30,7 @@ jobs:
         run: python -m pip install -q --disable-pip-version-check pytest pandas numpy openpyxl requests
       - name: Compile changed program code
         run: |
-          python -m py_compile godpick_h114_parallel_alpha.py godpick_h145_core_bridge.py godpick_h157_trader_audit.py godpick_h169_pe_watch.py tools/h169_refresh_pe_watch.py tests/test_h169_evidence_contract.py
+          python -m py_compile godpick_h114_parallel_alpha.py godpick_h145_core_bridge.py godpick_h1536_manager_clarity.py godpick_h157_trader_audit.py godpick_h169_pe_watch.py tools/h169_refresh_pe_watch.py tests/test_h169_evidence_contract.py
       - name: Simulate existing and new H145/H1532/H157/H164/H169
         run: |
           pytest -q tests/test_h169_evidence_contract.py tests/test_h145_candidate_bridge.py tests/test_h1532_prebreakout_scope.py tests/test_h157_trader_audit.py tests/test_h164_trader_focus.py
