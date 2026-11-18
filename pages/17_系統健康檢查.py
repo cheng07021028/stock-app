@@ -130,12 +130,45 @@ with st.expander("🔐 H162｜GitHub 安全授權診斷（runtime-data／僅管�
 
 
 
+# H168: independent read-only Actions truth while the worker's local
+# checkpoint has not yet reached runtime-data. A UI dispatch is never proof of
+# the actual scheduler's success; this reader has no write permissions.
+try:
+    from godpick_h168_worker_live import (
+        read_live_worker as _h168_read_live_worker,
+        should_autodispatch as _h168_allow_auto_dispatch,
+    )
+except Exception:
+    _h168_read_live_worker = None
+    _h168_allow_auto_dispatch = None
+
+
+@st.cache_data(ttl=35, show_spinner=False)
+def _h168_actions_snapshot(token: str, owner: str, repo: str) -> dict:
+    if not callable(_h168_read_live_worker):
+        return {"available": False, "occupied": False, "message": "H168監控服務未載入。"}
+    return _h168_read_live_worker(token=token, owner=owner, repo=repo)
+
+
+def _h168_get_actions_snapshot() -> dict:
+    try:
+        return _h168_actions_snapshot(
+            str(st.secrets.get("GITHUB_TOKEN", "") or "").strip(),
+            str(st.secrets.get("GITHUB_REPO_OWNER", "cheng07021028") or "cheng07021028").strip(),
+            str(st.secrets.get("GITHUB_REPO_NAME", "stock-app") or "stock-app").strip(),
+        )
+    except Exception as exc:
+        return {"available": False, "occupied": False,
+                "message": "H168遠端狀態查詢未完成：" + type(exc).__name__}
+
+
 # ---------------------------------------------------------------------------
 # V191 Central Scheduler UI
 # ---------------------------------------------------------------------------
 if callable(load_auto_scheduler_settings):
     _auto_cfg = load_auto_scheduler_settings(refresh_remote=True)
     _auto_status = load_auto_scheduler_status(refresh_remote=True) if callable(load_auto_scheduler_status) else {}
+    _h168_live_worker = _h168_get_actions_snapshot()
     # H167: the Streamlit process can start with an old/blank SuperAI JSON
     # while GitHub runtime-data already has a newer verified snapshot. Keep
     # source labels, do not overwrite any authority or claim readiness on count.
@@ -246,6 +279,35 @@ if callable(load_auto_scheduler_settings):
             else:
                 st.caption("只有登入管理員可選擇恢復永久排程；不會在背景自行修改。")
     with st.expander("⏰ V191｜中央自動排程中心（每日自動更新＋永久記錄＋自動股神推薦）", expanded=True):
+        # H168: GitHub Actions run truth is independent of the runtime-data
+        # checkpoint. Runtime data is the permanent result, not live queue state.
+        if _h168_live_worker.get("available"):
+            if _h168_live_worker.get("occupied"):
+                st.info("H168｜GitHub Actions 即時 Worker："
+                        + str(_h168_live_worker.get("message") or "")
+                        + "｜本頁不會再自動補送另一個重複的 H19 喚醒。")
+            elif _h168_live_worker.get("recent_cancelled", 0):
+                st.warning(
+                    f"H168｜最近90分鐘有 {_h168_live_worker.get('recent_cancelled', 0)} 個取消的中央排程；"
+                    "GitHub 並行群組只保留有限待處理項目，取消不代表業務工作完成。"
+                )
+            _h168_rows = _h168_live_worker.get("runs") or []
+            _h168_active_rows = [
+                {"GitHub Run": x.get("run_id"), "Actions狀態": x.get("status"),
+                 "結果": x.get("conclusion") or "未完成",
+                 "事件": x.get("event"), "排隊/執行開始UTC": x.get("created_at_utc"),
+                 "已經過分鐘": x.get("age_minutes"), "紀錄": x.get("url")}
+                for x in _h168_rows
+                if x.get("status") in {"in_progress", "queued", "pending", "waiting", "requested"}
+            ]
+            if _h168_active_rows:
+                with st.expander("🛰️ H168｜GitHub Actions 執行中／排隊中的真實批次", expanded=True):
+                    st.dataframe(pd.DataFrame(_h168_active_rows), use_container_width=True, hide_index=True)
+                    st.caption("Actions執行中 ≠ 某項工作完成。要等 runtime-data 的最新工作結果確認。")
+        else:
+            st.caption("H168｜GitHub Actions 即時狀態暫不可用："
+                       + str(_h168_live_worker.get("message") or "讀取未完成")
+                       + "；保留原H19排程與8分鐘本頁冷卻邏輯。")
         st.caption("H159 狀態說明：頁面上的派送／等待不等於執行成功；最後成功、最後失敗與本輪 Worker 應以 runtime-data 永久紀錄為準。H159 已將手動實際執行移到中央 GitHub Worker。")
         _h159_job_rows = (_auto_status.get("jobs") or {}) if isinstance(_auto_status, dict) else {}
         _h159_failures = [
@@ -363,6 +425,9 @@ if callable(load_auto_scheduler_settings):
                     )
                 else:
                     st.info(f"中央排程已有執行中批次，目前工作「{_current_job_label}」；正在等待下一個可驗證進度點。")
+            elif _h168_live_worker.get("available") and _h168_live_worker.get("occupied"):
+                st.info("GitHub Actions 正在執行或排隊；runtime-data 的最後喚醒時間仍是舊的批次紀錄。"
+                        "H168 已辨識到真實 Worker，不能僅因 heartbeat 尚未更新就判斷外部喚醒故障。")
             elif _wake_age_min is not None:
                 if _wake_age_min <= 35 and _last_wakeup_result == "SKIPPED_WEEKEND":
                     st.success(
@@ -671,7 +736,16 @@ if callable(load_auto_scheduler_settings):
             # H19: page entry/live fragment may enqueue one catch-up wake when work is
             # truly due and no healthy/recent worker is already responsible for it.
             # Session cooldown prevents every Streamlit rerun from creating Actions runs.
-            if _decision.get("should_dispatch"):
+            _h168_fragment_live = _h168_get_actions_snapshot()
+            _h168_should_dispatch = bool(_decision.get("should_dispatch"))
+            if callable(_h168_allow_auto_dispatch):
+                _h168_should_dispatch = _h168_allow_auto_dispatch(
+                    _h168_should_dispatch, _h168_fragment_live
+                )
+            if _decision.get("should_dispatch") and not _h168_should_dispatch:
+                st.info("H168｜GitHub Actions 已有執行中／排隊中的中央 Worker；"
+                        "即使 runtime-data 尚未收到中途 checkpoint，本頁也不再重複派送。")
+            if _h168_should_dispatch:
                 _now_epoch = time.time()
                 _last_try = float(st.session_state.get("_v191_h19_autocatchup_try_epoch", 0.0) or 0.0)
                 if _now_epoch - _last_try >= 8 * 60:
@@ -712,7 +786,14 @@ if callable(load_auto_scheduler_settings):
                         + f"本輪尚有 {len(_pending)} 項。H19 下一次喚醒開始會精確回報目前工作。"
                     )
             elif _due_jobs:
-                if _decision.get("recent_wakeup"):
+                if _h168_fragment_live.get("available") and _h168_fragment_live.get("occupied"):
+                    st.info(
+                        f"GitHub Actions 已接手（執行中 {_h168_fragment_live.get('running', 0)}、"
+                        f"排隊 {_h168_fragment_live.get('queued', 0)}）；"
+                        f"目前仍有 {len(_due_jobs)} 項未收到永久完成回報。"
+                        "這些是尚未回報，不等於 Worker 不存在或全部執行失敗。"
+                    )
+                elif _decision.get("recent_wakeup"):
                     st.info(f"⏳ 已有近期中央喚醒，正在等待 worker 建立 active_run；目前仍有 {len(_due_jobs)} 項到期工作。")
                 elif _decision.get("should_dispatch"):
                     st.warning(f"偵測到 {len(_due_jobs)} 項到期工作且沒有健康 worker；H19 正自動補送一次喚醒。")
@@ -722,7 +803,11 @@ if callable(load_auto_scheduler_settings):
                 st.success("目前沒有待補跑工作；中央排程等待下一個正式時段。")
 
             _c1, _c2, _c3, _c4 = st.columns(4)
-            _c1.metric("目前執行", _current_label or ("worker執行中" if _decision.get("active_healthy") else "—"))
+            _c1.metric("目前執行", _current_label or (
+                "GitHub Worker 執行中" if _h168_fragment_live.get("available") and _h168_fragment_live.get("running", 0)
+                else "GitHub 排隊中" if _h168_fragment_live.get("available") and _h168_fragment_live.get("queued", 0)
+                else "worker執行中" if _decision.get("active_healthy") else "—"
+            ))
             _c2.metric("本輪待處理", len(_pending) if _decision.get("active_healthy") else len(_due_jobs))
             _c3.metric("本輪已完成", len(_completed))
             _c4.metric("需下次補跑", len(_failed))
