@@ -1,0 +1,45 @@
+name: H169 official PE-only source observation
+on:
+  workflow_dispatch:
+  schedule:
+    # 22:05 Asia/Taipei on weekdays, AFTER normal market-close publications.
+    - cron: '5 14 * * 1-5'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: h169-pe-only-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  observe-pe:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: true
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install bounded official HTTP dependency
+        run: python -m pip install --disable-pip-version-check requests
+      - name: Capture official TWSE/TPEx PE only
+        run: python tools/h169_refresh_pe_watch.py
+      - name: Commit first-observed source snapshot without touching history
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -f data/h115/pe_only_latest.json
+          if git diff --cached --quiet; then
+            echo "No new PE-only snapshot."
+          else
+            git commit -m "data(H169): official PE-only FIRST_OBSERVED snapshot"
+            git push
+          fi
