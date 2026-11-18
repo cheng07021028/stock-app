@@ -58,7 +58,7 @@ def read_live_worker(*, token: str, owner: str, repo: str,
     }
     try:
         get = http_get or requests.get
-        response = get(url, headers=headers, params={"per_page": 20}, timeout=(3, 10))
+        response = get(url, headers=headers, params={"per_page": 20}, timeout=(2, 5))
         code = int(getattr(response, "status_code", 0) or 0)
         safe["http_status"] = code
         if code != 200:
