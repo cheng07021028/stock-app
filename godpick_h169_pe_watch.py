@@ -167,8 +167,11 @@ def validate_observation_for_research(item: Mapping, *, research_day: str) -> st
             return "資料日期無法驗證"
         at = known.astimezone(TZ).date()
         ref = date.fromisoformat(study)
-        if at > ref or date.fromisoformat(issue) > ref:
-            return "本研究日之後才觀察到，不得回填"
+        # The exported workbook gives a research DATE, not its exact decision
+        # timestamp. Evidence first observed later that SAME day cannot
+        # retroactively count for an unknown earlier intraday scan.
+        if at >= ref or date.fromisoformat(issue) > ref:
+            return "本研究日當天或之後才觀察到，缺決策時刻，不得回填"
         if (ref - date.fromisoformat(issue)).days > 5:
             return "資料過期，需更新官方PE"
         return "可作PE研究參考，獨立EPS仍待補證"
