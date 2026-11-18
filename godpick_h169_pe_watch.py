@@ -177,63 +177,86 @@ def validate_observation_for_research(item: Mapping, *, research_day: str) -> st
 
 
 def append_pe_audit(wb: Any, *, research_day: Any) -> dict[str, Any]:
-    """Add ONE optional evidence-only sheet to manager Excel, keep all old tabs."""
+    """Append evidence-only H169 section to existing Sheet11; no new sheets.
+
+    Existing table names, prior rows, H154 rankings and H126 are untouched.
+    The PE source is not independently verified EPS, and never adds ranking.
+    """
     from openpyxl.styles import Font, Alignment, PatternFill
     from openpyxl.utils import get_column_letter
-    tab = "13_H169官方PE核查"
-    if tab in wb.sheetnames:
-        raise ValueError("H169 禁止覆蓋已存在稽核表")
+    tab = "11_交易員重點導航"
+    if tab not in wb.sheetnames:
+        return {"sheet": tab, "checked_codes": 0, "reason": "缺現有導航表，不建立替代報表"}
     snap = load_pe_snapshot()
     index = {(str(r.get("code") or ""), str(r.get("market") or "")): r
              for r in snap.get("pe_only", []) if isinstance(r, Mapping)}
     study = str(research_day or "")[:10]
-    ws = wb.create_sheet(tab)
-    ws.append(["H169｜官方本益比獨立補證", "只做PE來源核實；無TTM EPS，不得認定低估高成長或正式買進"])
-    ws.append(["研究交易日", study, "PE觀察時間", snap.get("updated_at") or "尚未擷取"])
-    ws.append(["資料覆蓋", str(snap.get("status") or "未知"),
-               "TWSE", (snap.get("sources") or {}).get("TWSE", {}).get("verified_pe_rows", 0),
-               "TPEx", (snap.get("sources") or {}).get("TPEx", {}).get("verified_pe_rows", 0)])
-    ws.append(["核心限制", "股價 ÷ PER ≠ 獨立公告的近四季EPS；未有 H115 valuations.jsonl 必須維持未認證"])
+    ws = wb[tab]
+    start = ws.max_row + 3
+    ws.cell(start, 1, "H169｜官方PE來源稽核（獨立EPS未驗證，不改原研究排序）")
+    ws.cell(start, 2, "研究日 " + study + "｜PE快照 " +
+            str(snap.get("updated_at") or "尚未取得") +
+            "｜資料狀態 " + str(snap.get("status") or "未驗證"))
+    ws.cell(start, 1).fill = PatternFill("solid", fgColor="17324D")
+    ws.cell(start, 1).font = Font(name="Microsoft JhengHei", bold=True, color="FFFFFF")
+    ws.row_dimensions[start].height = 32
+    ws.cell(start+1, 1, "TWSE 已核 PE")
+    ws.cell(start+1, 2, (snap.get("sources") or {}).get("TWSE", {}).get("verified_pe_rows", 0))
+    ws.cell(start+2, 1, "TPEx 已核 PE")
+    ws.cell(start+2, 2, (snap.get("sources") or {}).get("TPEx", {}).get("verified_pe_rows", 0))
+    ws.cell(start+3, 1, "正式資格")
+    ws.cell(start+3, 2, "僅官方PE，沒有獨立近四季EPS；不能作H115低PE×高EPS認證或H126交易授權。")
     headers = ["股票代號","股票名稱","市場別","研究日","官方PE","官方PE資料日",
                "首次實際觀察時間","官方來源","PE證據狀態","獨立官方EPS","正式買進資格"]
-    ws.append(headers)
+    header_row = start + 5
+    for j, title in enumerate(headers, 1):
+        cell = ws.cell(header_row, j, title)
+        cell.fill = PatternFill("solid", fgColor="0B6E75")
+        cell.font = Font(name="Microsoft JhengHei", bold=True, color="FFFFFF")
+    ws.row_dimensions[header_row].height = 30
     source = wb["01_具名強勢研究"] if "01_具名強勢研究" in wb.sheetnames else None
     seen: set[str] = set()
     found = 0
-    if source:
-        hdr = [str(c.value or "") for c in source[1]]
-        col = lambda k: hdr.index(k) if k in hdr else -1
+    if source is not None:
+        hdr = [str(cell.value or "") for cell in source[1]]
+        columns = {name: hdr.index(name) for name in ("股票代號","股票名稱","市場別") if name in hdr}
         for row in source.iter_rows(min_row=2, values_only=True):
-            code = _code(row[col("股票代號")]) if col("股票代號") >= 0 else ""
+            code = _code(row[columns["股票代號"]]) if "股票代號" in columns else ""
             if not code or code in seen:
                 continue
             seen.add(code)
-            name = str(row[col("股票名稱")] or "") if col("股票名稱") >= 0 else ""
-            market = str(row[col("市場別")] or "") if col("市場別") >= 0 else ""
-            item = index.get((code,market))
-            if item is None:
-                all_matches = [r for (c,m),r in index.items() if c==code]
-                item = all_matches[0] if len(all_matches)==1 and not market else None
-            if item: found+=1
-            status = (validate_observation_for_research(item,research_day=study) if item
-                      else "此代號/市場別沒有可驗證官方PE")
-            ws.append([code,name,market,study,item.get("pe") if item else None,
-                       item.get("asof_date") if item else "",item.get("available_at") if item else "",
-                       item.get("source_url") if item else "",status,
-                       "未獨立認證","禁止買進｜H126仍為唯一權威"])
-    ws.freeze_panes = "D6"
-    ws.auto_filter.ref = f"A5:K{ws.max_row}"
-    ws.sheet_view.showGridLines = False
-    for cell in ws[5]:
-        cell.fill = PatternFill("solid",fgColor="17324D")
-        cell.font = Font(name="Microsoft JhengHei",bold=True,color="FFFFFF")
-    for col in range(1,12):
-        ws.column_dimensions[get_column_letter(col)].width = (
-            42 if col in (8,9) else 27 if col in (7,10,11) else 18
-        )
-    for row in ws.iter_rows(min_row=6):
-        for c in row:
-            c.alignment=Alignment(vertical="center",wrap_text=True)
-        ws.row_dimensions[row[0].row].height=33
-    return {"sheet":tab,"checked_codes":len(seen),"with_official_pe_only":found,
-            "eps_independently_verified":0,"snapshot_status":snap.get("status")}
+            name = str(row[columns["股票名稱"]] or "") if "股票名稱" in columns else ""
+            market = str(row[columns["市場別"]] or "") if "市場別" in columns else ""
+            item = index.get((code, market))
+            if item is None and not market:
+                choices = [rec for (c,m), rec in index.items() if c == code]
+                item = choices[0] if len(choices) == 1 else None
+            if item:
+                found += 1
+            state = validate_observation_for_research(item, research_day=study) if item else (
+                "此代號／市場別未取得完整官方PE來源"
+            )
+            values = [code, name, market, study, item.get("pe") if item else None,
+                      item.get("asof_date") if item else "",
+                      item.get("available_at") if item else "",
+                      item.get("source_url") if item else "",
+                      state, "未獨立認證", "禁止買進｜H126仍為唯一權威"]
+            r = header_row + len(seen)
+            for j, value in enumerate(values, 1):
+                cell = ws.cell(r, j, value)
+                cell.alignment = Alignment(vertical="center", wrap_text=j >= 7)
+            ws.row_dimensions[r].height = 35
+    # Keep original Sheet11 A/B widths and existing filters/freeze/title.
+    for j in range(3, 12):
+        letter = get_column_letter(j)
+        old = ws.column_dimensions[letter].width or 13
+        ws.column_dimensions[letter].width = min(52, max(old, 27 if j in (7, 8, 9) else 17))
+    return {"sheet": tab, "start_row": start, "checked_codes": len(seen),
+            "with_official_pe_only": found, "eps_independently_verified": 0,
+            "snapshot_status": snap.get("status")}
+
+
+__all__ = [
+    "ENDPOINTS", "parse_pe_rows", "merge_pe_observations", "load_pe_snapshot",
+    "validate_observation_for_research", "append_pe_audit",
+]
