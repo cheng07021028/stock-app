@@ -107,6 +107,7 @@ def analyze_history(hist: pd.DataFrame | None, *, asof: Any = None) -> dict[str,
         "H1532OBV量價背離":"未驗證", "H1532OBV近10日方向":"未驗證",
         "H1532ADX":None, "H1532DMI方向":"未驗證",
         "H1532技術來源":"日K資料不足", "H1532技術反證":"不得推算明日上漲機率",
+        "H169_H114量價契約":"未驗證", "H169_H1532完整型態契約":"未驗證",
     }
     if not isinstance(hist, pd.DataFrame) or hist.empty:
         return base
@@ -151,14 +152,26 @@ def analyze_history(hist: pd.DataFrame | None, *, asof: Any = None) -> dict[str,
     if limit and (limit - df["day"].iloc[-1]).days > 5:
         base["H114K線資料狀態"] = "STALE_DAILY_K"
         return base
+    # H169: 60-bar OHLCV must have positive finite lots, not just a column.
+    # H1532 independently requires all 85 bars to meet its stricter contract.
+    recent60 = df["lots"].tail(60)
+    valid60lots = bool(volume_col and len(recent60) == 60 and
+                       pd.to_numeric(recent60, errors="coerce").notna().all() and
+                       (pd.to_numeric(recent60, errors="coerce") > 0).all())
+    base["H169_H114量價契約"] = ("60根成交量張數均有效" if valid60lots else
+                              "近60根成交量缺失／非正值；不能宣稱有效OHLCV")
     # H153.2 complementary volatility/volume/trend lenses: independent,
     # as-of, no network and no changes to H109/H126 decisions.
     if volume_col and len(df)>=85 and (not limit or df["day"].iloc[-1]==limit):
         from godpick_h1532_technical_evidence import evaluate_prebreakout
         base.update(evaluate_prebreakout(df))
+    base["H169_H1532完整型態契約"] = (
+        "85根完整驗證" if str(base.get("H1532技術來源") or "").startswith("同股同日H114")
+        else "未達85根完整技術門檻：" + str(base.get("H1532技術來源") or "未知")
+    )
     # H153: compute crossover using only complete bars through the study date;
     # box boundaries come from PRIOR 20 sessions, never tomorrow's candle.
-    if volume_col and len(df) >= 60 and df["lots"].iloc[-21:].notna().all():
+    if valid60lots and len(df) >= 60:
         close_series=df["close"]
         ma5=close_series.rolling(5).mean()
         ma20=close_series.rolling(20).mean()
@@ -200,10 +213,13 @@ def analyze_history(hist: pd.DataFrame | None, *, asof: Any = None) -> dict[str,
     base["H114紅K吞噬"] = "確認形態｜需後續確認" if meaningful else "形態初現｜未有下跌背景" if engulf else "無"
     base["H114多頭吞噬需確認"] = "是" if engulf else "否"
     base["H114前段5日漲跌幅%"] = round(trend5, 2)
-    base["H114K線資料狀態"] = "VALID_OHLCV" if volume_col else "VALID_OHLC_ONLY_VOLUME_UNIT_UNKNOWN"
+    base["H114K線資料狀態"] = (
+        "VALID_OHLCV" if valid60lots else
+        "INVALID_OHLCV_VOLUME" if volume_col else "VALID_OHLC_ONLY_VOLUME_UNIT_UNKNOWN"
+    )
     # Explicit same-stock, dated OHLCV close for research price plans.  Never
     # use latest displayed quote or stale recommendation records as a proxy.
-    if volume_col and last["lots"] > 0:
+    if valid60lots and last["lots"] > 0:
         base["H114當日收盤價"] = round(float(last["close"]), 3)
         if float(prior["close"]) > 0:
             base["H114前日收盤價"] = round(float(prior["close"]), 3)
@@ -215,7 +231,7 @@ def analyze_history(hist: pd.DataFrame | None, *, asof: Any = None) -> dict[str,
                 base["H114近3日漲跌幅%"] = round((float(last["close"])/float(df["close"].iloc[-4])-1)*100,3)
                 base["H114近3日基準交易日"] = str(df["day"].iloc[-4])
             base["H114當日漲跌幅%"] = round((float(last["close"]) / float(prior["close"]) - 1) * 100, 3)
-    if volume_col and last["lots"] > 0:
+    if valid60lots and last["lots"] > 0:
         avg20 = df["lots"].iloc[-21:-1].mean()
         ratio = last["lots"] / avg20 if avg20 > 0 else None
         base["H114K線量比"] = round(ratio, 3) if ratio is not None else None
