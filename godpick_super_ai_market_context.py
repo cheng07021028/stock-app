@@ -199,16 +199,25 @@ def _parse_tpex_margin_rows(rows: list[dict[str, Any]]) -> dict[str, dict[str, A
 
 
 def fetch_tpex_margin(*, timeout: int = 12) -> tuple[dict[str, dict[str, Any]], str]:
-    try:
-        r = requests.get(TPEX_MARGIN_URL, timeout=(5, timeout), headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
-        r.raise_for_status()
-        rows = r.json()
-        if isinstance(rows, dict):
-            rows = rows.get("data") or rows.get("aaData") or []
-        out = _parse_tpex_margin_rows(rows if isinstance(rows, list) else [])
-        return out, f"TPEx margin {len(out)}"
-    except Exception as exc:
-        return {}, f"TPEx margin failed: {exc}"
+    # H166: tolerate one brief TPEx timeout without hammering the API; a 429
+    # or any other HTTP failure is final for this run (never endless retries).
+    for attempt in range(2):
+        try:
+            r = requests.get(TPEX_MARGIN_URL, timeout=(5, timeout), headers={
+                "User-Agent": "Mozilla/5.0", "Accept": "application/json"})
+            r.raise_for_status()
+            rows = r.json()
+            if isinstance(rows, dict):
+                rows = rows.get("data") or rows.get("aaData") or []
+            out = _parse_tpex_margin_rows(rows if isinstance(rows, list) else [])
+            return out, f"TPEx margin {len(out)}" + ("｜逾時後成功" if attempt else "")
+        except requests.exceptions.Timeout as exc:
+            if attempt == 0:
+                continue
+            return {}, f"TPEx margin failed (2 bounded attempts): {type(exc).__name__}"
+        except Exception as exc:
+            return {}, f"TPEx margin failed: {type(exc).__name__}: {exc}"
+    return {}, "TPEx margin failed: bounded retry exhausted"
 
 
 def _flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -335,6 +344,11 @@ def refresh_super_ai_market_context(*, fetch_etf: bool = False) -> tuple[dict[st
         "updated_at": _now(),
         "margin_by_stock": margin,
         "market_margin": twse_market,
+        "source_coverage": {
+            "TWSE融資券檔數": len(twse_map),
+            "TPEx融資券檔數": len(tpex_map),
+            "TPEx來源狀態": "VERIFIED_ROWS" if tpex_map else "MISSING_OR_TIMEOUT",
+        },
         "taifex": taifex,
         "etf": etf,
         "source_diagnostics": diagnostics,

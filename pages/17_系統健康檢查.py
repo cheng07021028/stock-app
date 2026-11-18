@@ -136,6 +136,78 @@ with st.expander("🔐 H162｜GitHub 安全授權診斷（runtime-data／僅管�
 if callable(load_auto_scheduler_settings):
     _auto_cfg = load_auto_scheduler_settings(refresh_remote=True)
     _auto_status = load_auto_scheduler_status(refresh_remote=True) if callable(load_auto_scheduler_status) else {}
+    # H166: Show production truth before the 14-job table. This panel never
+    # auto-enables the scheduler or changes trade authorization.
+    try:
+        from godpick_h166_operational_readiness import evaluate_operational_readiness as _h166_evaluate
+        _h166_market = load_super_ai_market_context() if callable(load_super_ai_market_context) else {}
+        _h166_records = {}
+        try:
+            from godpick_persistence_service import read_local_json as _h166_read_local
+            _h166_records, _, _ = _h166_read_local("godpick_records_sync_state.json", {})
+        except Exception:
+            pass
+        _h166_truth = _h166_evaluate(_auto_cfg, _auto_status, _h166_market, records_state=_h166_records)
+    except Exception as _h166_error:
+        _h166_truth = {"status": "NOT_READY", "reference_day": "未知", "blockers": [
+            "H166就緒度模組無法載入：" + type(_h166_error).__name__
+        ], "super_ai": {}, "last_recommendation_success": ""}
+    with st.expander("🧭 H166｜選股系統可靠度與真實推薦狀態", expanded=True):
+        st.caption("監控基準為已完成交易日（週末回推，國定假日仍須交易所日曆）；資料成功不等於選股成功，研究榜不等於H126買進資格，也不等於已證明績效。")
+        _hc1, _hc2, _hc3, _hc4 = st.columns(4)
+        _hc1.metric("正式總排程", "已啟用" if _auto_cfg.get("enabled") else "停用")
+        _hc2.metric("最近完成交易日", str(_h166_truth.get("reference_day") or "未知"))
+        _hc3.metric("最近07成功推薦", str(_h166_truth.get("last_recommendation_success") or "尚無"))
+        _hc4.metric("研究資料就緒", "已核對" if _h166_truth.get("status") == "READY_FOR_RESEARCH_ONLY" else "未就緒")
+        for _h166_problem in (_h166_truth.get("blockers") or [])[:6]:
+            st.warning(str(_h166_problem))
+        for _h166_advisory in (_h166_truth.get("advisories") or [])[:3]:
+            st.info(str(_h166_advisory))
+        st.caption("績效證據：尚未依T+1/T+5/T+10樣本外策略、成本、基準指數及最大回撤完成認證；不提供虛構勝率。H126正式權威獨立判斷。")
+        _h166_src = _h166_truth.get("super_ai") or {}
+        if _h166_src:
+            with st.expander("SuperAI三來源日期對帳", expanded=False):
+                st.dataframe(pd.DataFrame([{"指標": _k, "實際日期／數值": str(_v)} for _k, _v in [
+                    ("預期交易日", _h166_src.get("reference_day")),
+                    ("融資券資料日", _h166_src.get("margin_day")),
+                    ("PCR資料日", _h166_src.get("pcr_day")),
+                    ("外資臺指期資料日", _h166_src.get("futures_day")),
+                    ("融資券個股數", _h166_src.get("stock_count")),
+                    ("TPEx上櫃融資券數", _h166_src.get("tpex_count")),
+                ]]), use_container_width=True, hide_index=True)
+        if not bool(_auto_cfg.get("enabled")):
+            st.error("中央排程永久設定目前為 enabled=false。GitHub 喚醒仍會被標為 SKIPPED_DISABLED；不會自行重新啟用。")
+            if str(st.session_state.get("auth_role") or "").strip().lower() == "admin":
+                _h166_confirm = st.checkbox(
+                    "我確認要恢復中央每日自動排程；保留目前14項工作、時段及順位",
+                    key="h166_confirm_resume_scheduler")
+                if st.button("啟用原中央排程並驗證 runtime-data", key="h166_resume_scheduler",
+                             disabled=not _h166_confirm, use_container_width=True):
+                    try:
+                        from godpick_persistence_service import read_github_json, github_config
+                        if str(github_config().get("branch") or "") != "runtime-data":
+                            st.error("GitHub 設定資料分支不是 runtime-data，禁止更動排程。")
+                        else:
+                            _h166_candidate = dict(_auto_cfg)
+                            _h166_candidate["enabled"] = True
+                            _h166_saved, _h166_save_msg = save_auto_scheduler_settings(_h166_candidate)
+                            _h166_remote, _h166_remote_msg = read_github_json(
+                                "data/config/godpick_auto_scheduler_settings.json", {})
+                            _h166_match = (isinstance(_h166_remote, dict)
+                                and _h166_remote.get("enabled") is True
+                                and _h166_remote.get("updated_at")
+                                    == (load_auto_scheduler_settings().get("updated_at"))
+                                and _h166_remote.get("execution_order") == _auto_cfg.get("execution_order"))
+                            if _h166_saved and _h166_match:
+                                st.success("H166總開關已在 runtime-data 遠端回讀確認。下一個GitHub喚醒可依原時段執行，成功狀態仍需看各工作履歷。")
+                            else:
+                                st.error("H166尚未驗證遠端啟用：" + str(_h166_save_msg)[:280]
+                                         + "｜" + str(_h166_remote_msg)[:160]
+                                         + "。請勿把本機保存成功當成Worker已啟用。")
+                    except Exception as _h166_exc:
+                        st.error("恢復排程驗證例外：" + type(_h166_exc).__name__)
+            else:
+                st.caption("只有登入管理員可選擇恢復永久排程；不會在背景自行修改。")
     with st.expander("⏰ V191｜中央自動排程中心（每日自動更新＋永久記錄＋自動股神推薦）", expanded=True):
         st.caption("H159 狀態說明：頁面上的派送／等待不等於執行成功；最後成功、最後失敗與本輪 Worker 應以 runtime-data 永久紀錄為準。H159 已將手動實際執行移到中央 GitHub Worker。")
         _h159_job_rows = (_auto_status.get("jobs") or {}) if isinstance(_auto_status, dict) else {}

@@ -150,7 +150,8 @@ def test_super_ai_complete_success(monkeypatch):
     day = datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d")
     fake = types.SimpleNamespace(
         refresh_super_ai_market_context=lambda fetch_etf: (
-            {"margin_by_stock": {str(i): {} for i in range(1000, 1150)},
+            {"margin_by_stock": {str(i): {"市場別": "上櫃" if i >= 1100 else "上市"} for i in range(1000, 1150)},
+             "source_coverage": {"TWSE融資券檔數": 100, "TPEx融資券檔數": 50, "TPEx來源狀態": "VERIFIED_ROWS"},
              "market_margin": {"TWSE融資券資料日期": day},
              "taifex": {"PCR成交量比%": 99.0, "PCR未平倉量比%": 67.0,
                         "外資臺指期未平倉淨口數": -4000,

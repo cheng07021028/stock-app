@@ -147,22 +147,27 @@ def task_super_ai_context(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     try:
         from godpick_super_ai_market_context import refresh_super_ai_market_context
         payload, diagnostics = refresh_super_ai_market_context(fetch_etf=bool(cfg.get("fetch_etf", True)))
-        from godpick_h158_taifex_openapi import complete as _taifex_verified
-        from godpick_super_ai_market_context import _last_completed_trade_date
-        margin_count = len((payload or {}).get("margin_by_stock") or {})
-        market_margin = (payload or {}).get("market_margin") or {}
-        margin_date = str(market_margin.get("TWSE融資券資料日期") or "")
-        expected_margin = _last_completed_trade_date().strftime("%Y-%m-%d")
-        # H158: an HTTP 200 or nonempty map is not freshness proof.  Pre-21:30
-        # the latest completed margin session can legitimately be the prior day.
-        has_margin = margin_count >= 100 and margin_date >= expected_margin
-        has_taifex = _taifex_verified((payload or {}).get("taifex") or {})
-        complete = has_margin and has_taifex
+        from godpick_h166_operational_readiness import context_evidence
+        from datetime import datetime as _dt
+        from zoneinfo import ZoneInfo as _ZoneInfo
+        now = _dt.now(_ZoneInfo("Asia/Taipei"))
+        evidence = context_evidence(payload, now=now)
+        complete = bool(evidence["verified"])
+        margin_count = evidence["stock_count"]
         partial = margin_count > 0 or bool((payload or {}).get("taifex"))
-        msg = ("SuperAI融資券與期貨/PCR情境完整更新" if complete else
-               "SuperAI資料僅部分可用：融資券/期貨缺一，不得視為完整更新" if partial else
-               "SuperAI融資券與期貨/PCR來源皆無有效資料")
-        return _report(partial, msg, details={"diagnostics": diagnostics[-30:], "margin_count": margin_count, "margin_date": margin_date, "expected_margin_date": expected_margin, "taifex": (payload or {}).get("taifex", {}), "etf": (payload or {}).get("etf", {}), "complete": complete}, changed_files=["super_ai_market_context.json"] if partial else [], started=t0, warning=not complete and partial)
+        if complete:
+            msg = "SuperAI官方資料完成同交易日核實：融資券／PCR／外資臺指期淨未平倉｜" + evidence["reference_day"]
+        elif partial:
+            msg = "SuperAI未通過本輪同交易日驗證：" + "；".join(evidence["reasons"][:5])
+        else:
+            msg = "SuperAI融資券與期貨／PCR來源皆無有效資料，保留原有未知狀態"
+        return _report(partial, msg, details={
+            "diagnostics": diagnostics[-30:], "evidence": evidence,
+            "taifex": (payload or {}).get("taifex", {}),
+            "etf": (payload or {}).get("etf", {}), "complete": complete,
+        }, changed_files=["super_ai_market_context.json"] if partial else [],
+            started=t0, warning=not complete and partial)
+
     except Exception as exc:
         return _report(False, f"SuperAI市場情境更新失敗：{type(exc).__name__}: {exc}", started=t0)
 
