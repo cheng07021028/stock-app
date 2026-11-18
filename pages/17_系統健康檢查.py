@@ -136,11 +136,39 @@ with st.expander("🔐 H162｜GitHub 安全授權診斷（runtime-data／僅管�
 if callable(load_auto_scheduler_settings):
     _auto_cfg = load_auto_scheduler_settings(refresh_remote=True)
     _auto_status = load_auto_scheduler_status(refresh_remote=True) if callable(load_auto_scheduler_status) else {}
+    # H167: the Streamlit process can start with an old/blank SuperAI JSON
+    # while GitHub runtime-data already has a newer verified snapshot. Keep
+    # source labels, do not overwrite any authority or claim readiness on count.
+    from godpick_h167_remote_truth import (
+        select_super_ai_snapshot as _h167_select_context,
+        scheduler_transition as _h167_transition,
+    )
+
+    @st.cache_data(ttl=150, show_spinner=False)
+    def _h167_read_remote_superai():
+        try:
+            from godpick_persistence_service import read_github_json, github_config
+            if str(github_config().get('branch') or '') != 'runtime-data':
+                return {}, False
+            remote_payload, remote_message = read_github_json('super_ai_market_context.json', {})
+            return (remote_payload if isinstance(remote_payload, dict) else {}), bool(
+                isinstance(remote_payload, dict) and remote_payload.get('updated_at')
+            )
+        except Exception:
+            return {}, False
+
+    _h167_snapshot = {'source': '未取得', 'warning': '', 'remote_available': False}
+    _h167_status_transition = _h167_transition(_auto_cfg, _auto_status)
     # H166: Show production truth before the 14-job table. This panel never
     # auto-enables the scheduler or changes trade authorization.
     try:
         from godpick_h166_operational_readiness import evaluate_operational_readiness as _h166_evaluate
-        _h166_market = load_super_ai_market_context() if callable(load_super_ai_market_context) else {}
+        _h166_market_local = load_super_ai_market_context() if callable(load_super_ai_market_context) else {}
+        _h167_remote_market, _h167_remote_ok = _h167_read_remote_superai()
+        _h167_snapshot = _h167_select_context(
+            _h166_market_local, _h167_remote_market, remote_reachable=_h167_remote_ok
+        )
+        _h166_market = _h167_snapshot['context']
         _h166_records = {}
         try:
             from godpick_persistence_service import read_local_json as _h166_read_local
@@ -154,6 +182,15 @@ if callable(load_auto_scheduler_settings):
         ], "super_ai": {}, "last_recommendation_success": ""}
     with st.expander("🧭 H166｜選股系統可靠度與真實推薦狀態", expanded=True):
         st.caption("監控基準為已完成交易日（週末回推，國定假日仍須交易所日曆）；資料成功不等於選股成功，研究榜不等於H126買進資格，也不等於已證明績效。")
+        st.caption("H167 SuperAI資料取用：" + str(_h167_snapshot.get('source') or '未知')
+                   + "｜本機更新：" + str(_h167_snapshot.get('local_updated_at') or '無')
+                   + "｜遠端更新：" + str(_h167_snapshot.get('remote_updated_at') or '無'))
+        if _h167_snapshot.get('warning'):
+            st.warning("H167來源確認：" + str(_h167_snapshot['warning']))
+        if _h167_status_transition.get('pending_new_checkpoint'):
+            st.info("H167排程狀態核對：" + str(_h167_status_transition.get('message') or ''))
+        elif _h167_status_transition.get('settings_status_conflict'):
+            st.error("H167排程狀態核對：" + str(_h167_status_transition.get('message') or ''))
         _hc1, _hc2, _hc3, _hc4 = st.columns(4)
         _hc1.metric("正式總排程", "已啟用" if _auto_cfg.get("enabled") else "停用")
         _hc2.metric("最近完成交易日", str(_h166_truth.get("reference_day") or "未知"))
@@ -569,6 +606,9 @@ if callable(load_auto_scheduler_settings):
                     "time": time.strftime("%Y-%m-%d %H:%M:%S"), "message": str(_msg),
                 }
                 if _ok:
+                    # H167: avoid the H19 fragment sending a second wake in
+                    # the same Streamlit session immediately after manual dispatch.
+                    st.session_state["_v191_h19_autocatchup_try_epoch"] = time.time()
                     st.info(str(_msg) + "｜僅確認派送成功，不代表14項已完成；請以下方遠端批次履歷和最後訊息為準。")
                 else:
                     st.error(_msg)
@@ -847,6 +887,8 @@ with st.sidebar:
                 "time": time.strftime("%Y-%m-%d %H:%M:%S"), "message": str(_msg),
             }
             if _ok:
+                # H167: avoid immediate duplicate H19 catch-up dispatches.
+                st.session_state["_v191_h19_autocatchup_try_epoch"] = time.time()
                 st.info(_msg + "｜僅代表已派送，並非完成。請查看下方『最近完整更新批次』與履歷，需五項前置SUCCESS、07推薦SUCCESS才算完整成功。")
             else:
                 st.error(_msg)
