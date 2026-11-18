@@ -301,9 +301,9 @@ if callable(load_auto_scheduler_settings):
                 if x.get("status") in {"in_progress", "queued", "pending", "waiting", "requested"}
             ]
             if _h168_active_rows:
-                with st.expander("🛰️ H168｜GitHub Actions 執行中／排隊中的真實批次", expanded=True):
-                    st.dataframe(pd.DataFrame(_h168_active_rows), use_container_width=True, hide_index=True)
-                    st.caption("Actions執行中 ≠ 某項工作完成。要等 runtime-data 的最新工作結果確認。")
+                st.caption("🛰️ H168｜GitHub Actions 執行中／排隊中的真實批次（非業務完成證明）")
+                st.dataframe(pd.DataFrame(_h168_active_rows), use_container_width=True, hide_index=True, height=170)
+                st.caption("Actions執行中 ≠ 某項工作完成。要等 runtime-data 的最新工作結果確認。")
         else:
             st.caption("H168｜GitHub Actions 即時狀態暫不可用："
                        + str(_h168_live_worker.get("message") or "讀取未完成")
