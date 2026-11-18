@@ -93,6 +93,29 @@ def restore_export_pool(
         # don't treat the remaining seven as implicitly in the spreadsheet.
         result["candidate_complete"] = False
         result["status"] = "BLOCKED_FINAL_RESULT_COUNT_GAP"
+    # H169: distinguish a scanner count measured before de-duplication from
+    # actual unique final codes. Without a same-run list of expected codes we
+    # cannot reconstruct the missing name nor silently lower the denominator.
+    raw_final_rows = len(final)
+    actual_unique = len(expected_final_codes)
+    result["final_reconciliation"] = {
+        "scanner_expected_count": final_expected,
+        "actual_final_rows": raw_final_rows,
+        "actual_unique_4digit_codes": actual_unique,
+        "duplicated_or_invalid_final_rows": max(0, raw_final_rows - actual_unique),
+        "unaccounted_unique_gap": max(0, final_expected - actual_unique),
+        "same_run_ids_match": run_ids_match,
+        "candidate_codes_missing_in_diagnosis": list(missing),
+        "exact_missing_code_known": False,
+        "reason": (
+            "最終原始列不少於掃描預期，但重複或無效代號造成唯一代號不足；須追查去重前資料"
+            if final_expected > actual_unique and raw_final_rows >= final_expected
+            else "正式候選結果在輸出前已減少；現有欄位無法推定遺失的股票代號"
+            if final_expected > actual_unique
+            else "正式候選唯一代號數量核對通過；仍須逐股官方證據與H126權威"
+        ),
+        "can_authorize_trade": False,
+    }
     result["selected_rows"] = len(selected)
     return selected.copy(deep=False), result
 
