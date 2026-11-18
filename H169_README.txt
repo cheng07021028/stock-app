@@ -27,6 +27,7 @@ V191-H169｜選股真實證據鏈修正：H145筆數、H114/H1532技術、官方
 正式程式修改：
   godpick_h114_parallel_alpha.py
   godpick_h145_core_bridge.py
+  godpick_h1536_manager_clarity.py
   godpick_h157_trader_audit.py
   godpick_h169_pe_watch.py              [新增]
   tools/h169_refresh_pe_watch.py         [新增]
