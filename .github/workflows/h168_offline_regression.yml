@@ -1,0 +1,62 @@
+name: H168 live Worker status regression and minimal ZIP
+on:
+  push:
+    branches:
+      - fix/h168-github-live-worker
+    paths:
+      - "pages/17_系統健康檢查.py"
+      - "godpick_h168_worker_live.py"
+      - "tests/test_h168_worker_live.py"
+      - "tests/test_h167_remote_truth.py"
+      - "H168_README.txt"
+      - ".github/workflows/h168_offline_regression.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Minimal offline dependencies
+        run: python -m pip install --disable-pip-version-check pytest requests
+      - name: Compile Page17 and live worker
+        run: |
+          python -m py_compile "pages/17_系統健康檢查.py" godpick_h168_worker_live.py tests/test_h168_worker_live.py
+      - name: Execute H167 and H168 regression tests
+        run: pytest -q tests/test_h167_remote_truth.py tests/test_h168_worker_live.py
+      - name: Package necessary changes only
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib, zipfile
+          files = [
+            "pages/17_系統健康檢查.py",
+            "godpick_h168_worker_live.py",
+            "tests/test_h168_worker_live.py",
+            "H168_README.txt",
+          ]
+          output = Path("StockApp_V191_H168_LiveWorkerFix.zip")
+          with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+            for p in files:
+              z.write(p, p)
+          with zipfile.ZipFile(output) as z:
+            assert z.namelist() == files
+            assert z.testzip() is None
+            for p in files:
+              assert z.read(p) == Path(p).read_bytes()
+          print("ZIP_BYTES=",output.stat().st_size)
+          print("ZIP_SHA256=",hashlib.sha256(output.read_bytes()).hexdigest())
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: StockApp_V191_H168_LiveWorkerFix
+          path: StockApp_V191_H168_LiveWorkerFix.zip
+          retention-days: 7
+          if-no-files-found: error
