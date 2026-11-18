@@ -50,7 +50,7 @@ def test_h114_zero_volume_in_last_sixty_fails_closed():
     assert "未達85根" in x["H169_H1532完整型態契約"]
 
 def test_h114_sixty_valid_not_equal_h1532_eightyfive():
-    p=bars(bad_lot_at=5)
+    p=bars(bad_lot_at=20)
     x=analyze_history(p,asof=p.iloc[-1]["日期"])
     assert x["H114K線資料狀態"]=="VALID_OHLCV"
     assert "未達85根" in x["H169_H1532完整型態契約"]
