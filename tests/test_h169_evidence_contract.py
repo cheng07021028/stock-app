@@ -161,6 +161,27 @@ def test_workbook_pe_append_preserves_old_cells_and_tabs(tmp_path):
     assert nav.cell(row["start_row"],1).value.startswith("H169")
     assert "禁止買進" in str(nav.cell(row["start_row"]+6,11).value)
 
+def test_h169_forensics_visible_in_original_sheet02_summary():
+    from godpick_h1536_manager_clarity import clarify_manager_board
+    wb=Workbook();ws=wb.active;ws.title="00_主管重點觀察榜"
+    x=clarify_manager_board(wb,h145_bridge={
+        "status":"BLOCKED_FINAL_RESULT_COUNT_GAP",
+        "expected_final":2,
+        "final_reconciliation":{
+            "scanner_expected_count":2,
+            "actual_final_rows":1,
+            "actual_unique_4digit_codes":1,
+            "unaccounted_unique_gap":1,
+            "reason":"正式候選結果在輸出前已減少",
+        },
+    },research_day="2026-11-18")
+    names=x["檢查項目"].tolist()
+    assert "H169 H145正式輸出筆數斷點" in names
+    value=x.loc[x["檢查項目"]=="H169 H145正式輸出筆數斷點","結果"].iloc[0]
+    assert "掃描預期2" in value and "差額1" in value
+    assert "H169上市／上櫃官方PE單獨來源" in names
+
+
 def test_page7_ranking_not_changed_by_pe_watch():
     src=(ROOT/"godpick_h157_trader_audit.py").read_text(encoding="utf-8")
     assert "append_pe_audit(wb, research_day=research_day)" in src
