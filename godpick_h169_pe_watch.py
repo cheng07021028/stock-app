@@ -265,11 +265,36 @@ def append_pe_audit(wb: Any, *, research_day: Any) -> dict[str, Any]:
         letter = get_column_letter(j)
         old = ws.column_dimensions[letter].width or 13
         ws.column_dimensions[letter].width = min(52, max(old, 27 if j in (7, 8, 9) else 17))
+    # H171 research-only financial appendix. Never touches H126 or ranking.
+    try:
+        from godpick_h171_workbook_audit import append_h171_research as _h171_append
+        _h171_path = ROOT / "data" / "h115" / "official_ytd_archive.json"
+        _h171_rows = eps_snap.get("eps_ytd_rows", [])
+        if _h171_path.is_file() and _h171_path.stat().st_size <= 50_000_000:
+            _h171_json = json.loads(_h171_path.read_text(encoding="utf-8-sig"))
+            if isinstance(_h171_json, dict) and isinstance(_h171_json.get("rows"), list):
+                _h171_rows = _h171_json["rows"]
+        _h171_result = _h171_append(wb, financial_rows=_h171_rows, research_day=study)
+    except Exception as _h171_error:
+        _h171_result = {"status": "H171_APPEND_FAILED", "error_type": type(_h171_error).__name__}
+    # H172: append verified retrospective receipt only; never touch trading authority.
+    try:
+        from godpick_h172_workbook_audit import append_h172_receipt as _h172_append
+        _h172_result = _h172_append(wb, ROOT / 'reports' / 'h172' / 'H172_performance_research.json')
+    except Exception as _h172_error:
+        _h172_result = {'status':'H172_APPEND_FAILED','error_type':type(_h172_error).__name__}
+    # H173: verified official relative index/strategy attribution, research only.
+    try:
+        from godpick_h173_workbook_audit import append_h173_audit as _h173_append
+        _h173_result = _h173_append(wb, ROOT / 'reports' / 'h173' / 'H173_relative_index_audit.json')
+    except Exception as _h173_error:
+        _h173_result = {'status':'H173_APPEND_FAILED','error_type':type(_h173_error).__name__}
     return {"sheet": tab, "start_row": start, "checked_codes": len(seen),
             "with_official_pe_only": found, "eps_independently_verified": 0,
             "snapshot_status": snap.get("status"),
             "eps_ytd_status": eps_snap.get("status"),
-            "eps_ttm_verified": False}
+            "eps_ttm_verified": False,
+            "h171_audit": _h171_result, "h172_audit": _h172_result, "h173_audit": _h173_result}
 
 
 __all__ = [

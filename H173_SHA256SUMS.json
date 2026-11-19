@@ -1,0 +1,27 @@
+{
+  "version": "V191-H173",
+  "created": "2026-11-19",
+  "files": {
+    ".github/workflows/h117_official_ohlcv_feedback.yml": "67cf508127d058585b5b74b81a8a3b45c9f0e021b2ce7a07425240ba493efa59",
+    "godpick_h169_pe_watch.py": "7c18e93643564ca950875926d5095fd4ff805e9800b5dbef01ad215276e2b2cf",
+    "godpick_h171_pit_validation.py": "330f7deda60f84883e71d66032437c71822d778d790b1bfea72180964b89c7d9",
+    "godpick_h171_workbook_audit.py": "74a8d33c100b91a7c7b3c75f41cab5c847eb67b6459e3d972549202be9a3ad0c",
+    "godpick_h172_closed_loop.py": "28abcafe5a24ae78af4dad17a1e1a3fdbcc46624e3f98cb5e04ad3f63e89539c",
+    "godpick_h172_workbook_audit.py": "5076260c43dfa965ecd3bf8fd7c65bd2beca63c1653c7bfc46c0dcd259e0b1a4",
+    "godpick_h173_relative_edge.py": "74c83618142297b0dbabd97f526a2f7478b6cc8d42d67d6de5f174bd8cc4cc18",
+    "godpick_h173_workbook_audit.py": "c505040d651b49751d8251723a1cdac7e304fc786180d0c46534d096e7fdfe7b",
+    "tools/h171_financial_archive.py": "d2f234a534223c0dea5762ff2c20cf780cdd6e3d85a8a0a87c1d7e22360e63c3",
+    "tools/h171_research_cli.py": "d2a0a9bb9d8d43afd0f161d7e7e955ddd389813497124e1d09bb317db2c07d27",
+    "tools/h172_closed_loop_cli.py": "5b0c39684e5ace71566dada4fbbfcba5313519ce74aa3f240c2259e85cc2d2a1",
+    "tools/h172_preflight.py": "c994ebdfa9060824ad721fb4f6db52c3d1c1101d9d0a4be2d7f76619d3ed1153",
+    "tools/h173_preflight.py": "bf494bcc6894e755257db2f3c0f6c0f2c36fb022d71a112065928030838d799d",
+    "tools/h173_relative_edge_cli.py": "1a397d3fecea71f2efbcd4ab46518cf31267ad59ad29796d863118303f5de000",
+    "tests/test_h171_pit_validation.py": "22bcd9c13c939fa5b759c89cb5ecea68d5407afc8867985c946dda79d6f823b3",
+    "tests/test_h171_workbook_and_archive.py": "0108bdf152512d10c13ef4bb95d98a5d496f6fe6527941ac79d6e5147c0b48e6",
+    "tests/test_h172_closed_loop_bridge.py": "65cc6cadbac5d5f5a694a458f99ad2e085895ffd72a70759e10514015b4812c2",
+    "tests/test_h172_preflight.py": "3d9650243e178921382f5470559b84aeb7ed714ae2f1117cea63df86e5a25d70",
+    "tests/test_h173_relative_edge.py": "a0da6bdf1ec9a47fbc2a08d43f24c08e4e13b5226c91c2ac2f19cfdc8996fa8f",
+    "tests/test_h173_preflight.py": "276d606358745cd02c856d4ab29a438766668e40e55c60524042c29f1299382c"
+  },
+  "note": "only incremental changes; excludes private user state"
+}
