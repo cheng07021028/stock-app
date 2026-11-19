@@ -12600,6 +12600,11 @@ def _build_recommend_df(
         # labelled conditional-reference list instead of a blank page.
         final_df = _operational_recommendation_rows(governed_candidate_df, refresh_decision=False)
 
+        # H170: snapshot the exact first operational shortlist BEFORE later
+        # SuperAI/H34 governance reselects it. The previous H145 compared
+        # this scanner-stage count against the final exported list, which are
+        # deliberately different pipeline stages.
+        _h170_scanner_final = final_df.copy(deep=False)
         # V189：禁止在 SuperAI/V188 交易品質治理完成前保存 decision frame。
         # V188 的 Alpha/Trade/RR/作戰優先分尚未產生時，這裡只能是中間母體，
         # 不得寫入供 UI/Excel/輪動共用的最終快取。
@@ -12736,6 +12741,21 @@ def _build_recommend_df(
             debug_summary["h78_research_snapshot_error"] = str(_h78_save_error)
             st.warning(f"H79學習快照保存失敗：{_h78_save_error}")
 
+        # H170: the stage contract is from THIS scan only, after all existing
+        # official-factor, SuperAI and H34 decisions. Never fetch old rankings
+        # or infer a missing candidate from a different study session.
+        try:
+            from godpick_h170_stage_reconcile import build_stage_contract
+            _h170_ctx=st.session_state.get(_k("recommend_execution_context_v191"),{}) or {}
+            scan_report["h170_stage_contract"]=build_stage_contract(
+                scanner_final=_h170_scanner_final,
+                governed_final=final_df,
+                governed_universe=governed_candidate_df,
+                run_id=_safe_str(_h170_ctx.get("run_id")) if isinstance(_h170_ctx,dict) else "",
+                scan_signature=scan_signature,
+            )
+        except Exception as _h170_err:
+            scan_report["h170_stage_error"]=type(_h170_err).__name__
         st.session_state[_k("scan_quality_report")] = dict(scan_report)
         debug_summary.update({
             "candidate_diagnosis_count": len(candidate_diagnosis_df),
