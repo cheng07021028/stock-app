@@ -149,6 +149,19 @@ def clarify_manager_board(wb:Any, *, ranked:Any=None, watch:Any=None,
             ),
             '說明':str(rec.get('reason') or '')+'；不會自動補股或放寬H126'
         })
+    stage=bridge.get('h170_stage_audit') if isinstance(bridge.get('h170_stage_audit'),Mapping) else {}
+    if stage:
+        audit.append({
+            '檢查項目':'H170同輪治理前後正式候選對帳',
+            '結果':(
+                f"掃描階段{_nonnegative(stage.get('scanner_expected'))}／"
+                f"治理後{_nonnegative(stage.get('post_unique'))}／"
+                f"{str(stage.get('result') or 'UNKNOWN')}"
+            ),
+            '說明':("治理淘汰代號：" + "、".join(map(str,stage.get('removed_codes') or []))+
+                   "；不代表獲H126授權" if stage.get('stage_verified') else
+                   '同輪ID、簽章、候選母體或完整證據不足；保留H145 BLOCKED')
+        })
     # Official PE-only observations are independent from genuine H115 PE+TTM
     # EPS. Never count them as a completed valuation ledger.
     try:
