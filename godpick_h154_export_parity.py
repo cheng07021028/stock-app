@@ -144,15 +144,40 @@ def verify_final_xlsx(wb,audit:dict):
             f'00={left} 來源={right}；00共{len(codes)}檔／來源共{len(expected)}檔。'
             ' 請檢查同名次內H154排序分／輸出時是否重排，不得跳過對帳。')
     headers=[c.value for c in research[1]]
-    for field in ('研究排名','股票代號','研究證據分'):
-        if field not in headers:raise ValueError('H154研究表缺少：'+field)
+    required=('研究排名','股票代號','研究證據分','排名等級')
+    missing=[field for field in required if field not in headers]
+    # H174: an old workbook may still use H84's 1-column empty marker.
+    # It is acceptable ONLY when the manager and same-run audited A/B list
+    # are both empty and the marker has the exact unranked-research message.
+    # A malformed nonempty 01 sheet must NEVER get this exception.
+    legacy_empty=(not codes and not expected and not audit.get('ranked')
+                  and headers==['狀態'] and research.max_row==2
+                  and str(research['A2'].value or '').startswith('本輪沒有可核對量價的具名研究股票'))
+    if missing and not legacy_empty:
+        raise ValueError('H154研究表缺少：'+missing[0])
     positions={field:headers.index(field)+1 for field in headers}
     rs=[]
-    for row in range(2,research.max_row+1):
-        grade=str(research.cell(row,positions.get('排名等級',2)).value or '')
-        code=_code(research.cell(row,positions['股票代號']).value)
-        if grade.startswith(('A','B')) and code:
-            rs.append((code,int(research.cell(row,positions['研究排名']).value)))
+    if not legacy_empty:
+        for row in range(2,research.max_row+1):
+            grade=str(research.cell(row,positions['排名等級']).value or '').strip()
+            if not grade.startswith(('A','B')):
+                continue
+            code=_code(research.cell(row,positions['股票代號']).value)
+            value=research.cell(row,positions['研究排名']).value
+            score=research.cell(row,positions['研究證據分']).value
+            try:
+                rank=int(value)
+                valid_rank=rank>0 and float(value)==rank
+            except (ValueError,TypeError,OverflowError):
+                valid_rank=False
+            try:
+                import math
+                valid_score=score is not None and math.isfinite(float(score))
+            except (ValueError,TypeError,OverflowError):
+                valid_score=False
+            if not code or len(code)!=4 or not code.isdigit() or not valid_rank or not valid_score:
+                raise ValueError(f'H154研究表第{row}列 A/B 股票代號、研究排名或研究證據分不完整')
+            rs.append((code,rank))
     if rs!=list(zip(codes,ranks)):
         raise ValueError('H154主管00與01研究名次/代號不一致')
     plan_head=[c.value for c in plan[1]]

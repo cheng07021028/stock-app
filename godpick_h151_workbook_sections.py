@@ -79,12 +79,35 @@ def add_research_section_sheets(wb: Any, *, writer: Callable, **frames: Any) -> 
     summary = {}
     for name, key, fallback in CATEGORY_TABS:
         frame = _safe_frame(frames.get(key))
-        ws = writer(wb, name, frame, fallback)
+        # H174: H84's generic empty-table writer exports only ["狀態"].
+        # H154 then rejects the real zero-research case for lacking 研究排名.
+        # Retain an explicit *empty* research schema while preserving A2's
+        # historical explanatory message. Blank identity/rank/score are NOT
+        # stock records and must never be counted as ranked candidates.
+        to_write = frame
+        if key == "research":
+            rank_fields = ("研究排名", "排名等級", "研究證據分", "股票代號", "股票名稱")
+            if frame.empty:
+                mandatory = ("狀態", *rank_fields)
+                columns = list(dict.fromkeys((*mandatory, *map(str, frame.columns))))
+                to_write = pd.DataFrame([{column: fallback if column == "狀態" else None
+                                          for column in columns}], columns=columns)
+            elif ("核查優先序" in frame.columns and
+                  ("排名等級" not in frame.columns or
+                   frame["排名等級"].fillna("").astype(str).str.startswith("W").all())):
+                # Some W-only legacy sources never passed through H153's rank
+                # attachment. Supply schema fields ONLY for this verifiable
+                # non-trading lane; preserve ordinary nonempty research sheets.
+                to_write = frame.copy(deep=True)
+                for column in rank_fields:
+                    if column not in to_write.columns:
+                        to_write[column] = None
+        ws = writer(wb, name, to_write, fallback)
         ws.freeze_panes = "A2"  # each category freezes only its own header row
         ws.auto_filter.ref = ws.dimensions
         ws.sheet_properties.tabColor = TABS_COLOR[name]
         ws.sheet_view.showGridLines = False
-        summary[name] = len(frame)
+        summary[name] = len(frame)  # the notice row is not a researched stock
     assert len(wb.sheetnames) == 2 + len(CATEGORY_TABS), "Incomplete manager export section set"
     return summary
 
