@@ -191,6 +191,11 @@ def append_pe_audit(wb: Any, *, research_day: Any) -> dict[str, Any]:
     if tab not in wb.sheetnames:
         return {"sheet": tab, "checked_codes": 0, "reason": "缺現有導航表，不建立替代報表"}
     snap = load_pe_snapshot()
+    # H170: source-level EPS observation, not an EPS TTM certification.
+    from godpick_h170_eps_evidence import load_snapshot as _h170_load_eps, asof_read as _h170_eps_asof
+    eps_snap = _h170_load_eps()
+    eps_index = {(str(r.get("code") or ""), str(r.get("market") or "")): r
+                 for r in eps_snap.get("eps_ytd_rows",[]) if isinstance(r,Mapping)}
     index = {(str(r.get("code") or ""), str(r.get("market") or "")): r
              for r in snap.get("pe_only", []) if isinstance(r, Mapping)}
     study = str(research_day or "")[:10]
@@ -208,7 +213,7 @@ def append_pe_audit(wb: Any, *, research_day: Any) -> dict[str, Any]:
     ws.cell(start+2, 1, "TPEx 已核 PE")
     ws.cell(start+2, 2, (snap.get("sources") or {}).get("TPEx", {}).get("verified_pe_rows", 0))
     ws.cell(start+3, 1, "正式資格")
-    ws.cell(start+3, 2, "僅官方PE，沒有獨立近四季EPS；不能作H115低PE×高EPS認證或H126交易授權。")
+    ws.cell(start+3, 2, "官方PE與H170財報累計EPS分開存證；累計EPS≠單季≠TTM，不得給H115/H126正式認證。")
     headers = ["股票代號","股票名稱","市場別","研究日","官方PE","官方PE資料日",
                "首次實際觀察時間","官方來源","PE證據狀態","獨立官方EPS","正式買進資格"]
     header_row = start + 5
@@ -239,11 +244,17 @@ def append_pe_audit(wb: Any, *, research_day: Any) -> dict[str, Any]:
             state = validate_observation_for_research(item, research_day=study) if item else (
                 "此代號／市場別未取得完整官方PE來源"
             )
+            eps_item = eps_index.get((code,market))
+            eps_state = (_h170_eps_asof(eps_item,study_day=study) if eps_item
+                         else "無可驗證官方累計EPS")
+            eps_label = (f"{eps_item['year_quarter']} 累計EPS {eps_item['eps_ytd']}／"
+                         f"{eps_state}／不是TTM" if eps_item
+                         else "未取得，非TTM")
             values = [code, name, market, study, item.get("pe") if item else None,
                       item.get("asof_date") if item else "",
                       item.get("available_at") if item else "",
                       item.get("source_url") if item else "",
-                      state, "未獨立認證", "禁止買進｜H126仍為唯一權威"]
+                      state, eps_label, "禁止買進｜H126仍為唯一權威"]
             r = header_row + len(seen)
             for j, value in enumerate(values, 1):
                 cell = ws.cell(r, j, value)
@@ -256,7 +267,9 @@ def append_pe_audit(wb: Any, *, research_day: Any) -> dict[str, Any]:
         ws.column_dimensions[letter].width = min(52, max(old, 27 if j in (7, 8, 9) else 17))
     return {"sheet": tab, "start_row": start, "checked_codes": len(seen),
             "with_official_pe_only": found, "eps_independently_verified": 0,
-            "snapshot_status": snap.get("status")}
+            "snapshot_status": snap.get("status"),
+            "eps_ytd_status": eps_snap.get("status"),
+            "eps_ttm_verified": False}
 
 
 __all__ = [
