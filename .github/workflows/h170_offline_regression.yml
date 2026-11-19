@@ -1,0 +1,64 @@
+name: H170 verified candidate stage and official EPS PIT regression
+on:
+  push:
+    branches:
+      - fix/h170-final-stage-eps-pit
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test-and-package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Minimal offline test prerequisites
+        run: python -m pip install -q --disable-pip-version-check pytest pandas numpy openpyxl requests
+      - name: Compile exact changed files, including full Page07
+        run: |
+          python -m py_compile "pages/7_股神推薦.py" godpick_h170_stage_reconcile.py godpick_h170_eps_evidence.py tools/h170_refresh_eps_ytd.py godpick_h145_core_bridge.py godpick_h169_pe_watch.py godpick_h1536_manager_clarity.py
+      - name: Verify H145/H1532/H157/H164/H169/H170 nonregression
+        run: |
+          pytest -q tests/test_h170_stage_eps_pit.py tests/test_h169_evidence_contract.py tests/test_h145_candidate_bridge.py tests/test_h1536_manager_clarity.py tests/test_h1532_prebreakout_scope.py tests/test_h157_trader_audit.py tests/test_h164_trader_focus.py
+      - name: Build cumulative H169 + H170 necessary overlay ZIP
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import zipfile,hashlib
+          files=[
+            "pages/7_股神推薦.py",
+            "godpick_h114_parallel_alpha.py",
+            "godpick_h145_core_bridge.py",
+            "godpick_h1536_manager_clarity.py",
+            "godpick_h157_trader_audit.py",
+            "godpick_h169_pe_watch.py",
+            "godpick_h170_stage_reconcile.py",
+            "godpick_h170_eps_evidence.py",
+            "tools/h169_refresh_pe_watch.py",
+            "tools/h170_refresh_eps_ytd.py",
+            ".github/workflows/h169_official_pe_only.yml",
+            ".github/workflows/h170_official_eps_ytd.yml",
+            "tests/test_h169_evidence_contract.py",
+            "tests/test_h170_stage_eps_pit.py",
+            "H169_README.txt",
+            "H170_README.txt",
+          ]
+          out=Path("StockApp_V191_H170_StageEpsFix.zip")
+          with zipfile.ZipFile(out,"w",zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+            for name in files:z.write(name,name)
+          with zipfile.ZipFile(out) as z:
+            assert z.namelist()==files
+            assert z.testzip() is None
+            assert all(z.read(n)==Path(n).read_bytes() for n in files)
+          print("H170_ZIP_SIZE",out.stat().st_size)
+          print("H170_ZIP_SHA256",hashlib.sha256(out.read_bytes()).hexdigest())
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: StockApp_V191_H170_StageEpsFix
+          path: StockApp_V191_H170_StageEpsFix.zip
+          retention-days: 7
+          if-no-files-found: error
