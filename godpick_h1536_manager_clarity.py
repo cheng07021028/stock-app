@@ -135,6 +135,49 @@ def clarify_manager_board(wb:Any, *, ranked:Any=None, watch:Any=None,
         {'檢查項目':'H153.6官方PE/EPS／三率來源缺口','結果':f'估值{valuation}／季報{quarter}／月營收{revenue}',
          '說明':'未有公告及可用時間的資料不給成長分；READ_OK不代表已補完整歷史'},
     ]
+    # H169: expose H145 actual forensic count reconciliation in the existing
+    # 02 audit. A scanner count cannot identify the missing formal stock code.
+    rec=bridge.get('final_reconciliation') if isinstance(bridge.get('final_reconciliation'),Mapping) else {}
+    if rec:
+        audit.append({
+            '檢查項目':'H169 H145正式輸出筆數斷點',
+            '結果':(
+                f"掃描預期{_nonnegative(rec.get('scanner_expected_count'))}／"
+                f"原始最終列{_nonnegative(rec.get('actual_final_rows'))}／"
+                f"有效唯一代號{_nonnegative(rec.get('actual_unique_4digit_codes'))}／"
+                f"差額{_nonnegative(rec.get('unaccounted_unique_gap'))}"
+            ),
+            '說明':str(rec.get('reason') or '')+'；不會自動補股或放寬H126'
+        })
+    stage=bridge.get('h170_stage_audit') if isinstance(bridge.get('h170_stage_audit'),Mapping) else {}
+    if stage:
+        audit.append({
+            '檢查項目':'H170同輪治理前後正式候選對帳',
+            '結果':(
+                f"掃描階段{_nonnegative(stage.get('scanner_expected'))}／"
+                f"治理後{_nonnegative(stage.get('post_unique'))}／"
+                f"{str(stage.get('result') or 'UNKNOWN')}"
+            ),
+            '說明':("治理淘汰代號：" + "、".join(map(str,stage.get('removed_codes') or []))+
+                   "；不代表獲H126授權" if stage.get('stage_verified') else
+                   '同輪ID、簽章、候選母體或完整證據不足；保留H145 BLOCKED')
+        })
+    # Official PE-only observations are independent from genuine H115 PE+TTM
+    # EPS. Never count them as a completed valuation ledger.
+    try:
+        from godpick_h169_pe_watch import load_pe_snapshot
+        pe_snapshot=load_pe_snapshot()
+        pe_sources=pe_snapshot.get('sources') or {}
+        pe_twse=_nonnegative((pe_sources.get('TWSE') or {}).get('verified_pe_rows'))
+        pe_tpex=_nonnegative((pe_sources.get('TPEx') or {}).get('verified_pe_rows'))
+        pe_state=str(pe_snapshot.get('status') or '未擷取')
+    except (ImportError,ValueError,TypeError,OSError):
+        pe_twse=pe_tpex=0;pe_state='PE_ONLY_UNAVAILABLE'
+    audit.append({
+        '檢查項目':'H169上市／上櫃官方PE單獨來源',
+        '結果':f"TWSE {pe_twse}／TPEx {pe_tpex}｜{pe_state}",
+        '說明':'僅PE首次觀察資料，非H115獨立TTM EPS帳本；不加研究成長分、不改H126權限'
+    })
     for (r,col),v in original.items():
         audit.append({'檢查項目':f'H153.6保留原版首頁單元格 R{r}C{col}',
                       '結果':v,'說明':'完整保留在02稽核工作表，首頁改為可讀的摘要'})

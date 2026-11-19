@@ -267,6 +267,10 @@ def render_trader_audit(wb: Any, *, research_day: Any, h145_status: str='',
         wb, research_day=research_day, h145_status=h145_status,
         h126_buyable=h126_buyable,
     )
+    # H169: independently observed official PE is research evidence only.
+    # No synthetic EPS, no reranking; append below the H165 table in Sheet11.
+    from godpick_h169_pe_watch import append_pe_audit
+    result['h169_pe_watch'] = append_pe_audit(wb, research_day=research_day)
     return result
 
 

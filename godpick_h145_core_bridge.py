@@ -89,10 +89,53 @@ def restore_export_pool(
         if was_complete or not result["status"].startswith("BLOCKED_"):
             result["status"] = "BLOCKED_FINAL_CODES_NOT_IN_CANDIDATES"
     if final_expected and len(expected_final_codes) < final_expected:
-        # A scanner says it selected eight but only one result row survived;
-        # don't treat the remaining seven as implicitly in the spreadsheet.
-        result["candidate_complete"] = False
-        result["status"] = "BLOCKED_FINAL_RESULT_COUNT_GAP"
+        # H170: the scanner's first pre-SuperAI shortlist and the final
+        # post-governance selector are different decision STAGES. Count
+        # differences are not necessarily missing Excel rows. However, only
+        # an independent SAME-RUN stage contract and complete mother pool
+        # can prove a legitimate reselection; otherwise fail closed.
+        try:
+            from godpick_h170_stage_reconcile import validate_stage_contract
+            stage = validate_stage_contract(
+                report.get("h170_stage_contract"), expected_pre=final_expected,
+                actual_final=final,context_run_id=context_run_id,
+                scan_run_id=scan_run_id,decision_signature=decision_signature,
+                active_signature=active_signature,
+            )
+        except Exception as exc:
+            stage = {"stage_verified":False,"result":"BLOCKED_STAGE_VALIDATION_EXCEPTION",
+                     "exception_type":type(exc).__name__}
+        result["h170_stage_audit"]=stage
+        if stage.get("stage_verified") and result.get("candidate_complete") and not missing:
+            result["status"]="RECONCILED_POST_GOVERNANCE_RESELECTION"
+            # No candidate was added; H109/H126 is still the only trade gate.
+            result["trade_authority_changed"]=False
+        else:
+            result["candidate_complete"] = False
+            result["status"] = "BLOCKED_FINAL_RESULT_COUNT_GAP"
+    # H169: distinguish a scanner count measured before de-duplication from
+    # actual unique final codes. Without a same-run list of expected codes we
+    # cannot reconstruct the missing name nor silently lower the denominator.
+    raw_final_rows = len(final)
+    actual_unique = len(expected_final_codes)
+    result["final_reconciliation"] = {
+        "scanner_expected_count": final_expected,
+        "actual_final_rows": raw_final_rows,
+        "actual_unique_4digit_codes": actual_unique,
+        "duplicated_or_invalid_final_rows": max(0, raw_final_rows - actual_unique),
+        "unaccounted_unique_gap": max(0, final_expected - actual_unique),
+        "same_run_ids_match": run_ids_match,
+        "candidate_codes_missing_in_diagnosis": list(missing),
+        "exact_missing_code_known": False,
+        "reason": (
+            "最終原始列不少於掃描預期，但重複或無效代號造成唯一代號不足；須追查去重前資料"
+            if final_expected > actual_unique and raw_final_rows >= final_expected
+            else "正式候選結果在輸出前已減少；現有欄位無法推定遺失的股票代號"
+            if final_expected > actual_unique
+            else "正式候選唯一代號數量核對通過；仍須逐股官方證據與H126權威"
+        ),
+        "can_authorize_trade": False,
+    }
     result["selected_rows"] = len(selected)
     return selected.copy(deep=False), result
 
