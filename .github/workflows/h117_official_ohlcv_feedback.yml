@@ -53,6 +53,24 @@ jobs:
           else
             echo 'NO_REAL_PREDICTIONS_OR_PRICES: no manufactured outcomes' | tee reports/h121/H121_review_run.log
           fi
+      - name: H172 retrospective T+N evidence (read-only sources; no legacy record mutation)
+        id: h172
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/h172_closed_loop_cli.py \
+            --decisions data/h116/decisions \
+            --daily data/h117/daily \
+            --output reports/h172/H172_performance_research.json
+      - name: H173 benchmark-relative T+N research (zero trade authority)
+        id: h173
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/h173_relative_edge_cli.py \
+            --h172 reports/h172/H172_performance_research.json \
+            --daily data/h117/daily \
+            --output reports/h173/H173_relative_index_audit.json
       - name: Create stable operations state and a per-run receipt
         if: always()
         id: health
@@ -99,6 +117,28 @@ jobs:
             fi
           else
             echo 'H122: partial or failed run: commit health metadata only; NO source promotion.'
+          fi
+          # H172 is a separate immutable-source research receipt: commit only if
+          # core H122 data flow succeeded AND H172 locally verified its output.
+          # A skipped/failed H172 never blocks existing H122 publishing.
+          if [[ '${{ steps.collect.outcome }}' == 'success' && '${{ steps.corporate.outcome }}' == 'success' && '${{ steps.review.outcome }}' == 'success' && '${{ steps.h172.outcome }}' == 'success' && -f reports/h172/H172_performance_research.json ]]; then
+            git add reports/h172/H172_performance_research.json
+          fi
+          # H173 is a SHA-linked H172/H117 after-the-fact audit. Never commit
+          # it when any upstream stage failed or partial records were produced.
+          if [[ '${{ steps.collect.outcome }}' == 'success' && '${{ steps.corporate.outcome }}' == 'success' && '${{ steps.review.outcome }}' == 'success' && '${{ steps.h172.outcome }}' == 'success' && '${{ steps.h173.outcome }}' == 'success' && -f reports/h173/H173_relative_index_audit.json ]]; then
+            python - <<'PY173'
+            import sys
+            from pathlib import Path
+            sys.path.insert(0, '.')
+            from godpick_h172_closed_loop import load_verified_report
+            from godpick_h173_relative_edge import load_relative_report
+            h172=load_verified_report(Path('reports/h172/H172_performance_research.json'))
+            h173=load_relative_report(Path('reports/h173/H173_relative_index_audit.json'))
+            if not h172 or not h173 or h173['h172_report_sha256'] != h172['report_sha256']:
+                raise SystemExit('H173 / H172 SHA mismatch; do not publish')
+            PY173
+            git add reports/h173/H173_relative_index_audit.json
           fi
           # Stable state is committed only when underlying evidence/state changes,
           # never per-run timestamps or logs. (If ignored, explicitly allow this one file.)
