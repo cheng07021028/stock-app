@@ -51,7 +51,12 @@ def plan_missing_record_repair(local_rows: list[dict], remote_rows: list[dict], 
         return {"allowed": False, "reason": f"Firestore另有{len(extra)}筆本機不存在的紀錄，不得覆蓋或刪除", "extra_ids": extra[:20]}
     conflicts = [rid for rid in remote_idx if _stable(remote_idx[rid]) != _stable(local_idx[rid])]
     if conflicts:
-        return {"allowed": False, "reason": f"Firestore有{len(conflicts)}筆同ID但內容不同，不得自動修復", "conflict_ids": conflicts[:20]}
+        from godpick_h182_record_diff_audit import audit_replicas, succinct_reason
+        audit = audit_replicas(local_rows, remote_rows, remote_doc_ids)
+        return {"allowed": False,
+                "reason": f"Firestore有{len(conflicts)}筆同ID但內容不同，不得自動修復｜" + succinct_reason(audit),
+                "conflict_ids": conflicts[:20],
+                "audit": audit}
     missing_ids = [rid for rid in local_idx if rid not in remote_idx]
     if len(missing_ids) > max_missing:
         return {"allowed": False, "reason": f"Firestore缺{len(missing_ids)}筆，超過單次修復上限{max_missing}筆；需人工核對"}

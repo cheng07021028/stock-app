@@ -3661,3 +3661,52 @@ def load_module_sync_state() -> tuple[dict[str, Any], list[str]]:
 
 def report_is_reboot_durable(report: PersistenceReport) -> bool:
     return bool(report.permanent_ok)
+
+
+def h182_readonly_recommendation_replica_audit(*, selected_ids: Iterable[str] | None = None) -> tuple[dict[str, Any], str]:
+    """H182: manually requested, read-only full FS diff; never writes/delete records.
+
+    Needs an explicit UI click. Respects the existing H163 quota guard and
+    does NOT treat the Firestore summary as a substitute for actual docs.
+    """
+    from godpick_h182_record_diff_audit import audit_replicas
+    if not firebase_configured():
+        return {"valid":False,"reason":"Firebase 未設定"}, "H182 未讀取遠端；無 Firebase 設定"
+    quota = _H163_FS_GUARD.quota_reason()
+    if quota:
+        return {"valid":False,"reason":"Firestore 配額冷卻中"}, f"H182 取消全表讀取：{quota}"
+    key = "h182_manual_readonly_audit"
+    cooldown = _H163_FS_GUARD.full_read_blocked(key)
+    if cooldown:
+        return {"valid":False,"reason":"Firestore 全表讀取冷卻中"}, f"H182 暫停重複讀取：{cooldown}"
+    try:
+        payload, local_msg, _ = read_local_json(RECORDS_FILE, [])
+        local = records_as_rows_exact(payload)
+        if not local:
+            return {"valid":False,"reason":"本機無有效完整權威"}, "H182 無本機資料，未讀取 Firestore"
+        _init_firebase_app()
+        db = firestore.client()
+        docs = list(db.collection("godpick_records").stream())
+        remote=[]
+        for doc in docs:
+            row = dict(doc.to_dict() or {})
+            row.setdefault('record_id', doc.id)
+            remote.append(row)
+        report=audit_replicas(local,remote,[doc.id for doc in docs],list(selected_ids or []))
+        report['local_payload_hash_prefix']=_json_hash(local)[:16]
+        summary=db.collection('system').document('godpick_records_summary').get()
+        s=dict(summary.to_dict() or {}) if summary.exists else {}
+        report['firestore_summary_count']=s.get('count')
+        report['firestore_summary_hash_prefix']=_safe_str(s.get('payload_hash'))[:16]
+        report['firestore_summary_revision']=s.get('revision')
+        gh, msg=read_github_json(RECORDS_STATE_FILE,{}) if github_config().get('token') else ({},'GitHub Token未設定')
+        report['github_state_count']=gh.get('count') if isinstance(gh,dict) else None
+        report['github_state_hash_prefix']=_safe_str(gh.get('payload_hash'))[:16] if isinstance(gh,dict) else ''
+        report['github_state_matches_local_metadata']=bool(isinstance(gh,dict) and _safe_str(gh.get('payload_hash'))==_json_hash(local) and int(gh.get('count') or -1)==len(local))
+        report['full_github_snapshot_verified']=False  # state alone != shards
+        _H163_FS_GUARD.note_full_success()
+        return report, f"H182 只讀欄位稽核完成：本機 {len(local)} 筆，Firestore 實際 {len(remote)} 筆；沒有變更任何紀錄。"
+    except Exception as exc:
+        _H163_FS_GUARD.note_full_failure(key)
+        _H163_FS_GUARD.note_error(exc,'h182_readonly_replica_audit')
+        return {"valid":False,"reason":type(exc).__name__}, f"H182 只讀稽核失敗：{type(exc).__name__}：{exc}"

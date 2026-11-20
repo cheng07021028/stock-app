@@ -6758,6 +6758,33 @@ def main():
     except Exception:
         pass
 
+    # H182: explicit, read-only discrepancy audit. No remote full read on reruns.
+    with st.expander("H182｜本機／Firestore 差異稽核（唯讀，不刪除）", expanded=False):
+        st.caption("手動啟動才讀取 Firestore 全部推薦紀錄（有文件讀取配額成本）。僅顯示欄位名稱／差異筆數，不會覆蓋、補寫、刪除或修改任何正式紀錄。")
+        if st.button("檢查 2,617／2,560 權威差異（只讀）", key=_k("h182_audit_remote_btn")):
+            try:
+                from godpick_persistence_service import h182_readonly_recommendation_replica_audit
+                _h182_report, _h182_message = h182_readonly_recommendation_replica_audit(
+                    selected_ids=list(_selection_ids("刪除")))
+                st.session_state[_k("h182_last_report")] = _h182_report
+                st.session_state[_k("h182_last_message")] = _h182_message
+            except Exception as _h182_exc:
+                st.session_state[_k("h182_last_report")] = {"valid": False, "reason": type(_h182_exc).__name__}
+                st.session_state[_k("h182_last_message")] = f"H182 診斷程式未載入：{_h182_exc}"
+        _h182_existing = st.session_state.get(_k("h182_last_report"), {})
+        if _h182_existing:
+            st.info(str(st.session_state.get(_k("h182_last_message"), "")))
+            if _h182_existing.get("valid"):
+                _h182_classes = _h182_existing.get("classifications", {}) or {}
+                st.caption(
+                    f"實際重疊 {_h182_existing.get('shared_count',0)} 筆｜"
+                    f"同名欄位值不同 {_h182_classes.get('VALUE_CONFLICT',0)} 筆｜"
+                    f"只有本機新增欄位 {_h182_classes.get('LOCAL_EXTRA_FIELDS_ONLY',0)} 筆｜"
+                    f"雙向欄位差異 {_h182_classes.get('BIDIRECTIONAL_SCHEMA_DRIFT',0)} 筆。"
+                    "所有結果均非刪除授權。"
+                )
+            st.json(_h182_existing, expanded=False)
+
     # V179：不依賴使用者自訂欄位設定，固定提供最近行情稽核表，讓「推薦價＝最新價」
     # 到底是價格真的沒變、尚未取得新交易日，或更新失敗一眼可辨。
     try:
