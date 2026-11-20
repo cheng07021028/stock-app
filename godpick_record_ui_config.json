@@ -1,6 +1,6 @@
 {
   "fast_mode": true,
-  "visible_limit": 2700,
+  "visible_limit": 3000,
   "profiles": {
     "標準": [
       "v21操作優先順序",
@@ -743,5 +743,5 @@
       "績效行情來源"
     ]
   },
-  "updated_at": "2026-11-20 08:30:35"
+  "updated_at": "2026-11-20 09:42:10"
 }
