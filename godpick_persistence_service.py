@@ -2423,6 +2423,135 @@ def write_records_firestore_mutation(
         return False, f"Firestore records 增量寫入失敗：{exc}"
 
 
+def _h176_repair_firestore_gap_for_verified_delete(
+    before: list[dict[str, Any]], *, expected_local_hash: str,
+) -> tuple[bool, str, dict[str, Any]]:
+    """Reconcile a *confirmed* GitHub/full-local authority into older Firestore.
+
+    Invoked ONLY by a user-initiated delete, only after all selected IDs and
+    untouched historical rows are reconciled. If evidence is incomplete,
+    no remote write is attempted and deletion remains blocked. Full collection
+    read is exceptional (mismatched 08 records), never on normal reruns.
+    """
+    from godpick_h176_delete_reconcile import plan_missing_record_repair
+    if not firebase_configured() or not github_config().get("token"):
+        return False, "H176需要可讀取的GitHub完整權威及Firestore", {}
+    reason = _H163_FS_GUARD.quota_reason()
+    if reason:
+        return False, f"H176 Firestore配額冷卻：{reason}，未修復／未刪除", {}
+    try:
+        # A metadata hash alone does not establish the existence of all H127
+        # chunks. Read and hash the actual published snapshot.
+        gh_state, gh_msg = read_github_json(RECORDS_STATE_FILE, {})
+        if (not isinstance(gh_state, dict)
+                or _safe_str(gh_state.get("payload_hash")) != expected_local_hash
+                or int(gh_state.get("count") or -1) != len(before)):
+            return False, f"H176 GitHub權威與本機不一致（{gh_msg}），請先重新載入", {}
+        gh_rows, gh_payload_msg = read_github_json(RECORDS_FILE, [])
+        if (not isinstance(gh_rows, list) or len(gh_rows) != len(before)
+                or _json_hash(gh_rows) != expected_local_hash):
+            return False, f"H176 GitHub完整內容/分片Hash無法核實（{gh_payload_msg}），未修改Firestore", {}
+        _init_firebase_app()
+        db = firestore.client()
+        summary_ref = db.collection("system").document("godpick_records_summary")
+        old_snap = summary_ref.get()  # fresh read, bypass H163 summary TTL
+        old_summary = (old_snap.to_dict() or {}) if old_snap.exists else {}
+        if not old_summary.get("payload_hash"):
+            return False, "H176 Firestore缺少完整摘要Hash，不允許自動修復", {}
+        if (int(old_summary.get("count") or -1) == len(before)
+                and _safe_str(old_summary.get("payload_hash")) == expected_local_hash):
+            _H163_FS_GUARD.note_summary(old_summary)
+            return True, "H176 Firestore實際摘要已一致（舊快取落後）", old_summary
+        # A newer Firestore state may be an intentional remote delete, not a
+        # lost-sync problem. Refuse to resurrect its missing IDs.
+        fs_rev = int(old_summary.get("revision") or 0)
+        gh_rev = int(gh_state.get("revision") or 0)
+        if fs_rev and gh_rev and fs_rev > gh_rev:
+            return False, "H176 Firestore版本比GitHub新；可能有其他人的編輯/刪除，禁止自動補回", {}
+        if not (fs_rev and gh_rev):
+            return False, "H176 遠端版本序號不足，無法排除較新刪除，請人工核對", {}
+        _full_read_key = f"h176_delete_reconcile:{expected_local_hash[:16]}"
+        cooldown = _H163_FS_GUARD.full_read_blocked(_full_read_key)
+        if cooldown:
+            return False, f"H176 暫停重複全量對帳：{cooldown}", {}
+        collection = db.collection("godpick_records")
+        docs = list(collection.stream())
+        if len(docs) > len(before):
+            return False, "H176 Firestore實際資料比本機多，禁止覆蓋較完整權威", {}
+        actual = []
+        for doc in docs:
+            row = dict(doc.to_dict() or {})
+            row.setdefault("record_id", doc.id)
+            actual.append(row)
+        plan = plan_missing_record_repair(before, actual, remote_doc_ids=[d.id for d in docs])
+        if not plan.get("allowed"):
+            _H163_FS_GUARD.note_full_failure(_full_read_key)
+            return False, "H176 差異對帳阻擋：" + str(plan.get("reason")), {}
+        # Prevent an authority change while we were reading the full collection.
+        gh_check, _ = read_github_json(RECORDS_STATE_FILE, {})
+        if (not isinstance(gh_check, dict)
+                or _safe_str(gh_check.get("payload_hash")) != expected_local_hash
+                or int(gh_check.get("revision") or -1) != gh_rev):
+            return False, "H176 對帳期間GitHub權威已變動，請重新載入後操作", {}
+        fresh_state = _new_state(
+            "godpick_records_h176_firestore_gap_reconciliation", before,
+            count=len(before), latest_recommendation_date=_latest_record_recommendation_date(before),
+        )
+        summary_data = {
+            "count": len(before), "payload_hash": expected_local_hash,
+            "latest_recommendation_date": fresh_state["latest_recommendation_date"],
+            "revision": fresh_state["revision"],
+            "updated_at_epoch": fresh_state["updated_at_epoch"],
+            "updated_at_utc": fresh_state["updated_at_utc"],
+            "updated_at": firestore.SERVER_TIMESTAMP,
+            "updated_at_text": fresh_state["updated_at"],
+            "source": "godpick_h176_verified_github_gap_reconciliation",
+        }
+        # The transaction rereads the summary before writes. All official
+        # record writers update that summary in the same batch; a concurrent
+        # writer invalidates the transaction rather than losing its update.
+        @firestore.transactional
+        def _commit_repair(tx):
+            current = summary_ref.get(transaction=tx)
+            current_state = (current.to_dict() or {}) if current.exists else {}
+            for key in ("count", "payload_hash", "revision"):
+                if current_state.get(key) != old_summary.get(key):
+                    raise RuntimeError("Firestore摘要已被其他寫入者更新，請重新載入")
+            # Transaction reads must precede writes. Do not overwrite an ID
+            # concurrently created after the out-of-transaction collection scan.
+            to_insert = []
+            for row in plan["missing_rows"]:
+                ref = collection.document(str(row["record_id"]))
+                existing = ref.get(transaction=tx)
+                if existing.exists:
+                    raise RuntimeError(f"Firestore缺漏ID已被其他工作者建立：{row['record_id']}，禁止覆蓋")
+                to_insert.append((ref, row))
+            for ref, row in to_insert:
+                body = dict(row)
+                body["updated_at"] = firestore.SERVER_TIMESTAMP
+                tx.set(ref, body, merge=False)
+            tx.set(summary_ref, summary_data, merge=True)
+        _commit_repair(db.transaction())
+        # Check the repaired summary and each newly created identity. Do not
+        # claim success after only submitting a transaction.
+        new_snap = summary_ref.get()
+        new_state = (new_snap.to_dict() or {}) if new_snap.exists else {}
+        if (_safe_str(new_state.get("payload_hash")) != expected_local_hash
+                or int(new_state.get("count") or -1) != len(before)):
+            return False, "H176 Firestore修復後摘要回讀失敗，禁止繼續刪除", {}
+        missing_ids = plan["missing_ids"]
+        if missing_ids:
+            verified = {x.id for x in db.get_all([collection.document(rid) for rid in missing_ids]) if x.exists}
+            if verified != set(missing_ids):
+                return False, "H176 Firestore補入文件尚未全部核實，禁止繼續刪除", {}
+        _H163_FS_GUARD.note_full_success()
+        _H163_FS_GUARD.note_summary(new_state)
+        return True, f"H176 Firestore核實並補齊{len(missing_ids)}筆，保留{len(before)}筆；可執行指定ID刪除", new_state
+    except Exception as exc:
+        _H163_FS_GUARD.note_error(exc, "h176_firestore_gap_reconcile")
+        return False, f"H176 遠端差異修復停止：{type(exc).__name__}：{exc}（未允許刪除）", {}
+
+
 def _h141_prevent_remote_rollback(
     records: list[dict[str, Any]], *, deleted_ids: Iterable[str] | None = None,
     previous_rows: list[dict[str, Any]] | None = None,
@@ -2458,6 +2587,16 @@ def _h141_prevent_remote_rollback(
         fs_state, fs_msg = _read_records_firestore_summary()
         if isinstance(fs_state, dict) and fs_state.get("payload_hash"):
             states.append(("Firestore", fs_state))
+        elif deleted:
+            # H177: a configured-but-unreachable Firestore MUST NOT silently
+            # disappear from the authority set during a destructive operation.
+            # GitHub-only deletion would otherwise be revived by a later
+            # Firestore restoration on the next Streamlit reboot.
+            return False, (
+                "H177刪除未執行：Firestore已設定但摘要無法核實（" + str(fs_msg)[:260] +
+                "）；即使GitHub筆數相同，仍禁止只刪GitHub後由Firestore還原。"
+                "請先修正Firestore連線/配額，再重新載入。"
+            )
         elif not states:
             return False, f"H141保護：Firestore 無法驗證推薦摘要（{fs_msg}）；禁止寫入。"
     if deleted:
@@ -2479,6 +2618,34 @@ def _h141_prevent_remote_rollback(
         if not states:
             return False, "H161刪除前沒有可驗證的遠端權威（不允許只更新本機）。"
         before_hash = _json_hash(before)
+        h176_repair_notes: list[str] = []
+        # H176: a stale Firestore summary must not lock out deletions forever,
+        # but it also must not be waived. First prove full GitHub H127 authority,
+        # reconcile only absent Firestore document IDs, then re-run H161 guards.
+        github_complete_state = any(
+            source == "GitHub runtime-data"
+            and _safe_str(state.get("payload_hash")) == before_hash
+            and int(state.get("count") or -1) == len(before)
+            for source, state in states
+        )
+        for index, (source, state) in enumerate(states):
+            if source != "Firestore":
+                continue
+            if (int(state.get("count") or -1) == len(before)
+                    and _safe_str(state.get("payload_hash")) == before_hash):
+                continue
+            if not github_complete_state:
+                return False, (
+                    "H176 Firestore資料不一致且GitHub未證明完整本機權威；"
+                    "未自動刪除，請先恢復/確認遠端完整紀錄。"
+                )
+            repaired, why, repaired_state = _h176_repair_firestore_gap_for_verified_delete(
+                before, expected_local_hash=before_hash,
+            )
+            if not repaired:
+                return False, why
+            h176_repair_notes.append(why)
+            states[index] = (source, repaired_state)
         for source, state in states:
             good, why = record_snapshot_guard(before, state, destructive=False)
             if not good:
@@ -2495,7 +2662,8 @@ def _h141_prevent_remote_rollback(
                     f"H161刪除前版本不一致：{source} 的內容Hash與本機不同；"
                     "為避免覆蓋其他人的新資料，請重新載入完整權威。"
                 )
-        return True, f"H161精確刪除預檢成功：原權威 {len(before)} 筆，僅刪 {len(deleted)} 個明確record_id"
+        return True, (f"H161精確刪除預檢成功：原權威 {len(before)} 筆，僅刪 {len(deleted)} 個明確record_id"
+                      + ("｜" + "｜".join(h176_repair_notes) if h176_repair_notes else ""))
     for source, state in states:
         good, why = record_snapshot_guard(records, state, destructive=False)
         if not good:
@@ -2605,7 +2773,7 @@ def save_records_mutation_fast(
         ok2, msg2 = write_local_json_atomic(RECORDS_STATE_FILE, state)
         ok3, msg3 = write_local_json_atomic(RECORDS_MANIFEST_FILE, _records_manifest(records, state["payload_hash"])) if ok1 and ok2 else (False, "本機前置失敗")
         report.local_ok = bool(ok1 and ok2 and ok3)
-        report.local_message = f"{msg1}｜{msg2}｜{msg3}"
+        report.local_message = f"{msg1}｜{msg2}｜{msg3}" + (f"｜{_h141_reason}" if "H176" in _h141_reason else "")
         report.github_ok = bool(gh_ok)
         report.github_message = gh_msg if gh_ok else "GitHub 待同步；Firestore 已完成精確刪除"
         if fs_ok and cfg.get("token") and report.local_ok:

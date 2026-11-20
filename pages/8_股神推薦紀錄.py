@@ -2554,6 +2554,12 @@ def _save_records_mutation_fast_ui(
         # V162：表格 mutation 以本機原子寫入是否成功決定畫面是否切換。
         # 遠端 Firestore/GitHub 失敗或排隊中會在同步明細顯示，但不再讓刪除按鈕無限等待、也不讓已刪資料留在畫面。
         local_ok = bool(getattr(report, "local_ok", False))
+        # H177: UI must not display a confirmed delete unless one remote
+        # authority has committed and the local file was saved. For a failed
+        # delete, leave the editor unchanged even if a partial local write
+        # was reported by an older persistence implementation.
+        if deleted_ids:
+            local_ok = bool(local_ok and getattr(report, "permanent_ok", False))
         if local_ok:
             try:
                 _save_normalized_record_cache_v165(clean_df, _records_local_signature())
@@ -2562,8 +2568,12 @@ def _save_records_mutation_fast_ui(
         st.session_state[_k("last_mutation_local_ok")] = local_ok
         st.session_state[_k("last_mutation_permanent_ok")] = bool(getattr(report, "permanent_ok", False))
         return local_ok
-    # Compatibility fallback for deployments that did not yet load the new
-    # persistence helper.  This can be slower but must never pretend success.
+    # H177: without the verified persistence helper, never fall back to a
+    # destructive whole-file replacement. It could erase unseen histories.
+    if deleted_ids:
+        _set_status("H177安全阻擋：目前未載入精確刪除保存服務。請確認全部正式檔已部署至同一版、重啟後再試。", "error")
+        st.session_state[_k("last_sync_detail")] = ["H177｜缺少 save_records_mutation_fast，不允許整檔刪除回退"]
+        return False
     return _save_records_dual(clean_df)
 
 
@@ -6360,6 +6370,8 @@ def main():
     )
     st.caption(f"目前8頁修正版：{RECORD_FIX_VERSION}")
     st.caption(f"刪除修正版：{DELETE_FIX_VERSION}｜H161精確record_id核驗＋先遠端確認再刪本機；未授權/版本不一致不變動歷史")
+    st.caption("H177｜刪除修正版已載入：本機／GitHub／Firestore 必須完成安全對帳，確認遠端保存後才更新畫面。")
+    st.caption("H176｜本機/GitHub與Firestore差異自動驗證：僅完整權威同Hash時補齊缺失ID，衝突/較新遠端仍禁止刪除；不修改其他紀錄")
     st.caption(f"運算加速修正版：{RECORD_SPEED_FIX_VERSION}")
     st.caption(f"最新價／損益修正版：{LATEST_PRICE_PNL_FIX_VERSION}｜V179 交易所整體盤後快照＋實際成交雙軌｜保存行情日期／來源／計算狀態")
     st.caption(f"7/8/9 起漲欄位版：{PRELAUNCH_789_VERSION}")
@@ -7284,11 +7296,11 @@ def main():
                 )
             else:
                 _detail = st.session_state.get(_k("last_sync_detail"), []) or []
-                _reason = next((str(x) for x in _detail if any(k in str(x) for k in ("H161", "H141", "403", "權限", "版本"))), "")
+                _reason = next((str(x) for x in _detail if any(k in str(x) for k in ("H177", "H176", "H161", "H141", "403", "權限", "版本"))), "")
                 st.session_state[_k("last_mutation_local_ok")] = False
                 st.session_state[_k("last_mutation_permanent_ok")] = False
                 st.session_state[_k("last_delete_msg")] = (
-                    "H161刪除未執行：本機/遠端權威保持原樣。" + _reason[:450]
+                    "H161刪除未執行（H176差異核對）：本機及遠端既有紀錄均未刪除；若已通過差異對帳補入缺漏，補入紀錄仍保留。" + _reason[:450]
                     + "｜若 GitHub 403，請確認 Streamlit GITHUB_TOKEN 對 stock-app 有 Contents: Read and write，"
                     "再按『重新載入』取得完整遠端權威後重新勾選。"
                 )
