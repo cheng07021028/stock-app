@@ -108,6 +108,9 @@ def analyze_history(hist: pd.DataFrame | None, *, asof: Any = None) -> dict[str,
         "H1532ADX":None, "H1532DMI方向":"未驗證",
         "H1532技術來源":"日K資料不足", "H1532技術反證":"不得推算明日上漲機率",
         "H169_H114量價契約":"未驗證", "H169_H1532完整型態契約":"未驗證",
+        "H175價格型態（僅OHLC）":"資料不足／尚未驗證",
+        "H175價格20日報酬%":None, "H175價格距箱頂%":None,
+        "H175價格證據限制":"價格型態不能取代成交量、法人、官方PE/EPS或H126",
     }
     if not isinstance(hist, pd.DataFrame) or hist.empty:
         return base
@@ -152,9 +155,48 @@ def analyze_history(hist: pd.DataFrame | None, *, asof: Any = None) -> dict[str,
     if limit and (limit - df["day"].iloc[-1]).days > 5:
         base["H114K線資料狀態"] = "STALE_DAILY_K"
         return base
+    # H175: restore independent *price-only* early-setup visibility when the
+    # volume feed is incomplete. Never label this a verified volume breakout,
+    # golden cross, or a tradeable candidate; original H169 strict gate stays.
+    # Previous20 HIGH excludes the current bar; no look-ahead or current-day high
+    # accidentally setting its own breakout threshold.
+    if len(df) >= 60 and (not limit or df["day"].iloc[-1] == limit):
+        recent_close = df["close"]
+        prev20 = df.iloc[-21:-1]
+        price_now = float(recent_close.iloc[-1])
+        prior20 = float(recent_close.iloc[-21])
+        mean20 = float(recent_close.tail(20).mean())
+        mean60 = float(recent_close.tail(60).mean())
+        ceiling = float(prev20["high"].max())
+        floor = float(prev20["low"].min())
+        ret20 = (price_now / prior20 - 1) * 100 if prior20 > 0 else None
+        distance = (ceiling - price_now) / ceiling * 100 if ceiling > 0 else None
+        narrow = bool(floor > 0 and (ceiling - floor) / floor <= .18)
+        near = bool(distance is not None and -1.5 <= distance <= 5.0)
+        not_chased = bool(ret20 is not None and -15 <= ret20 <= 20)
+        price_setup = bool(narrow and near and mean20 >= mean60 and not_chased)
+        base["H175價格20日報酬%"] = round(ret20, 2) if ret20 is not None else None
+        base["H175價格距箱頂%"] = round(distance, 2) if distance is not None else None
+        base["H175價格型態（僅OHLC）"] = (
+            "初步蓄勢｜僅價型，量能／財報未證" if price_setup
+            else "價格型態未達初步條件／非負面判斷")
     # H169: 60-bar OHLCV must have positive finite lots, not just a column.
     # H1532 independently requires all 85 bars to meet its stricter contract.
     recent60 = df["lots"].tail(60)
+    # H175: record the precise cause of zero viable research candidates. Do not
+    # replace missing/zero volume with a favorable estimate or relax H169 gate.
+    _h175_n = pd.to_numeric(recent60, errors="coerce")
+    _h175_missing = int(_h175_n.isna().sum())
+    _h175_nonpos = int((_h175_n.notna() & (_h175_n <= 0)).sum())
+    base["H175成交量來源欄"] = str(volume_col or "缺欄位／單位未知")
+    base["H175最近60根量價完整數"] = int((_h175_n.notna() & (_h175_n > 0)).sum())
+    base["H175最近60根成交量缺失數"] = _h175_missing
+    base["H175最近60根成交量非正數"] = _h175_nonpos
+    base["H175量價待補建議"] = (
+        "需要至少60根可查來源的有效交易量；不得用價格×成交額反推假量或跳過零量日"
+        if (len(recent60) < 60 or not volume_col or _h175_missing or _h175_nonpos)
+        else "近60根成交量完整；仍需逐股行情來源確認"
+    )
     valid60lots = bool(volume_col and len(recent60) == 60 and
                        pd.to_numeric(recent60, errors="coerce").notna().all() and
                        (pd.to_numeric(recent60, errors="coerce") > 0).all())

@@ -17827,6 +17827,18 @@ def _build_excel_bytes_fast_h85(
         h126_buyable=h144_focus_meta.get('h126_buyable',0),
         run_id=(locals().get('_h154_audit') or {}).get('run_id',''))
 
+    # H175: expose ONLY the same-run H85 waiting stock names as an explicitly
+    # non-trading repair queue. H153 ranked, H109/H126, all original 14 tabs,
+    # and the existing H154 cross-tab validation remain untouched.
+    from godpick_h175_evidence_rescue import (
+        build_h175_audit as _h175_build_audit,
+        append_h175_excel as _h175_append_excel)
+    _h175_report = _h175_build_audit(
+        diagnosis=locals().get('_h1483_source', pd.DataFrame()),
+        tables=tables, h154_audit=locals().get('_h154_audit', {}),
+        study_day=locals().get('_h148_research_day'))
+    _h175_append_excel(wb, _h175_report)
+
     try:
         wb.active = 0
     except Exception:
