@@ -1,0 +1,19 @@
+{
+  "version": "V191-H185-AUTONOMOUS-OFFICIAL-RESEARCH",
+  "research_authority": "RESEARCH_ONLY_H109_H126_UNCHANGED",
+  "data_policy": "自動收集已公告資料，不捏造即時行情／交易紀錄／EPS TTM，不回寫既有推薦權威",
+  "roles": [
+    {"role_id":"01","status":"AUTO_WITH_CONDITIONS","primary":"H117／H185 官方單股歷史日K","secondary":"H115 官方月營收／單季利潤率","limits":"需選擇研究標的；有效K不足與除權息未核時只列條件研究"},
+    {"role_id":"02","status":"AUTO_WITH_CONDITIONS","primary":"H117／H185 官方日K","secondary":"TWSE／TPEx 官方行情","limits":"只提供未調整日K；樣本不足不計技術指標"},
+    {"role_id":"03","status":"AUTO_WITH_CONDITIONS","primary":"上市／上櫃重大訊息 OpenAPI","secondary":"既有 H150 公開 RSS 標題快取","limits":"公司公告主旨不等於利多；RSS 非核實全文"},
+    {"role_id":"04","status":"AUTO_WITH_CONDITIONS","primary":"官方歷史日K（選定代號）","secondary":"既有 H117 不可變盤後快照","limits":"只有 H184 固定 MA5／20 示範策略；需檢查除權息、樣本外與成本"},
+    {"role_id":"05","status":"NEEDS_ACCOUNT_PERMISSION","primary":"券商授權持倉／真實現金配置","secondary":"官方市場行情供壓力測試","limits":"公開網站無法得知私人持股，不以觀察名單冒充資產"},
+    {"role_id":"06","status":"NEEDS_ACCOUNT_PERMISSION","primary":"券商實際成交回報／授權交易帳本","secondary":"現有推薦歷史僅可當研究訊號","limits":"推薦不是實際成交，不可從公開行情猜交易日誌"},
+    {"role_id":"07","status":"AUTO_PARTIAL","primary":"H115 月營收／單季利潤率","secondary":"H170 官方累計 EPS YTD（非 TTM）","limits":"現金流、負債、股本與完整四季證據仍需擴充官方帳本"},
+    {"role_id":"08","status":"AUTO_HYPOTHESIS_ONLY","primary":"H115 財務與行情研究線索","secondary":"H185 公告／新聞待驗證","limits":"自動生成反證問題，不會宣稱反方論點已成立"},
+    {"role_id":"09","status":"AUTO_PARTIAL","primary":"H115 同季利潤率觀測","secondary":"H169 官方 PE（獨立呈現）","limits":"官方 PE 不等於已獨立核實近四季 EPS；部分產業口徑不可直接比較"},
+    {"role_id":"10","status":"MODEL_REQUIRES_ASSUMPTIONS","primary":"H115 官方財報線索","secondary":"DCF 三情境試算器","limits":"無完整現金流、股數、折現率假設時不憑空產生估值"},
+    {"role_id":"11","status":"AUTO_PARTIAL","primary":"官方公司重大訊息","secondary":"發言日／事實日分欄","limits":"尚無完整股東會、法說會、產品發布官方行事曆；未核實不定日期"},
+    {"role_id":"12","status":"AUTO_WITH_CONDITIONS","primary":"H115／H169／H170／H185 來源與首次觀測日期","secondary":"證據一致性／日期期間檢查","limits":"來源快照不等於已閱讀所有官方原文；仍保留待核實"}
+  ]
+}
