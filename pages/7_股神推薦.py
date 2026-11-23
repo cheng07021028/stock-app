@@ -17147,8 +17147,22 @@ def _build_excel_bytes_fast_h85(
     _h145_ctx = st.session_state.get(_k("recommend_execution_context_v191"), {}) or {}
     if not isinstance(_h145_ctx, dict):
         _h145_ctx = {}
+    # H186: prefer a complete diagnosis ONLY when the exact SAME active
+    # scan signature and run ID prove it belongs to this request. H145 still
+    # independently verifies the mother pool and H126 remains authoritative.
+    from godpick_h186_evidence_integrity import verified_same_run_export_frame as _h186_scope
+    _h186_current_sig = _safe_str(st.session_state.get(_k("active_scan_signature_v181")))
+    _h186_full_diag = st.session_state.get(_k("candidate_diagnosis_store"))
+    _h186_full_sig = _safe_str(st.session_state.get(_k("candidate_diagnosis_scan_signature_h1535")))
+    _h186_supplied, _h186_scope_meta = _h186_scope(
+        candidate_diagnosis_export, _h186_full_diag,
+        expected_count=scan_report.get("candidate_diagnosis_count",0),
+        current_signature=_h186_current_sig, full_signature=_h186_full_sig,
+        current_run_id=_safe_str(_h145_ctx.get("run_id")),
+        scan_run_id=_safe_str(st.session_state.get(_k("scan_run_id"))))
+    st.session_state[_k("h186_full_export_scope")] = dict(_h186_scope_meta)
     candidate_for_core, h145_bridge = _h145_restore_pool(
-        candidate_diagnosis_export,
+        _h186_supplied,
         st.session_state.get(_k("decision_frame_store_v181")),
         rec_export,
         scan_report=scan_report,
@@ -17932,6 +17946,12 @@ def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: p
             st.session_state[_k("h86_excel_error")] = f"{type(exc).__name__}: {exc}"
             ready = False
     if ready:
+        _h186_current = st.session_state.get(_k('h186_full_export_scope'),{})
+        if isinstance(_h186_current,dict) and _h186_current:
+            st.caption('H186｜同輪母體完整性：'+str(_h186_current.get('status','未驗證'))+
+                       '；展示 '+str(_h186_current.get('limited_rows',0))+' 列、'
+                       '完整快取 '+str(_h186_current.get('full_rows',0))+' 列；'
+                       '本次只改善來源核對，不改H109／H126。')
         _focus_visible = st.session_state.get(_k('h144_focus_data'))
         _focus_quality = st.session_state.get(_k('h146_focus_quality'), {})
         if isinstance(_focus_visible, pd.DataFrame) and not _focus_visible.empty:

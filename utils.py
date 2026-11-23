@@ -2690,12 +2690,24 @@ def get_history_data(stock_no, stock_name="", market_type="上市", start_date=N
     if end_ts < start_ts:
         return pd.DataFrame()
 
+    # H186: a cache with a fresh price date can still contain 60 days of
+    # missing/zero volumes. Such a cache MUST NOT suppress network repair.
+    from godpick_h186_evidence_integrity import volume_quality as _h186_vol_quality
+    _h186_wide_history = (end_ts - start_ts).days >= 90
+    _h186_weak_history = pd.DataFrame()
+
     # V22：第一層先讀本機歷史快取。這不會跳過股票，只是避免重複下載同一段 K 線。
     try:
         cached_df = _load_history_disk_cache(stock_no, market_type, start_ts, end_ts)
         if cached_df is not None and not cached_df.empty:
-            _diag_add_event("history", "DiskCache", True, f"cache hit rows={len(cached_df)}", time.perf_counter() - scan_t0, rows=len(cached_df), code=stock_no)
-            return cached_df
+            _h186_q = _h186_vol_quality(cached_df)
+            if not _h186_wide_history or _h186_q['status']=='VALID_60_DATED_POSITIVE_VOLUME':
+                _diag_add_event("history", "DiskCache", True, f"cache hit rows={len(cached_df)}", time.perf_counter() - scan_t0, rows=len(cached_df), code=stock_no)
+                return cached_df
+            _h186_weak_history = cached_df.copy(deep=False)
+            _diag_add_event("history","H186CacheRevalidate",False,
+                f"{_h186_q['status']} positive={_h186_q['positive']}/60 missing={_h186_q['missing']} zero={_h186_q['nonpositive']}; refetch without deleting old cache",
+                time.perf_counter()-scan_t0,rows=len(cached_df),code=stock_no)
         else:
             _diag_add_event("history", "DiskCache", False, "cache miss", time.perf_counter() - scan_t0, rows=0, code=stock_no)
     except Exception as e:
@@ -2707,10 +2719,16 @@ def get_history_data(stock_no, stock_name="", market_type="上市", start_date=N
         fast_df = _fetch_yahoo_history_fast(stock_no, market_type=market_type, start_date=start_ts, end_date=end_ts)
         if fast_df is not None and not fast_df.empty:
             yahoo_lag = _history_frame_business_lag(fast_df, end_ts)
-            if _history_frame_is_fresh_enough(fast_df, end_ts):
+            _h186_q = _h186_vol_quality(fast_df)
+            if _history_frame_is_fresh_enough(fast_df, end_ts) and (
+                not _h186_wide_history or _h186_q['status']=='VALID_60_DATED_POSITIVE_VOLUME'):
                 _save_history_disk_cache(stock_no, market_type, start_ts, end_ts, fast_df)
                 _diag_add_event("history", "YahooFastTotal", True, f"rows={len(fast_df)} lag={yahoo_lag}", time.perf_counter() - scan_t0, rows=len(fast_df), code=stock_no)
                 return fast_df
+            if _h186_wide_history and _h186_q['status']!='VALID_60_DATED_POSITIVE_VOLUME':
+                _diag_add_event("history", "H186YahooVolumeRetry", False,
+                    f"{_h186_q['status']} positive={_h186_q['positive']}/60 missing={_h186_q['missing']} zero={_h186_q['nonpositive']}; official fallback required",
+                    time.perf_counter()-scan_t0,rows=len(fast_df),code=stock_no)
             # 關鍵修正：Yahoo 有 20 根以上不代表最新交易日已到齊。收盤後若仍少一天，
             # 不可直接回傳舊收盤價，必須繼續走 TWSE/TPEx 官方來源。
             stale_fast_df = fast_df.copy()
@@ -2741,7 +2759,8 @@ def get_history_data(stock_no, stock_name="", market_type="上市", start_date=N
                 patched = patched.dropna(subset=["日期", "收盤價"]).sort_values("日期").drop_duplicates("日期", keep="last")
                 patched = patched[(patched["日期"] >= start_ts) & (patched["日期"] <= end_ts)].reset_index(drop=True)
                 patch_lag = _history_frame_business_lag(patched, end_ts)
-                if _history_frame_is_fresh_enough(patched, end_ts):
+                if _history_frame_is_fresh_enough(patched, end_ts) and (
+                    not _h186_wide_history or _h186_vol_quality(patched)['status']=='VALID_60_DATED_POSITIVE_VOLUME'):
                     _save_history_disk_cache(stock_no, mk, start_ts, end_ts, patched)
                     _diag_add_event("history", current_source, True, f"{mk} patched rows={len(patched)} lag={patch_lag}", time.perf_counter() - scan_t0, rows=len(patched), code=stock_no)
                     return patched
@@ -2771,12 +2790,23 @@ def get_history_data(stock_no, stock_name="", market_type="上市", start_date=N
             df = _normalize_history_df(raw_df, source, start_ts, end_ts)
             if not df.empty:
                 official_lag = _history_frame_business_lag(df, end_ts)
-                if _history_frame_is_fresh_enough(df, end_ts):
+                if _history_frame_is_fresh_enough(df, end_ts) and (
+                    not _h186_wide_history or _h186_vol_quality(df)['status']=='VALID_60_DATED_POSITIVE_VOLUME'):
                     _save_history_disk_cache(stock_no, mk, start_ts, end_ts, df)
                     _diag_add_event("history", source, True, f"{mk} rows={len(df)} lag={official_lag}", time.perf_counter() - scan_t0, rows=len(df), code=stock_no)
                     return df
                 _diag_add_event("history", f"{source}_stale", False, f"{mk} rows={len(df)} business_lag={official_lag}", time.perf_counter() - scan_t0, rows=len(df), code=stock_no)
 
+    # H186 research-only OHLC fallback: refuse to call this a successful
+    # volume repair; keep original missing/zero volume values visible to H114.
+    # Never return stale prices as current prices.
+    for _h186_partial in (stale_fast_df,_h186_weak_history):
+        if isinstance(_h186_partial,pd.DataFrame) and not _h186_partial.empty and _history_frame_is_fresh_enough(_h186_partial,end_ts):
+            _h186_q=_h186_vol_quality(_h186_partial)
+            _diag_add_event('history','H186PriceOnlyUnverified',False,
+                f"{_h186_q['status']} OHLC rows={len(_h186_partial)}; NOT volume-certified; H126 unchanged",
+                time.perf_counter()-scan_t0,rows=len(_h186_partial),code=stock_no)
+            return _h186_partial.copy(deep=False)
     _diag_add_event("history", "OfficialFallback", False, "TWSE / TPEx 都沒有抓到有效歷史資料", time.perf_counter() - scan_t0, rows=0, code=stock_no)
     return pd.DataFrame()
 

@@ -188,6 +188,23 @@ def analyze_history(hist: pd.DataFrame | None, *, asof: Any = None) -> dict[str,
     _h175_n = pd.to_numeric(recent60, errors="coerce")
     _h175_missing = int(_h175_n.isna().sum())
     _h175_nonpos = int((_h175_n.notna() & (_h175_n <= 0)).sum())
+    # H186: source/unit and date-aligned 60-bar diagnostics accompany every
+    # invalid-volume diagnosis. Do not turn ambiguous 成交量 into shares/lots.
+    _h186_sources = []
+    if "資料源" in hist.columns:
+        _h186_source_frame = hist
+        if limit:
+            _h186_date_name = mapped["date"]
+            _h186_source_frame = hist.loc[hist[_h186_date_name].map(_d).map(
+                lambda x: x is not None and x <= limit)]
+        _h186_sources = sorted({str(v).strip() for v in _h186_source_frame["資料源"].dropna()
+                                if str(v).strip()})[:8]
+    base["H186量價資料源"] = "、".join(_h186_sources) if _h186_sources else "未提供來源"
+    base["H186成交量單位"] = ("股" if volume_col in ("成交股數","成交量(股)","VolumeShares")
+                              else "張" if volume_col else "來源未註明，不作轉換")
+    base["H186近60根成交量缺口"] = (f"有效{int((_h175_n.notna() & (_h175_n>0)).sum())}/60，"
+                                   f"缺值{_h175_missing}，零或負{_h175_nonpos}，"
+                                   f"不足根數{max(0,60-len(recent60))}")
     base["H175成交量來源欄"] = str(volume_col or "缺欄位／單位未知")
     base["H175最近60根量價完整數"] = int((_h175_n.notna() & (_h175_n > 0)).sum())
     base["H175最近60根成交量缺失數"] = _h175_missing
