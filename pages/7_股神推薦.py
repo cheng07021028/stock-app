@@ -9488,6 +9488,7 @@ def _get_history_smart(stock_no: str, stock_name: str, market_type: str, start_d
             market_type=primary,
             start_date=start_date,
             end_date=end_date,
+            scan_fast=True,  # H187: no per-stock multi-month network fallback
         )
     except TypeError:
         try:
@@ -11926,7 +11927,7 @@ def _build_recommend_df(
     master_lookup = _build_master_lookup(master_df)
 
     progress_wrap = st.container()
-    progress_bar = progress_wrap.progress(0, text="準備開始推薦...")
+    progress_bar = progress_wrap.progress(0, text="H187 快速掃描｜不在前台逐月補抓全部歷史資料")
     progress_text = progress_wrap.empty()
 
     start_ts = time.time()
@@ -11956,7 +11957,7 @@ def _build_recommend_df(
         "error_samples": [],
         "worker_count": worker_count,
         "checkpoint_retryable_count": 0,
-        "speed_version": "v48_3_price_date_integrity_and_entry_readiness",
+        "speed_version": "v187_quick_scan_keeps_strict_h114_h126_evidence",
         "scan_started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "scan_elapsed_sec": 0.0,
         "avg_sec_per_stock": 0.0,
@@ -12220,7 +12221,7 @@ def _build_recommend_df(
                         f"已完成 {done_count}/{total_count}｜"
                         f"已花時間：{_fmt_seconds(elapsed)}｜"
                         f"預估剩餘：{_fmt_seconds(eta_sec)}｜"
-                        f"平均每檔：約 {_fmt_seconds(avg_per_stock)}｜平行工人：{worker_count}｜V48速度監控掃描"
+                        f"全體吞吐平均每檔：約 {_fmt_seconds(avg_per_stock)}｜平行工人：{worker_count}｜H187快速掃描（缺量另補證）"
                     )
     else:
         progress_text.caption(f"斷點資料已涵蓋全部 {total_count} 檔，直接整理結果。")

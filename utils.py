@@ -38,6 +38,48 @@ _REQUESTS_THREAD_LOCAL = threading.local()
 _YAHOO_HISTORY_SEMAPHORE = threading.BoundedSemaphore(4)
 _OFFICIAL_HISTORY_SEMAPHORE = threading.BoundedSemaphore(3)
 
+# H187: the interactive 2,300-stock scan must never run monthly per-stock
+# disaster-recovery requests. The complete H186 path remains available for
+# explicit one-stock/history maintenance. These controls are process-local and
+# never change market evidence, authorization, JSON, or recommendation scores.
+_H187_QUICK_TLS = threading.local()
+_H187_SOURCE_LOCK = threading.Lock()
+_H187_YAHOO_CIRCUIT = {"failures": 0, "until": 0.0}
+_H187_SOURCE_FAILURE_LIMIT = 8
+_H187_SOURCE_COOLDOWN_SECONDS = 90
+
+
+def _h187_quick_http_session():
+    session = getattr(_H187_QUICK_TLS, "session", None)
+    if isinstance(session, requests.Session):
+        return session
+    session = requests.Session()
+    # Deliberately no automatic 2x/3x HTTP retries on the mass-scan lane.
+    adapter = HTTPAdapter(max_retries=Retry(total=0, connect=0, read=0, status=0),
+                          pool_connections=6, pool_maxsize=6)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    session.headers.update({"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
+    _H187_QUICK_TLS.session = session
+    return session
+
+
+def _h187_quick_source_healthy():
+    with _H187_SOURCE_LOCK:
+        return time.monotonic() >= _H187_YAHOO_CIRCUIT["until"]
+
+
+def _h187_quick_source_result(failed: bool):
+    with _H187_SOURCE_LOCK:
+        if not failed:
+            _H187_YAHOO_CIRCUIT.update(failures=0, until=0.0)
+            return
+        count = _H187_YAHOO_CIRCUIT["failures"] + 1
+        if count >= _H187_SOURCE_FAILURE_LIMIT:
+            _H187_YAHOO_CIRCUIT.update(failures=0, until=time.monotonic()+_H187_SOURCE_COOLDOWN_SECONDS)
+        else:
+            _H187_YAHOO_CIRCUIT["failures"] = count
+
 # V47：資料源穩定診斷。只記錄摘要，不保存個資；供 7_股神推薦 / 11_資料診斷讀取。
 DATA_SOURCE_DIAG_FILE = Path("data_source_diagnostics.json")
 _DATA_SOURCE_DIAG_LOCK = threading.Lock()
@@ -2536,7 +2578,7 @@ def _history_yahoo_range_param(start_ts, end_ts) -> str:
     return "5y"
 
 
-def _fetch_yahoo_history_fast(stock_no, market_type="上市", start_date=None, end_date=None):
+def _fetch_yahoo_history_fast(stock_no, market_type="上市", start_date=None, end_date=None, *, quick_scan=False):
     """Yahoo Finance 台股日線高速來源。
 
     成功資料交由 disk cache 保存；失敗與空資料不做 Streamlit 快取，避免
@@ -2555,12 +2597,18 @@ def _fetch_yahoo_history_fast(stock_no, market_type="上市", start_date=None, e
     start_ts = pd.to_datetime(start_date)
     end_ts = pd.to_datetime(end_date)
     suffix_candidates = ["TWO", "TW"] if market_type in ["上櫃", "興櫃", "TPEX", "OTC"] else ["TW", "TWO"]
+    if quick_scan:
+        suffix_candidates = suffix_candidates[:1]  # trusted universe market; no cross-market loop
     range_param = _history_yahoo_range_param(start_ts, end_ts)
     headers = {
         "User-Agent": "Mozilla/5.0",
         "Accept": "application/json,text/plain,*/*",
     }
 
+    if quick_scan and not _h187_quick_source_healthy():
+        _diag_add_event("history", "H187YahooCircuit", False,
+                        "source cooldown; research data not auto-certified", 0, rows=0, code=stock_no)
+        return pd.DataFrame()
     for suffix in suffix_candidates:
         symbol = f"{stock_no}.{suffix}"
         # 使用明確 period1/period2，不只使用 range。Yahoo 的 range 查詢在台灣
@@ -2574,12 +2622,22 @@ def _fetch_yahoo_history_fast(stock_no, market_type="上市", start_date=None, e
             "events": "history",
             "includeAdjustedClose": "true",
         }
-        for yahoo_host in ("query1.finance.yahoo.com", "query2.finance.yahoo.com"):
+        # Strict one-request upper bound per symbol for mass-scanning; the
+        # original full recovery probes both hosts and both market suffixes.
+        yahoo_hosts = ("query1.finance.yahoo.com",) if quick_scan else ("query1.finance.yahoo.com", "query2.finance.yahoo.com")
+        for yahoo_host in yahoo_hosts:
             url = f"https://{yahoo_host}/v8/finance/chart/{symbol}"
             t0 = time.perf_counter()
             try:
                 with _YAHOO_HISTORY_SEMAPHORE:
-                    resp = get_requests_session().get(url, params=params, headers=headers, timeout=REQUEST_TIMEOUT_FAST)
+                    if quick_scan:
+                        resp = _h187_quick_http_session().get(url, params=params,
+                                headers=headers, timeout=(2.0, 3.0))
+                    else:
+                        resp = get_requests_session().get(url, params=params,
+                                headers=headers, timeout=REQUEST_TIMEOUT_FAST)
+                if quick_scan:
+                    _h187_quick_source_result(resp.status_code in (429, 500, 502, 503, 504))
                 if resp.status_code != 200:
                     _diag_add_event("history", f"Yahoo_{suffix}", False, f"{symbol} {yahoo_host} HTTP {resp.status_code}", time.perf_counter() - t0, code=stock_no)
                     continue
@@ -2636,6 +2694,8 @@ def _fetch_yahoo_history_fast(stock_no, market_type="上市", start_date=None, e
                 _diag_add_event("history", f"Yahoo_{suffix}", True, f"{symbol} {yahoo_host} rows={len(df)}", time.perf_counter() - t0, rows=len(df), code=stock_no)
                 return df[["日期", "成交股數", "成交金額", "開盤價", "最高價", "最低價", "收盤價", "成交筆數", "資料源"]].copy()
             except Exception as e:
+                if quick_scan:
+                    _h187_quick_source_result(True)
                 _diag_add_event("history", f"Yahoo_{suffix}", False, f"{symbol} {yahoo_host} {e}", time.perf_counter() - t0, rows=0, code=stock_no)
                 continue
     return pd.DataFrame()
@@ -2664,7 +2724,7 @@ def _history_frame_business_lag(df: pd.DataFrame, end_date) -> int:
 def _history_frame_is_fresh_enough(df: pd.DataFrame, end_date) -> bool:
     return _history_frame_business_lag(df, end_date) <= _history_cache_allowed_business_lag(end_date)
 
-def get_history_data(stock_no, stock_name="", market_type="上市", start_date=None, end_date=None):
+def get_history_data(stock_no, stock_name="", market_type="上市", start_date=None, end_date=None, *, scan_fast=False):
     """取得歷史日線資料。
 
     V35 加速原則：
@@ -2712,6 +2772,36 @@ def get_history_data(stock_no, stock_name="", market_type="上市", start_date=N
             _diag_add_event("history", "DiskCache", False, "cache miss", time.perf_counter() - scan_t0, rows=0, code=stock_no)
     except Exception as e:
         _diag_add_event("history", "DiskCache", False, f"cache error: {e}", time.perf_counter() - scan_t0, rows=0, code=stock_no)
+
+    # H187 two-lane design. Full evidence repair stays in the original
+    # scan_fast=False branch below. In the 2,300-stock interactive scan, do
+    # not hammer TWSE/TPEx monthly endpoints 8-15 times per insufficient stock.
+    # Reuse fresh price-only caches *without upgrading OHLCV certification*.
+    if scan_fast:
+        if not _h186_weak_history.empty and _history_frame_is_fresh_enough(_h186_weak_history,end_ts):
+            _diag_add_event("history", "H187DeferredVolumeRepair", False,
+                "fresh OHLC cache; 60-bar volume evidence incomplete, monthly repair deferred",
+                time.perf_counter()-scan_t0, rows=len(_h186_weak_history), code=stock_no)
+            return _h186_weak_history.copy(deep=False)
+        try:
+            quick_df = _fetch_yahoo_history_fast(stock_no, market_type=market_type,
+                           start_date=start_ts,end_date=end_ts,quick_scan=True)
+            if isinstance(quick_df,pd.DataFrame) and not quick_df.empty and _history_frame_is_fresh_enough(quick_df,end_ts):
+                q = _h186_vol_quality(quick_df)
+                # The cache can hold incomplete evidence; H186 volume-quality
+                # checks continue to reject it for H114/H126 eligibility.
+                _save_history_disk_cache(stock_no,market_type,start_ts,end_ts,quick_df)
+                _diag_add_event("history", "H187QuickYahoo", q['status']=='VALID_60_DATED_POSITIVE_VOLUME',
+                    f"rows={len(quick_df)} volume={q['status']}; deep repair deferred",
+                    time.perf_counter()-scan_t0,rows=len(quick_df),code=stock_no)
+                return quick_df
+        except Exception as e:
+            _diag_add_event("history", "H187QuickYahoo", False, str(e)[:180],
+                time.perf_counter()-scan_t0,rows=0,code=stock_no)
+        _diag_add_event("history", "H187SourceGap", False,
+            "quick source unavailable or stale; no fabricated history; full repair is separate",
+            time.perf_counter()-scan_t0,rows=0,code=stock_no)
+        return pd.DataFrame()
 
     # 第二來源：Yahoo 高速日線。失敗不代表該股票沒資料，必須 fallback 官方來源。
     stale_fast_df = pd.DataFrame()
