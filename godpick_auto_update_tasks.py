@@ -146,7 +146,7 @@ def task_super_ai_context(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     t0 = time.perf_counter(); cfg = cfg or {}
     try:
         from godpick_super_ai_market_context import refresh_super_ai_market_context
-        payload, diagnostics = refresh_super_ai_market_context(fetch_etf=bool(cfg.get("fetch_etf", True)))
+        payload, diagnostics = refresh_super_ai_market_context(fetch_etf=bool(cfg.get("fetch_etf", True)), unattended=True)
         from godpick_h166_operational_readiness import context_evidence
         from datetime import datetime as _dt
         from zoneinfo import ZoneInfo as _ZoneInfo
@@ -154,19 +154,29 @@ def task_super_ai_context(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
         evidence = context_evidence(payload, now=now)
         complete = bool(evidence["verified"])
         margin_count = evidence["stock_count"]
-        partial = margin_count > 0 or bool((payload or {}).get("taifex"))
-        if complete:
-            msg = "SuperAI官方資料完成同交易日核實：融資券／PCR／外資臺指期淨未平倉｜" + evidence["reference_day"]
+        partial = margin_count > 0 or bool((payload or {}).get("taifex")) or bool(((payload or {}).get("etf") or {}).get("ETF有效檔數"))
+        refresh = (payload or {}).get("h188_refresh") or {}
+        persisted = str(refresh.get("persistence") or "")
+        confirmed = persisted == "REMOTE_CONFIRMED"
+        retained = refresh.get("status") == "RETAINED_PREVIOUS"
+        if complete and confirmed and not retained:
+            msg = "SuperAI同交易日官方資料核實且遠端永久保存完成｜" + evidence["reference_day"]
         elif partial:
-            msg = "SuperAI未通過本輪同交易日驗證：" + "；".join(evidence["reasons"][:5])
+            msg = "SuperAI來源部分有效，但未通過同日或永久保存驗證：" + "；".join(evidence["reasons"][:5])
+            if retained: msg += "｜本次來源失敗，保留舊快照"
         else:
-            msg = "SuperAI融資券與期貨／PCR來源皆無有效資料，保留原有未知狀態"
-        return _report(partial, msg, details={
-            "diagnostics": diagnostics[-30:], "evidence": evidence,
+            msg = "SuperAI融資券、期貨、PCR、ETF均未取得足夠資料；不覆蓋舊權威"
+        if partial and not confirmed:
+            msg += "｜持久化=" + (persisted or "未知")
+        # Partial official evidence remains WARNING for the scheduler (not a
+        # fully trusted SUCCESS dependency), but can be inspected/retried.
+        meaningful = bool(partial and (confirmed or retained))
+        return _report(meaningful, msg, details={
+            "diagnostics": diagnostics[-30:], "evidence": evidence, "refresh": refresh,
             "taifex": (payload or {}).get("taifex", {}),
             "etf": (payload or {}).get("etf", {}), "complete": complete,
-        }, changed_files=["super_ai_market_context.json"] if partial else [],
-            started=t0, warning=not complete and partial)
+        }, changed_files=["super_ai_market_context.json"] if confirmed and not retained else [],
+            started=t0, warning=not complete or retained)
 
     except Exception as exc:
         return _report(False, f"SuperAI市場情境更新失敗：{type(exc).__name__}: {exc}", started=t0)
@@ -521,9 +531,10 @@ def task_recommend_list_hits(cfg: dict[str, Any] | None = None) -> dict[str, Any
         )
         # Empty/unchanged batches must not issue another round of remote
         # GitHub+Firestore writes (the prior four jobs may already be failing).
-        if int(summary.get("processed",0) or 0)==0 and not df.empty:
+        if int(summary.get("success",0) or 0)==0:
+            note = "無成熟可驗證新資料" if int(summary.get("processed",0) or 0)==0 else "資料不足／來源錯誤，未建立任何新的已核實命中"
             return _report(True,
-                f"隔日命中追蹤：本輪未處理新筆數／剩餘 {summary.get('remaining',0)}，保留資料下次續跑；未重新送出永久同步",
+                f"隔日命中追蹤：{note}；已嘗試 {summary.get('processed',0)}／失敗 {summary.get('fail',0)}／待續 {summary.get('remaining',0)}／缺推薦日期 {summary.get('missing_recommendation_date',0)}；未發出整檔遠端同步；下次續跑",
                 details={"summary":summary,"load_messages":msgs[-10:]},started=t0,warning=True)
         ok_sync,sync_msgs=ns["_sync_records"](out)
         hint = "" if ok_sync else f"；原因：{_h1533_remote_failure_hint(sync_msgs)}"

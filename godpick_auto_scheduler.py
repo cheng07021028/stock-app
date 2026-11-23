@@ -71,7 +71,7 @@ DEFAULT_JOB_OPTIONS = {
     "stock_master": {"scheduler_immediate_retries": 0},
     "macro_full": {},
     "official_factors": {},
-    "super_ai_context": {"fetch_etf": True},
+    "super_ai_context": {"fetch_etf": True, "scheduler_immediate_retries": 0},
     "watchlist_runtime": {},
     "godpick_recommendation": {"force_full_market": False, "scheduler_immediate_retries": 0},
     "record_latest_price": {"only_active": False, "batch_size": 120, "scheduler_immediate_retries": 0},
@@ -780,7 +780,7 @@ def _execute_one(job:str, job_cfg:dict[str,Any], global_cfg:dict[str,Any]) -> di
         # Remote-record jobs are individually network-heavy, and H7 already
         # provides a durable follow-up. Never retry an entire completed
         # calculation + remote save 2 more times in the same UI request.
-        retry_count = 0 if job in {"record_latest_price", "record_performance", "recommend_list_performance", "recommend_list_n_day", "recommend_list_hits"} else int(global_cfg.get("retry_count",2) or 0)
+        retry_count = 0 if job in {"record_latest_price", "record_performance", "recommend_list_performance", "recommend_list_n_day", "recommend_list_hits", "super_ai_context"} else int(global_cfg.get("retry_count",2) or 0)
     else:
         retry_count = max(0, min(int(retry_override or 0), 1 if job in {"record_latest_price", "record_performance", "recommend_list_performance", "recommend_list_n_day", "recommend_list_hits"} else 5))
     attempts=max(1,retry_count+1); delay=int(global_cfg.get("retry_delay_seconds",20) or 20)

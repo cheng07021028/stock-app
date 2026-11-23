@@ -1142,7 +1142,8 @@ def _extract_price_range_v101(value: Any) -> tuple[float | None, float | None]:
 
 
 def _row_recommend_date_v101(row: Any) -> date | None:
-    for c in ["推薦日期", "推薦時間", "建立時間", "更新時間"]:
+    # A later metric/record update time is NOT a recommendation timestamp.
+    for c in ["推薦日期", "推薦時間", "建立時間"]:
         try:
             v = row.get(c) if hasattr(row, "get") else None
             d = pd.to_datetime(v, errors="coerce")
@@ -1215,17 +1216,27 @@ def _calc_night_hit_for_row_v101(row: Any, timeout: int = 7, *, allow_slow_fallb
         return {"作戰追蹤狀態": "缺推薦日期", "作戰追蹤更新時間": _now_text()}
     # 推薦當日不算命中，從隔一個日曆日開始抓，實際交易日由資料源決定。
     start = rec_d + timedelta(days=1)
-    end = date.today()
+    end = datetime.now(ZoneInfo("Asia/Taipei")).date()
     if end < start:
-        return {"作戰追蹤狀態": "尚未到隔日", "作戰追蹤更新時間": _now_text()}
+        return {"作戰追蹤狀態": "尚未到隔日"}
     market = _safe_str(row.get("市場別") if hasattr(row, "get") else "")
     name = _safe_str(row.get("股票名稱") if hasattr(row, "get") else "")
     hist, source = fetch_multi_source_history(code, name, market, start_date=start, end_date=end, timeout=timeout, allow_daily_fallback=allow_slow_fallback)
     if hist is None or hist.empty:
-        return {"作戰追蹤狀態": "歷史K線不足", "作戰追蹤資料源": source, "作戰追蹤更新時間": _now_text()}
+        return {"作戰追蹤狀態": "歷史K線不足", "作戰追蹤資料源": source}
     hist = hist.copy()
     hist["日期"] = pd.to_datetime(hist["日期"], errors="coerce")
-    hist = hist.dropna(subset=["日期"]).sort_values("日期").reset_index(drop=True)
+    hist = hist.dropna(subset=["日期"])
+    hist = hist[(hist["日期"].dt.date >= start) & (hist["日期"].dt.date <= end)]
+    # A close-only bar cannot verify stop/entry/pressure or intraday max/min.
+    for _required in ("最高價", "最低價"):
+        if _required not in hist.columns:
+            return {"作戰追蹤狀態": "缺可信OHLC", "作戰追蹤資料源": source}
+        hist[_required] = pd.to_numeric(hist[_required], errors="coerce")
+    hist = hist.dropna(subset=["最高價", "最低價"]).sort_values("日期").drop_duplicates("日期").reset_index(drop=True)
+    hist = hist[(hist["最高價"] >= hist["最低價"]) & (hist["最低價"] > 0)]
+    if hist.empty:
+        return {"作戰追蹤狀態": "缺可信OHLC", "作戰追蹤資料源": source}
     base = _base_price_v101(row)
     entry_lo, entry_hi = _extract_price_range_v101(_first_available_value(row, ["預估進場點", "股神進場區間", "推薦價格", "推薦日價格", "最新價"], ""))
     pull_lo, pull_hi = _extract_price_range_v101(_first_available_value(row, ["回測承接價", "近端支撐", "主要支撐"], ""))
@@ -1252,7 +1263,9 @@ def _calc_night_hit_for_row_v101(row: Any, timeout: int = 7, *, allow_slow_fallb
         "作戰追蹤更新時間": _now_text(),
     }
     for n, label in [(1, "隔日"), (3, "3日"), (5, "5日"), (10, "10日")]:
-        up, dd = _horizon_perf_v101(hist, base, n)
+        # T+N requires N actual subsequent sessions, not one partial day
+        # silently filling every horizon.
+        up, dd = _horizon_perf_v101(hist, base, n) if len(hist) >= n else (None, None)
         result[f"{label}最高漲幅%"] = round(up, 2) if up is not None else None
         result[f"{label}最低回撤%"] = round(dd, 2) if dd is not None else None
     if stop_date:
@@ -1295,8 +1308,17 @@ def _update_night_hit_tracking_v101(
         return x, {"processed": 0, "success": 0, "fail": 0, "remaining": 0, "messages": ["無推薦清單資料"]}
     work = x.copy()
     work["_rec_dt"] = pd.to_datetime(work.get("推薦日期"), errors="coerce")
-    needs = work["作戰追蹤更新時間"].map(_is_blank_value)
+    # Older versions stamped failed/too-early rows as completed. Reopen
+    # transient outcomes without turning missing evidence into a false hit.
+    _transient = {"歷史K線不足", "缺可信OHLC", "尚未到隔日", "缺推薦日期", "缺股票代號"}
+    needs = work["作戰追蹤更新時間"].map(_is_blank_value) | work["作戰追蹤狀態"].astype(str).isin(_transient)
     pending = work[needs].sort_values("_rec_dt", ascending=False, na_position="last")
+    invalid_date_count = int(pending["_rec_dt"].isna().sum())
+    if time_budget_seconds is not None and not pending.empty:
+        # There is no T+1 result on recommendation day. Keep these rows
+        # pending, but do not spend a provider call or remote write on them.
+        _today_tw = datetime.now(ZoneInfo("Asia/Taipei")).date()
+        pending = pending[pending["_rec_dt"].notna() & (pending["_rec_dt"] < pd.Timestamp(_today_tw))]
     # Preserve manual full-refresh. For scheduled work, revisit tracked rows
     # only when at least ~one business day old; otherwise remote writes repeat
     # without any new market session. Order by oldest follow-up first so 300+
@@ -1311,6 +1333,11 @@ def _update_night_hit_tracking_v101(
             )
         else:
             pending = work.sort_values("_rec_dt", ascending=False, na_position="last")
+    # The fallback branch must obey the same eligibility gate; otherwise a
+    # stale retry resurrects all 57 undated research rows and writes another
+    # false tracking result to the permanent recommendation authority.
+    _today_tw = datetime.now(ZoneInfo("Asia/Taipei")).date()
+    pending = pending[pending["_rec_dt"].notna() & (pending["_rec_dt"] < pd.Timestamp(_today_tw))]
     batch = max(1, min(int(max_rows or 60), 300))
     candidates = pending.head(batch)
     pending_count = len(pending)
@@ -1339,15 +1366,19 @@ def _update_night_hit_tracking_v101(
                 if "allow_slow_fallback" not in str(e):
                     raise
                 res = _calc_night_hit_for_row_v101(row, timeout=timeout)
-            for c, v in res.items():
-                if c not in x.columns:
-                    x[c] = ""
-                _safe_set_cell(x, idx, c, v)
-            processed += 1
-            if str(res.get("作戰追蹤狀態", "")).strip() in {"歷史K線不足", "缺股票代號", "缺推薦日期"}:
+            outcome = str(res.get("作戰追蹤狀態", "")).strip()
+            if outcome in _transient:
+                # Keep the old authoritative row untouched. Failed attempts
+                # are diagnostics, never successful tracked observations.
                 fail += 1
+                errors.append(f"{row.get('股票代號','')}:{outcome}:{str(res.get('作戰追蹤資料源',''))[:100]}")
             else:
+                for c, v in res.items():
+                    if c not in x.columns:
+                        x[c] = ""
+                    _safe_set_cell(x, idx, c, v)
                 success += 1
+            processed += 1
         except Exception as exc:
             processed += 1
             fail += 1
@@ -1357,12 +1388,14 @@ def _update_night_hit_tracking_v101(
     x = x.drop(columns=[c for c in ["_rec_dt"] if c in x.columns], errors="ignore")
     # No silent success: even if a batch is fully processed, any other pending
     # rows are explicitly recorded and left untouched for future runs.
-    remaining = max(0, pending_count - processed)
+    # Only genuine completed tracking records leave the pending queue.
+    remaining = max(0, pending_count - success)
     return _ensure_record_columns(x), {
         "processed": processed, "success": success, "fail": fail,
         "remaining": remaining, "budget_exhausted": bool(deadline is not None and remaining > 0),
         "time_budget_seconds": time_budget_seconds,
-        "messages": errors[:8],
+        "missing_recommendation_date": invalid_date_count,
+        "messages": (errors[:8] + ([f"缺推薦日期共{invalid_date_count}筆，無法驗證隔日命中；不可用更新時間替代"] if invalid_date_count else []))[:10],
     }
 
 
@@ -2992,14 +3025,19 @@ def main():
                     max_rows=int(batch_stock_n),
                     show_progress=True,
                 )
-                ok, msgs = _sync_records(hit_df)
-                st.session_state[_k("records_df")] = hit_df
-                _load_records_cached(force=True)
+                if int(hit_summary.get("success", 0) or 0) > 0:
+                    ok, msgs = _sync_records(hit_df)
+                    st.session_state[_k("records_df")] = hit_df
+                    _load_records_cached(force=True)
+                else:
+                    ok, msgs = False, ["H188沒有任何已核實的隔日命中結果，跳過遠端同步，不修改原始紀錄"]
             if ok:
                 st.success(
                     f"V101 隔日命中追蹤完成：處理 {hit_summary.get('processed', 0)} 筆，"
                     f"成功 {hit_summary.get('success', 0)} 筆，失敗/不足 {hit_summary.get('fail', 0)} 筆。"
                 )
+            elif int(hit_summary.get("success", 0) or 0) == 0:
+                st.warning(f"H188隔日命中尚無可驗證更新，未寫入歷史；缺推薦日期 {hit_summary.get('missing_recommendation_date',0)} 筆，請先由原始推薦快照補證。")
             else:
                 st.warning("V101 已完成畫面資料更新，但寫回 GitHub/Firestore 未完全成功。")
             all_msgs = (hit_summary.get("messages") or []) + (msgs or [])

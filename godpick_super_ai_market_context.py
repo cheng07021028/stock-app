@@ -169,7 +169,9 @@ def fetch_twse_margin(date: datetime | None = None, *, timeout: int = 12) -> tup
         r.raise_for_status()
         payload = r.json()
         stock_map, market = _parse_twse_margin_payload(payload if isinstance(payload, dict) else {})
-        market["TWSE融資券資料日期"] = d.strftime("%Y-%m-%d")
+        # Do not stamp a fresh market day on a source returning zero valid rows.
+        if stock_map:
+            market["TWSE融資券資料日期"] = d.strftime("%Y-%m-%d")
         return stock_map, market, f"TWSE margin {len(stock_map)}"
     except Exception as exc:
         return {}, {}, f"TWSE margin failed: {exc}"
@@ -229,13 +231,19 @@ def _flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def fetch_taifex_context(*, timeout: int = 12) -> tuple[dict[str, Any], list[str]]:
+def fetch_taifex_context(*, timeout: int = 12, legacy_fallback: bool = True) -> tuple[dict[str, Any], list[str]]:
     # H158: official schema-controlled OpenAPI before the legacy HTML/Excel parser.
     # Legacy data is research-only: positional HTML columns must not certify OI.
     from godpick_h158_taifex_openapi import fetch_taifex_openapi, complete
     api_result, api_diag = fetch_taifex_openapi(timeout=timeout)
     if complete(api_result):
         return api_result, api_diag
+    # H188 unattended jobs use the typed official OpenAPI only. The old
+    # pcRatioExcel/futContractsDateExcel endpoints can return XLS rather than
+    # HTML and are not verifiable official position records. Preserve the old
+    # manual research fallback, but do not burn scheduled time on it.
+    if not legacy_fallback:
+        return api_result, api_diag + ["H188期交所官方來源不完整；略過舊版Excel/HTML備援，保留未驗證"]
     result: dict[str, Any] = {}
     diag: list[str] = []
     try:
@@ -331,11 +339,11 @@ def fetch_etf_context() -> tuple[dict[str, Any], list[str]]:
     return result, diag
 
 
-def refresh_super_ai_market_context(*, fetch_etf: bool = False) -> tuple[dict[str, Any], list[str]]:
+def refresh_super_ai_market_context(*, fetch_etf: bool = False, unattended: bool = False) -> tuple[dict[str, Any], list[str]]:
     diagnostics: list[str] = []
     twse_map, twse_market, msg = fetch_twse_margin(); diagnostics.append(msg)
     tpex_map, msg = fetch_tpex_margin(); diagnostics.append(msg)
-    taifex, msgs = fetch_taifex_context(); diagnostics.extend(msgs)
+    taifex, msgs = fetch_taifex_context(legacy_fallback=not unattended); diagnostics.extend(msgs)
     etf, msgs = fetch_etf_context() if fetch_etf else ({"ETFs": {}, "ETF市場確認分": None, "ETF有效檔數": 0}, ["ETF live refresh skipped; use cached/context history"])
     diagnostics.extend(msgs)
     margin = dict(twse_map); margin.update(tpex_map)
@@ -360,11 +368,38 @@ def refresh_super_ai_market_context(*, fetch_etf: bool = False) -> tuple[dict[st
             "ETF": "TWSE/TPEx price history via existing history service",
         },
     }
-    if callable(persist_json_async):
-        persist_json_async(CACHE_FILE, context, reason="V183 SuperAI market context refresh")
+    # H188: do not destroy the last usable authority with a blank HTTP run.
+    # Neither a 200/empty response nor an async queue is proof of persistence.
+    any_source = bool(margin or taifex or etf.get("ETF有效檔數"))
+    if not any_source:
+        previous = load_super_ai_market_context()
+        if previous.get("margin_by_stock") or previous.get("taifex") or (previous.get("etf") or {}).get("ETFs"):
+            previous = dict(previous)
+            previous["h188_refresh"] = {"status": "RETAINED_PREVIOUS", "attempted_at": context["updated_at"],
+                                         "diagnostics": diagnostics[-20:], "persistence": "UNCHANGED"}
+            return previous, diagnostics + ["H188本次官方來源皆未取得有效資料：保留原始快照，不覆蓋舊資料"]
+        context["h188_refresh"] = {"status": "NO_VALID_EVIDENCE", "persistence": "NOT_SAVED"}
+        return context, diagnostics + ["H188來源皆無效且無歷史快照，未寫入空白資料"]
+    if unattended:
+        try:
+            from godpick_durability_service import persist_json_permanent
+            confirmed, persist_msg = persist_json_permanent(
+                CACHE_FILE, context, reason="H188 scheduled official market context", require_remote=True)
+            context["h188_refresh"] = {"status": "NEW_PARTIAL_OR_COMPLETE", "persistence":
+                "REMOTE_CONFIRMED" if confirmed else "REMOTE_UNCONFIRMED", "message": persist_msg[:600]}
+            diagnostics.append("H188排程正式保存：" + ("遠端已確認" if confirmed else "未取得GitHub/Firestore遠端確認") + "｜" + persist_msg[:200])
+        except Exception as exc:
+            context["h188_refresh"] = {"status": "NEW_PARTIAL_OR_COMPLETE", "persistence": "FAILED",
+                                        "message": f"{type(exc).__name__}:{str(exc)[:250]}"}
+            diagnostics.append("H188排程保存失敗：" + str(exc)[:200])
+    elif callable(persist_json_async):
+        queued, note = persist_json_async(CACHE_FILE, context, reason="V183 SuperAI market context refresh")
+        context["h188_refresh"] = {"status": "NEW_PARTIAL_OR_COMPLETE", "persistence":
+            "LOCAL_QUEUED" if queued else "FAILED", "message": note[:400]}
     else:
         import json
         (BASE_DIR/CACHE_FILE).write_text(json.dumps(context, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        context["h188_refresh"] = {"status": "NEW_PARTIAL_OR_COMPLETE", "persistence": "LOCAL_ONLY"}
     return context, diagnostics
 
 
