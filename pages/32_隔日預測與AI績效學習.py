@@ -47,3 +47,26 @@ with d:
 with st.expander('最近自動執行診斷'):st.json({k:v for k,v in health.items() if k not in ('models','metrics')})
 if st.checkbox('產生完整研究績效Excel'):st.download_button('下載 H194 研究績效',excel(r),'H194_Performance.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 st.caption('每日22:55與23:45 台灣時間 Actions 封存，延遲跨日不回填。頁面僅讀取 GitHub 已同步資料；不逐檔連網、不改原有推薦紀錄。')
+
+st.divider()
+st.subheader('H197｜六大選股策略實戰比較與複核')
+st.caption('只讀取 H194 當時封存的研究與成熟結果；不重跑選股、不調整正式權重。')
+@st.cache_data(ttl=120,show_spinner=False)
+def load_h197(path):
+    from godpick_h197_strategy_review import run
+    return run(Path(path))
+if st.checkbox('載入 H197 六策略比較（本機封存資料）'):
+    try:
+        if st.button('重新整理 H197'):load_h197.clear()
+        with st.spinner('核對封存與同日對照…'):review=load_h197(str(root))
+        st.caption(review['basis'])
+        if review['status']=='DATA_PENDING':st.info('尚無足夠成熟研究，不能判斷策略優劣。')
+        if review['archive_errors']:st.warning('行情封存異常，暫停策略評估。')
+        st.dataframe(pd.DataFrame(review['evaluation']),hide_index=True,use_container_width=True)
+        st.caption('主要 T+5：非重疊交易窗；至少20個訓練窗、10個留出窗，訓練結果在留出前已觀測。初始複核門檻並非統計顯著或獲利保證。')
+        st.dataframe(pd.DataFrame(review['summary']),hide_index=True,use_container_width=True)
+        with st.expander('逐日對照與資料覆蓋'):st.dataframe(pd.DataFrame(review['daily']),hide_index=True,use_container_width=True)
+        if st.checkbox('產生 H197 策略 Excel'):
+            from godpick_h197_strategy_review import excel as excel_h197
+            st.download_button('下載 H197 策略比較',excel_h197(review),'H197_StrategyReview.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    except Exception as e:st.error('H197 封存資料驗證失敗：'+str(e)[:180])
