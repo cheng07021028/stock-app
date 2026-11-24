@@ -17853,6 +17853,15 @@ def _build_excel_bytes_fast_h85(
         tables=tables, h154_audit=locals().get('_h154_audit', {}),
         study_day=locals().get('_h148_research_day'))
     _h175_append_excel(wb, _h175_report)
+    # H195 separate research snapshot; legacy tabs and H126 remain untouched.
+    try:
+        from godpick_h195_command_center import append_manager as _h195_append
+        _h195_append(wb, Path(__file__).resolve().parents[1], research_day=locals().get('_h148_research_day'))
+    except Exception as _h195_exc:
+        if 'H195_聯合決策研究' in wb.sheetnames:
+            del wb['H195_聯合決策研究']
+        _h195_ws=wb.create_sheet('H195_聯合決策研究')
+        _h195_ws.append(['H195 資料無法讀取，原有報表不受影響', type(_h195_exc).__name__])
 
     try:
         wb.active = 0
@@ -17903,6 +17912,11 @@ def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: p
     # Legacy export prefix: StockPick_H146_QualityFocus_ (H148 now distinct).
     # Historical H148.3 research workbook name: StockPick_H1483_ResearchRecall_ (now H149_TradeResearch_).
     sig_raw = f"H146|H86|{saved_at}|{core_stamp}|{len(rec_df) if isinstance(rec_df,pd.DataFrame) else 0}|{len(candidate_df)}|{len(category_strength_df) if isinstance(category_strength_df,pd.DataFrame) else 0}|{_safe_str(st.session_state.get(_k('scan_run_id')))}|H147|H148|H1481|H1482|H1483|H149"
+    try:
+        from godpick_h195_command_center import cache_token as _h195_token
+        sig_raw += '|' + _h195_token(Path(__file__).resolve().parents[1])
+    except Exception:
+        sig_raw += '|H195_UNAVAILABLE'
     sig = hashlib.sha256(sig_raw.encode("utf-8")).hexdigest()[:20]
     cache_key = _k("h86_always_excel_cache")
     cache = st.session_state.get(cache_key, {})
@@ -18110,6 +18124,11 @@ def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFram
 
     _layout_sig = _excel_column_layout_signature_v191_h37()
     sig = _result_export_signature_v164(rec_df, f"main|{top_n}|V191-H46-EXCEL-NAME-SORTER|V191-H41-RECOMMENDATION-FUNNEL|V191-H42-DUAL-ROUTE-FOCUS|V191-H47-MAINSTREAM-LEADER-STAGE|V191-H66-ADAPTIVE-ALPHA-T1-TIMING-TRUTH-EXCEL|V191-H67-REGIME-SECTOR-CONSENSUS-PREOPEN-TRUTH-EXCEL|V191-H68-EXECUTION-LEARNING-AUTHORITY-EXCEL|V191-H70-COUNTER-REGIME-SESSION-TRUTH-EXCEL|V191-H72-MULTI-MODEL-ALPHA-ENSEMBLE-EXCEL|V191-H73-LEADERSHIP-BREADTH-DISTRIBUTION-TRUTH-EXCEL|V191-H74-FRESH-MAINSTREAM-CAPITAL-ROTATION-TRUTH-EXCEL|V191-H75-EXECUTIVE-DECISION-EXPORT|V191-H76-DAILY-ALPHA-CORE-SPLIT-REPEAT-EVIDENCE|V191-H77-VERIFIED-DELTA-CHASE-ENTRY-PERFORMANCE-BRAKE|V191-H79-MARKET-SESSION-UNIVERSE-ADAPTIVE-TRUTH|{_layout_sig}")
+    try:
+        from godpick_h195_command_center import cache_token as _h195_token
+        sig += '|' + _h195_token(Path(__file__).resolve().parents[1])
+    except Exception:
+        sig += '|H195_UNAVAILABLE'
     cache_key = _k("main_export_cache_v164")
     cache = st.session_state.get(cache_key, {})
     ready = isinstance(cache, dict) and cache.get("sig") == sig and isinstance(cache.get("bytes"), (bytes, bytearray))
@@ -19379,6 +19398,13 @@ def main():
     except Exception:
         pass
     # <<< GODPICK_BI_V135_REAL_CHART_STYLE
+    # H195 fast local snapshot on recommendation page, even when legacy result is empty.
+    try:
+        from godpick_h195_command_center import render_inline as _h195_inline
+        st.page_link('pages/33_超級AI股神決策總指揮中心.py', label='H195｜超級AI股神決策總指揮中心', icon='🎯')
+        _h195_inline(Path(__file__).resolve().parents[1])
+    except Exception as _h195_exc:
+        st.caption('H195 聯合研究暫不可用：'+type(_h195_exc).__name__+'；原推薦功能不受影響。')
 
     watchlist_map = _load_watchlist_map()
     master_df = _load_master_df_fallback_only()
