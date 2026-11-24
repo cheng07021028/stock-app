@@ -240,6 +240,55 @@ def render_manager_visible(wb:Any, *, ranked:Any=None, watch:Any=None,
             'visible_manager_table':bool(normal_rows or watch_rows)}
 
 
+# H201: H126's authoritative producer uses a longer, explicitly non-trading
+# label for named research rows. Accept exact known denial labels, not arbitrary
+# text containing a denial substring (which could also contain an approval).
+_H126_DENIED = frozenset({
+    '禁止買進', '否', '不得買進', '不允許',
+    '禁止以研究榜買進｜僅01正式交易計畫具備核准權',
+})
+_H126_EXPLANATION_LABELS = frozenset({
+    'H153.7｜本輪 H126 正式交易授權', '為何研究有股票、這張表沒有？',
+    '目前資料品質／限制', '請先閱讀',
+})
+
+
+def validate_zero_authority(wb: Any, *, context: str = 'H153.7') -> bool:
+    """Validate every actual H126 data row; never rewrite authority values.
+
+    Only exact known non-buy statuses qualify. Appended H153.7 explanatory
+    rows are not stock rows and cannot satisfy the gate. Empty/missing or
+    contradictory authority data still fails closed.
+    """
+    authority = wb['00_H126主管決策']
+    headers = [str(c.value or '').strip() for c in authority[1]]
+    if headers.count('H126能否買進') != 1 or headers.count('股票代號') != 1:
+        raise ValueError(f'{context} H126禁止買進驗證：權威欄位缺失或重複')
+    trade_col = headers.index('H126能否買進') + 1
+    code_col = headers.index('股票代號') + 1
+    seen = 0
+    for row in range(2, authority.max_row + 1):
+        status = str(authority.cell(row, trade_col).value or '').strip()
+        code = str(authority.cell(row, code_col).value or '').strip()
+        label = str(authority.cell(row, 1).value or '').strip()
+        # These are only the exact explanatory rows rendered by this module.
+        if not status and label in _H126_EXPLANATION_LABELS and any(
+            merged.min_row == row == merged.max_row and merged.min_col == 2
+            and merged.max_col == 11 for merged in authority.merged_cells.ranges
+        ):
+            continue
+        if not any(authority.cell(row, col).value not in (None, '')
+                   for col in range(1, len(headers) + 1)):
+            continue
+        if status not in _H126_DENIED:
+            raise ValueError(f'{context} 正式0檔但H126禁止買進驗證失敗：第{row}列 '
+                             f'{code or "無代號"} 狀態 {status or "空白"}')
+        seen += 1
+    if not seen:
+        raise ValueError(f'{context} 正式0檔但H126禁止買進標示缺失：沒有權威資料列')
+    return True
+
+
 def validate_manager_content(wb:Any, result:Mapping, *,research:Any=None):
     """Fail export rather than silently deliver an empty manager list."""
     ws=wb['00_主管重點觀察榜']
@@ -257,11 +306,8 @@ def validate_manager_content(wb:Any, result:Mapping, *,research:Any=None):
     headings=[str(c.value or '') for c in authority[1]]
     if 'H126能否買進' not in headings:
         raise ValueError('H153.7 H126權威欄位不一致')
-    trade_col=headings.index('H126能否買進')+1
     if int(result['h126_authorized'])==0:
-        statuses=[str(authority.cell(row,trade_col).value or '') for row in range(2, min(authority.max_row,3)+1)]
-        if not any(('禁止買進' in t or t in {'否','不得買進','不允許'}) for t in statuses):
-            raise ValueError('H153.7 正式0檔但H126缺禁止買進標示')
+        validate_zero_authority(wb, context='H153.7')
     return True
 
 def validate_exported_cross_tab(wb: Any, result: Mapping) -> bool:
@@ -301,4 +347,4 @@ def validate_exported_cross_tab(wb: Any, result: Mapping) -> bool:
         raise ValueError('H153.7 首頁未建立具名排名區')
     return True
 
-__all__=['VERSION','render_manager_visible','validate_manager_content','validate_exported_cross_tab']
+__all__=['VERSION','render_manager_visible','validate_manager_content','validate_exported_cross_tab','validate_zero_authority']

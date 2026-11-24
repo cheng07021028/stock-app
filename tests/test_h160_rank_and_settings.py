@@ -37,7 +37,7 @@ class TestH160(unittest.TestCase):
     def _wb(self):
         w=Workbook();m=w.active;m.title='00_主管重點觀察榜'
         m['A1']='主管';m['B4']='研究';m['B5']='風控';m.auto_filter.ref='A7:O10'
-        a=w.create_sheet('00_H126主管決策');a['G2']='禁止買進'
+        a=w.create_sheet('00_H126主管決策');a['B1']='股票代號';a['G1']='H126能否買進';a['G2']='禁止買進'
         w.create_sheet('01_具名強勢研究');w.create_sheet('02_研究召回統計');w.create_sheet('03_五檔研究計畫')
         return w
     def _dataset(self):

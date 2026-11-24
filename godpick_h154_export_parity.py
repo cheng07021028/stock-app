@@ -191,6 +191,7 @@ def verify_final_xlsx(wb,audit:dict):
     audits={str(summary.cell(i,1).value) for i in range(2,summary.max_row+1)}
     if 'H154正式推薦唯一來源H126' not in audits:
         raise ValueError('H154研究報表缺系統正式權威對帳明細')
-    if audit['h126_buyable']==0 and '禁止買進' not in str(wb['00_H126主管決策']['G2'].value or ''):
-        raise ValueError('H154正式0檔卻缺H126禁止買進')
+    if audit['h126_buyable']==0:
+        from godpick_h1537_manager_visible import validate_zero_authority
+        validate_zero_authority(wb, context='H154')
     return True
