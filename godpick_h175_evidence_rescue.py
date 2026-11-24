@@ -222,20 +222,98 @@ def append_h175_excel(wb: Any, report: Mapping[str, Any]) -> dict[str, int]:
     fmt(manager, top, 2, f"H114有效60根{report.get('strict_ohlcv_rows',0)}/{report.get('diagnosis_rows',0)}；"
                           f"INVALID_OHLCV_VOLUME={report.get('invalid_volume_rows',0)}；"
                           f"獨立價格初篩{report.get('price_only_research',0)}檔／補證雷達{len(radar)}檔；H126不變")
-    for c in (1, 2):
+    # H203: names are standalone in B, never concatenate diagnostic prose.
+    # Only this appended block uses A:G; existing A/B/W rankings and filters
+    # keep their original cell locations. Widths are shared across a worksheet.
+    from copy import copy
+    from math import ceil
+    from unicodedata import east_asian_width
+
+    def text_units(value):
+        return sum(2 if east_asian_width(ch) in ('F', 'W', 'A') else 1
+                   for ch in str(value or ''))
+
+    for col, width in {'A':30, 'B':18, 'C':22, 'D':29,
+                       'E':15, 'F':24, 'G':28}.items():
+        dim = manager.column_dimensions[col]
+        dim.width = max(dim.width or 13, width)
+
+    # Restore readability of existing two-cell summary rows now that B is
+    # no longer artificially enlarged to 68 by this append routine. Merge
+    # only known summary rows with empty, non-table C:G cells.
+    from openpyxl.utils.cell import range_boundaries
+    def widen_summary(row):
+        if not manager.cell(row, 2).value:
+            return
+        if any(manager.cell(row, col).value is not None for col in range(3, 8)):
+            return
+        if any(m.min_row <= row <= m.max_row and m.min_col <= 7 and m.max_col >= 2
+               for m in manager.merged_cells.ranges):
+            return
+        for table in manager.tables.values():
+            c1,r1,c2,r2 = range_boundaries(table.ref)
+            if r1 <= row <= r2 and c1 <= 7 and c2 >= 2:
+                return
+        if manager.auto_filter.ref:
+            c1,r1,c2,r2 = range_boundaries(manager.auto_filter.ref)
+            if r1 <= row <= r2 and c1 <= 7 and c2 >= 2:
+                return
+        manager.merge_cells(start_row=row, start_column=2, end_row=row, end_column=7)
+        cell = manager.cell(row, 2)
+        align = copy(cell.alignment)
+        align.wrap_text = True
+        align.vertical = 'center'
+        cell.alignment = align
+        width = sum(manager.column_dimensions[c].width for c in 'BCDEFG')
+        manager.row_dimensions[row].height = max(manager.row_dimensions[row].height or 15,
+            17 * max(1, ceil(text_units(cell.value) / max(1, width * .75))) + 8)
+
+    for row in range(1, min(6, top-3)+1):
+        widen_summary(row)
+    for row in range(7, top-2):
+        if str(manager.cell(row,1).value or '').startswith((
+                'H153.7｜主管可參考研究順位', 'H153.7｜W級非交易補證優先觀察',
+                '原始 H148.1 量價五關研究')):
+            widen_summary(row)
+
+    for c in range(1, 8):
         manager.cell(top,c).fill = PatternFill('solid',fgColor='17324D')
-        manager.cell(top,c).font = Font(name='Microsoft JhengHei',color='FFFFFF',bold=True)
-    fmt(manager, top+1, 1, "閱讀須知")
-    fmt(manager, top+1, 2, "只為補資料，非A/B研究排名、非隔日上漲預測。完整逐股證據請看11表H175區。")
-    fmt(manager, top+2, 1, "來源序／代號")
-    fmt(manager, top+2, 2, "股票名稱｜H114資料問題｜優先查證")
+        manager.cell(top,c).font = Font(name='Microsoft JhengHei',color='FFFFFF',bold=True,size=11)
+        manager.cell(top,c).alignment = Alignment(wrap_text=True,vertical='center')
+    manager.merge_cells(start_row=top,start_column=2,end_row=top,end_column=7)
+    fmt(manager, top+1, 1, '閱讀須知')
+    fmt(manager, top+1, 2, '只為補資料，非A/B研究排名、非隔日上漲預測。完整逐股證據請看11表H175區。')
+    manager.merge_cells(start_row=top+1,start_column=2,end_row=top+1,end_column=7)
+    manager.cell(top+1,2).alignment = Alignment(wrap_text=True,vertical='center')
+    manager.row_dimensions[top+1].height=30
+    for j, label in enumerate(('來源序／代號','股票名稱','股票池','H114資料問題','優先查證／說明'),1):
+        fmt(manager,top+2,j,label)
+    for j in range(1,8):
+        cell=manager.cell(top+2,j)
+        cell.fill=PatternFill('solid',fgColor='0B6E75')
+        cell.font=Font(name='Microsoft JhengHei',bold=True,color='FFFFFF',size=11)
+        cell.alignment=Alignment(wrap_text=True,vertical='center')
+    manager.merge_cells(start_row=top+2,start_column=5,end_row=top+2,end_column=7)
+    manager.row_dimensions[top+2].height=29
     for i, row in enumerate(radar[:10], top+3):
-        fmt(manager, i, 1, f"{row['原來源順序']}｜{row['股票代號']}")
-        fmt(manager, i, 2, f"{row['股票名稱']}｜{row['股票池']}｜{row['H114量價狀態']}｜{row['先補的資料／禁止誤判']}")
-        manager.cell(i,2).alignment=Alignment(wrap_text=True,vertical='center')
-        manager.row_dimensions[i].height=46
-    manager.row_dimensions[top].height=34
-    manager.column_dimensions['B'].width=max(manager.column_dimensions['B'].width or 15,68)
+        values=(f"{row['原來源順序']}｜{row['股票代號']}", row['股票名稱'],
+                row['股票池'], row['H114量價狀態'], row['先補的資料／禁止誤判'])
+        for j,value in enumerate(values,1):
+            cell=fmt(manager,i,j,value)
+            # Data is text, not an executable spreadsheet formula.
+            if isinstance(value,str): cell.data_type='s'
+            cell.font=Font(name='Microsoft JhengHei',size=11,bold=j==2,
+                           color='17324D' if j==2 else '334155')
+            cell.alignment=Alignment(wrap_text=True,vertical='center')
+        for j in range(1,8):
+            if (i-(top+3))%2==1:
+                manager.cell(i,j).fill=PatternFill('solid',fgColor='EFF6FA')
+        manager.merge_cells(start_row=i,start_column=5,end_row=i,end_column=7)
+        widths=[manager.column_dimensions[c].width for c in 'ABCD']
+        widths.append(sum(manager.column_dimensions[c].width for c in 'EFG'))
+        lines=max(ceil(text_units(v)/max(1,w*.70)) for v,w in zip(values,widths))
+        manager.row_dimensions[i].height=max(34,17*lines+8)
+    manager.row_dimensions[top].height=44
     # Existing H157/H169/H173 navigation sections retained intact.
     start = nav.max_row+3
     fmt(nav,start,1,"H175｜同輪候選補證清單與K線缺口（非交易排名）")
