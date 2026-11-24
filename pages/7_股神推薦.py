@@ -19361,6 +19361,12 @@ def main():
     except Exception:
         pass
     inject_pro_theme()
+    # H191 read-only research entry; no change to formal rankings or authority.
+    try:
+        if Path(__file__).with_name("29_主流趨勢與潛力黑馬.py").is_file():
+            st.page_link("pages/29_主流趨勢與潛力黑馬.py", label="H191｜主流趨勢與潛力黑馬研究", icon="📈")
+    except Exception:
+        pass
 
     # >>> GODPICK_BI_V135_REAL_CHART_STYLE
     try:
