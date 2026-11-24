@@ -17856,7 +17856,10 @@ def _build_excel_bytes_fast_h85(
     # H195 separate research snapshot; legacy tabs and H126 remain untouched.
     try:
         from godpick_h195_command_center import append_manager as _h195_append
-        _h195_append(wb, Path(__file__).resolve().parents[1], research_day=locals().get('_h148_research_day'))
+        from godpick_h200_integrated import formal_diagnosis as _h200_formal
+        _h200_diag = _h200_formal(buyable=h144_focus_meta.get('h126_buyable'), h145=locals().get('_h145_bridge'),
+                                  run_id=(locals().get('_h154_audit') or {}).get('run_id'), research_day=locals().get('_h148_research_day'))
+        _h195_append(wb, Path(__file__).resolve().parents[1], research_day=locals().get('_h148_research_day'), formal=_h200_diag)
     except Exception as _h195_exc:
         if 'H195_聯合決策研究' in wb.sheetnames:
             del wb['H195_聯合決策研究']
@@ -20252,6 +20255,13 @@ def main():
             # H85: even when Formal/A-/R1 operational list is zero, the H79
             # research layer still has decision value and must remain visible.
             _phase80_render_actionable_panel(pd.DataFrame())
+            # H200 uses the already displayed rows; no extra scan or I/O.
+            try:
+                from godpick_h200_integrated import displayed_diagnosis as _h200_displayed
+                with st.expander('H200｜零推薦原因統計（目前診斷列）', expanded=True):
+                    st.json(_h200_displayed(diagnosis_now))
+            except Exception as _h200_exc:
+                st.caption('H200診斷暫不可用：'+type(_h200_exc).__name__)
             diag = diagnosis_now.copy()
             sort_col = next((c for c in ["V188股神作戰優先分", "股神推薦優先分", "候選強度分", "推薦總分", "股神實戰總分"] if c in diag.columns), None)
             if sort_col:

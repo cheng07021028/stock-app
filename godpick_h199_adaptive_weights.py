@@ -134,8 +134,10 @@ def repetition(signals,now):
             out.append({'市場':m,'股票代號':c,'股票名稱':s.get('name',''),'最近封存日':ds[-1],'近5封存日出現次數':hits,'連續封存出現次數':streak,'可比較封存日數':len(ds),'提示':'持續出現／複核新證據（不扣分）' if hits>=3 else '一般觀察'})
     return summary,sorted(out,key=lambda x:(-x['近5封存日出現次數'],x['市場'],x['股票代號']))
 
-def run(root=ROOT,now=None):
-    root=Path(root);now=p.stamp(now or datetime.now(ar.TZ));ss,oo=p.read_ledger(root);market=p.Market(root,now);e=Evidence(market)
+def run(root=ROOT,now=None,*,ledger=None,market=None):
+    root=Path(root);now=p.stamp(now or datetime.now(ar.TZ));ss,oo=p.read_ledger(root) if ledger is None else ledger
+    market=p.Market(root,now) if market is None else market
+    e=Evidence(market)
     day=expected_day(now);current=[e.regime(m,day,now) for m in ar.URLS]
     # Only immutable H194 cohorts. All date-eligible windows counted before filtering outcomes.
     groups=defaultdict(list)

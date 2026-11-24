@@ -6,13 +6,14 @@ st.set_page_config(page_title='H195｜超級AI股神決策總指揮中心',layou
 from app_auth import require_login
 require_login()
 from godpick_h195_command_center import VERSION,TIERS,load,workbook,render_inline
+from godpick_h200_integrated import ordered, VERSION as H200_VERSION
 try:
     from godpick_bi_theme import install_bi_dashboard_style
     install_bi_dashboard_style('33_h195')
 except Exception:pass
 root=Path(__file__).resolve().parents[1]
 st.title('33｜超級AI股神決策總指揮中心')
-st.caption(VERSION+'｜自動封存、只讀資料；H126 正式授權維持獨立。')
+st.caption(H200_VERSION+'｜'+VERSION+'｜自動封存、只讀資料；H126 正式授權維持獨立。')
 for c,p,label in zip(st.columns(4),['7_股神推薦.py','29_主流趨勢與潛力黑馬.py','30_財報成長與合理估值.py','32_隔日預測與AI績效學習.py'],['正式推薦與風控','技術研究','財報研究','績效與預測']):c.page_link('pages/'+p,label=label)
 render_inline(root)
 b,s,msg=load(root)
@@ -22,7 +23,7 @@ if s!='CURRENT':
     if not st.checkbox('查看歷史快照（僅供查核）'):st.stop()
 for tab,t in zip(st.tabs(list(TIERS)),TIERS):
     with tab:
-        df=pd.DataFrame([r for r in b['rows'] if r['研究分級']==t]);st.dataframe(df,hide_index=True,use_container_width=True) if not df.empty else st.info('此池未找到具備對應證據的股票。')
+        df=pd.DataFrame(ordered([r for r in b['rows'] if r['研究分級']==t]));st.dataframe(df,hide_index=True,use_container_width=True) if not df.empty else st.info('此池未找到具備對應證據的股票。')
 st.subheader('研究機會雷達');st.dataframe(pd.DataFrame([{'研究池':k,'檔數':v} for k,v in b['radar'].items()]),hide_index=True,use_container_width=True)
 st.subheader('十二研究員與反方查核')
 items={(r['市場'],r['股票代號']):r for r in b['reviews']}
