@@ -70,3 +70,31 @@ if st.checkbox('載入 H197 六策略比較（本機封存資料）'):
             from godpick_h197_strategy_review import excel as excel_h197
             st.download_button('下載 H197 策略比較',excel_h197(review),'H197_StrategyReview.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     except Exception as e:st.error('H197 封存資料驗證失敗：'+str(e)[:180])
+
+st.divider()
+st.subheader('H199｜AI權重學習與市場輪動適應')
+st.caption('獨立研究建議；未通過時序留出驗證時維持1.0倍。正式推薦排名與買進授權不受影響。')
+@st.cache_data(ttl=300,show_spinner=False)
+def load_h199(path):
+    from godpick_h199_adaptive_weights import run
+    return run(Path(path))
+if st.checkbox('載入 H199 市場輪動與權重研究'):
+    try:
+        if st.button('重新整理 H199'):load_h199.clear()
+        with st.spinner('讀取封存行情與前瞻績效…'):adaptive=load_h199(str(root))
+        st.caption(adaptive['asof']+'｜'+adaptive['basis'])
+        if adaptive['status']=='BASELINE_ONLY':st.info('目前維持原研究權重；尚未通過市場狀態與留出驗證。')
+        if adaptive['archive_errors']:st.warning('行情封存異常，禁止調高權重。')
+        st.dataframe(pd.DataFrame(adaptive['current_regime']),hide_index=True,use_container_width=True)
+        st.dataframe(pd.DataFrame(adaptive['recommendations']),hide_index=True,use_container_width=True)
+        with st.expander('時序留出驗證'):st.dataframe(pd.DataFrame(adaptive['models']),hide_index=True,use_container_width=True)
+        st.markdown('**產業相對強度變化及成交額活躍度**')
+        if not adaptive['rotation']:st.info('產業分類／連續行情覆蓋不足，暫無可信輪動比較。')
+        st.dataframe(pd.DataFrame(adaptive['rotation']),hide_index=True,use_container_width=True)
+        with st.expander('重複研究監控（不扣分）'):
+            st.dataframe(pd.DataFrame(adaptive['repetition_summary']),hide_index=True,use_container_width=True)
+            st.dataframe(pd.DataFrame(adaptive['repetition']),hide_index=True,use_container_width=True)
+        if st.checkbox('產生 H199 權重研究 Excel'):
+            from godpick_h199_adaptive_weights import excel as excel_h199
+            st.download_button('下載 H199 權重研究',excel_h199(adaptive),'H199_AdaptiveWeights.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    except Exception as e:st.error('H199 研究驗證失敗：'+str(e)[:180])
