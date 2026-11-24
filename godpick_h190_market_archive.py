@@ -132,7 +132,7 @@ def parse_daily(raw, market, day, *, observed_at):
         rows.append([code,o,h,l,c,int(v),int(a),int(n) if n is not None else None])
     if len(rows)<MIN_ROWS[market] or len(rows)<eligible*0.85: raise ValueError(f'coverage insufficient: valid={len(rows)}, eligible={eligible}')
     return _seal({'version':VERSION,'market':market,'day':day,'observed_at':observed_at,'source_url':URLS[market],
-        'basis':'RAW_UNADJUSTED_FIRST_OBSERVED_BACKFILL','row_count':len(rows),'eligible_rows':eligible,
+        'basis':'RAW_UNADJUSTED_FIRST_OBSERVED_BACKFILL','session_scope':'TPEX_ROUND_LOT_REPORT_EW' if market=='TPEX' else 'TWSE_MI_INDEX_ALLBUT0999','row_count':len(rows),'eligible_rows':eligible,
         'invalid_rows':invalid,'rows':sorted(rows,key=lambda r:r[0])})
 
 def save_day(root, payload):
@@ -212,7 +212,11 @@ def collect(root=ROOT, *, http=None, now=None, budget=24, target=250, timeout=12
             path=root/'daily'/market/(day+'.json.gz')
             if path.is_file(): continue
             key=market+':'+day
-            candidates.append((0 if day in ordered[:2] else attempts.get(key,0)+1,day,market,key))
+            # Prioritize the latest 60 sessions for BOTH markets; older untried days
+            # must not starve the recent missing side after a source repair.
+            priority = (0 if day in ordered[:2] else 1 if day in ordered[:60] else 2,
+                        attempts.get(key,0))
+            candidates.append((priority,day,market,key))
     candidates.sort(key=lambda x:(x[0],-date.fromisoformat(x[1]).toordinal(),x[2]))
     # Two requests per date maximum; budget measured in requests to guarantee bound.
     for _,day,market,key in candidates:
@@ -220,7 +224,7 @@ def collect(root=ROOT, *, http=None, now=None, budget=24, target=250, timeout=12
         if consecutive[market]>=3: continue
         checked+=1; requests+=1
         try:
-            params={'date':day.replace('-',''),'type':'ALLBUT0999','response':'json'} if market=='TWSE' else {'date':day.replace('-','/'),'id':'','response':'json'}
+            params={'date':day.replace('-',''),'type':'ALLBUT0999','response':'json'} if market=='TWSE' else {'date':day.replace('-','/'),'type':'EW','response':'json'}
             saved+=int(save_day(root,parse_daily(_get(http,URLS[market],params,timeout),market,day,observed_at=observed)))
             consecutive[market]=0; attempts.pop(key,None)
         except Exception as e:
