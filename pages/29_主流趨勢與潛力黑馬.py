@@ -16,6 +16,8 @@ except Exception:
 st.title('29｜主流趨勢與潛力黑馬引擎')
 st.caption(VERSION+'｜自動讀取 H190 官方行情、既有法人／TDCC／H117 指數快照；不需上傳 Excel，不寫入正式推薦與交易紀錄。')
 st.page_link('pages/7_股神推薦.py',label='返回股神正式推薦',icon='📊')
+if Path(__file__).with_name('30_財報成長與合理估值.py').is_file():
+    st.page_link('pages/30_財報成長與合理估值.py',label='H192｜財報成長與合理估值',icon='📋')
 root=Path(__file__).resolve().parents[1]
 a,b,c=st.columns([2,2,1]);top=a.selectbox('各研究池顯示上限',[10,20,30,50],index=1);amount=b.selectbox('當日及20日均成交額下限（萬元）',[1000,2000,3000,5000,10000],index=1);refresh=c.button('重新讀取',use_container_width=True)
 @st.cache_data(ttl=60,show_spinner=False)

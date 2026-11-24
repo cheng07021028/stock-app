@@ -19365,6 +19365,8 @@ def main():
     try:
         if Path(__file__).with_name("29_主流趨勢與潛力黑馬.py").is_file():
             st.page_link("pages/29_主流趨勢與潛力黑馬.py", label="H191｜主流趨勢與潛力黑馬研究", icon="📈")
+        if Path(__file__).with_name("30_財報成長與合理估值.py").is_file():
+            st.page_link("pages/30_財報成長與合理估值.py", label="H192｜財報成長與合理估值研究", icon="📋")
     except Exception:
         pass
 
