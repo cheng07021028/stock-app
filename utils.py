@@ -2756,6 +2756,20 @@ def get_history_data(stock_no, stock_name="", market_type="上市", start_date=N
     _h186_wide_history = (end_ts - start_ts).days >= 90
     _h186_weak_history = pd.DataFrame()
 
+    # H190: shared verified date-batch archive, never a network request.
+    # Do not merge adjusted Yahoo prices with raw official bars or shorten the requested range.
+    try:
+        from godpick_h190_market_archive import archive_history as _h190_history
+        _h190_df = _h190_history(stock_no, market_type, start_ts, end_ts)
+        if not _h190_df.empty and _history_frame_is_fresh_enough(_h190_df,end_ts):
+            if not _h186_wide_history or _h186_vol_quality(_h190_df)['status']=='VALID_60_DATED_POSITIVE_VOLUME':
+                _diag_add_event("history", "H190OfficialArchive", True,
+                    "verified requested market sessions; RAW_UNADJUSTED; no network",time.perf_counter()-scan_t0,
+                    rows=len(_h190_df),code=stock_no)
+                return _h190_df
+    except Exception as e:
+        _diag_add_event("history", "H190OfficialArchive", False,str(e)[:160],time.perf_counter()-scan_t0,rows=0,code=stock_no)
+
     # V22：第一層先讀本機歷史快取。這不會跳過股票，只是避免重複下載同一段 K 線。
     try:
         cached_df = _load_history_disk_cache(stock_no, market_type, start_ts, end_ts)

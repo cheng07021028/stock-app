@@ -273,6 +273,31 @@ def load_auto_datasets(*,code:str='',asof:str='',root:Path=ROOT,include_h117:boo
    f=f.drop_duplicates(['date','code'],keep='first').sort_values('date')
    out['ohlcv']=f.reset_index(drop=True)
    status['sources']['H117_IMMUTABLE_OHLCV']={'status':'VERIFIED_ONLY','row_count':len(historic),'asof_day':f['date'].max()}
+ # H190: use the same complete raw daily archive as the scanner. Do not merge
+ # H190 bars with H185 snapshots or certify historical announcement/PIT times.
+ if code and include_h117:
+  try:
+   from godpick_h190_market_archive import archive_history
+   from datetime import timedelta
+   first=(date.fromisoformat(asof)-timedelta(days=180)).isoformat()
+   frames=[archive_history(code,m,first,asof,root=Path(root)/'data'/'h190') for m in ('TWSE','TPEX')]
+   good=[f for f in frames if len(f)>=85 and (date.fromisoformat(asof)-f['日期'].max().date()).days<=5]
+   if len(good)==1:
+    f=good[0].rename(columns={'日期':'date','開盤價':'open','最高價':'high','最低價':'low','收盤價':'close','成交股數':'volume','成交金額':'turnover_twd','資料源':'source'})
+    f['date']=f['date'].dt.strftime('%Y-%m-%d');f['code']=code
+    out['ohlcv']=f[['date','open','high','low','close','volume','code','source','turnover_twd']].reset_index(drop=True)
+    status['sources']['H190_OFFICIAL_ARCHIVE']={'status':'RAW_UNADJUSTED_HISTORY_NOT_HISTORICAL_PIT_CERTIFIED','row_count':len(f),'asof_day':f['date'].max()}
+  except Exception as exc:
+   status['sources']['H190_OFFICIAL_ARCHIVE']={'status':'UNAVAILABLE_FALLBACK_H185','error':str(exc)[:100]}
+ # H190 whole-market progress is separate from per-stock history validity.
+ try:
+  from godpick_h190_market_archive import inspect as inspect_h190
+  health_h190=inspect_h190(Path(root)/'data'/'h190')
+  status['sources']['H190_BATCH_COVERAGE']={'status':('ARCHIVE_TARGET_REACHED' if health_h190['target_250_archived_sessions_ready'] else 'BACKFILL_OR_SOURCE_GAP')+f" | {health_h190['paired_verified_sessions']}/250 sessions",
+     'row_count':sum(health_h190['complete_recent_60_symbols'].values()), 'asof_day':health_h190['latest_paired_session'], 'coverage':health_h190}
+  if not health_h190['target_250_archived_sessions_ready']:
+   status['gaps'].append('H190 官方行情封存尚未完成 250 個雙市場交易日；未補齊仍沿用原 H187 入口，不代表所有股票已通過量價認證。')
+ except Exception: pass
  financial=[]
  rev=_jsonl(Path(root)/'data'/'h115'/'revenue.jsonl')
  margins=_jsonl(Path(root)/'data'/'h115'/'quarterly_margins.jsonl')
