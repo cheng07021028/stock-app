@@ -1,6 +1,13 @@
 name: H195 consolidated public research
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - godpick_h200_integrated.py
+      - godpick_h195_command_center.py
+      - godpick_h199_adaptive_weights.py
+      - .github/workflows/h195_daily_command.yml
   schedule:
     - cron: '55 15 * * *'
     - cron: '45 0 * * *'
