@@ -78,9 +78,20 @@ def build_h175_audit(*, diagnosis: Any, tables: Any, h154_audit: Any,
         else:
             index[code] = row
     audit = h154_audit if isinstance(h154_audit, Mapping) else {}
+    # H189: H145 guards *formal* candidate/export authority, not whether
+    # same-run H85 names may be displayed in an explicitly NON-TRADABLE queue.
+    # Requiring H145 green here concealed all 23 waiting stocks while the
+    # independently verified H154 run identity was MATCHED.
+    # Also verify that this specific H85 payload matches H154's SAME-RUN
+    # list, not merely that another stage's run IDs happen to match.
+    def _src_codes(name: str) -> list[str]:
+        return list(dict.fromkeys(c for r in _rows(tables.get(name))
+                                  if (c := _code(r.get("股票代號")))))
+    h85_verified = (_src_codes("waiting") == list(audit.get("h85_waiting_codes") or [])
+                    and _src_codes("emerging_watch") == list(audit.get("h85_emerging_codes") or []))
     same_run = (audit.get("run_identity") == "MATCHED" and
-                bool(_text(audit.get("run_id"))) and
-                not _text(audit.get("h145_status")).startswith("BLOCKED_"))
+                bool(_text(audit.get("run_id"))) and h85_verified)
+    formal_blocked = _text(audit.get("h145_status")).startswith("BLOCKED_")
     day = _date(study_day)
     tables = tables if isinstance(tables, Mapping) else {}
     names: list[tuple[str, dict]] = []
@@ -130,7 +141,8 @@ def build_h175_audit(*, diagnosis: Any, tables: Any, h154_audit: Any,
             "H114量價狀態": status, "最近60根有效量數": valid_vol,
             "缺量根數": bad_vol, "H109原風控": veto,
             "先補的資料／禁止誤判": reason,
-            "資格": "禁止直接買進｜同輪非交易核查" if same_run else "隔離｜非同輪已驗資料",
+            "資格": ("禁止直接買進｜H145正式阻擋、僅同輪非交易核查" if formal_blocked
+                   else "禁止直接買進｜同輪非交易核查") if same_run else "隔離｜非同輪已驗資料",
             "H175僅價格型態":_text(raw.get("H175價格型態（僅OHLC）")) or "未提供",
             "H175近20日漲幅%":_float(raw.get("H175價格20日報酬%")),
         })
@@ -177,7 +189,10 @@ def build_h175_audit(*, diagnosis: Any, tables: Any, h154_audit: Any,
                              x['原來源順序'],x['股票代號']))
     return {
         "version": VERSION, "run_id": _text(audit.get("run_id")),
-        "same_run": same_run, "study_day": day, "diagnosis_rows": len(diag_rows),
+        "same_run": same_run, "h85_codes_reconciled": h85_verified,
+        "formal_h145_blocked":formal_blocked,
+        "formal_h145_status":_text(audit.get("h145_status")),
+        "study_day": day, "diagnosis_rows": len(diag_rows),
         "status_counts": dict(counts), "invalid_volume_rows": counts.get("INVALID_OHLCV_VOLUME", 0),
         "strict_ohlcv_rows": sum(1 for r in diag_rows if
                _text(r.get("H114K線資料狀態")) == "VALID_OHLCV" and

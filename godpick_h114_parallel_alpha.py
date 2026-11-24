@@ -97,6 +97,9 @@ def analyze_history(hist: pd.DataFrame | None, *, asof: Any = None) -> dict[str,
         "H114K線證據日": "", "H114K線量比": None,
         "H114當日成交量張": None, "H11420日平均量張": None,
         "H114當日收盤價": None,  # H149: only dated, valid OHLCV quote; no API call
+        "H189研究估算當日成交額百萬": None,
+        "H189研究估算20日均成交額百萬": None,
+        "H189研究估算成交額依據": "未驗證／不可代替官方成交金額",
         "H114前日收盤價": None, "H114前次交易日": "", "H114當日漲跌幅%": None,
         "H114當前5日漲跌幅%": None,
         "H114同型歷史樣本數": 0, "H114同型樣本隔日上漲率%": None,
@@ -291,6 +294,20 @@ def analyze_history(hist: pd.DataFrame | None, *, asof: Any = None) -> dict[str,
                 base["H114近3日基準交易日"] = str(df["day"].iloc[-4])
             base["H114當日漲跌幅%"] = round((float(last["close"]) / float(prior["close"]) - 1) * 100, 3)
     if valid60lots and last["lots"] > 0:
+        # H189 research-only turnover proxy from independent, fully valid,
+        # dated price and declared-unit volume; NOT official traded value.
+        # price (TWD/share) * lots (1,000 shares) / 1,000 -> NT$ million.
+        # Prior 20 sessions exclude today's bar to avoid current-day leakage.
+        prior20 = df.iloc[-21:-1]
+        proxy_today = float(last["close"]) * float(last["lots"]) / 1000.0
+        proxy_20 = float((prior20["close"] * prior20["lots"]).mean() / 1000.0)
+        if (pd.notna(proxy_today) and pd.notna(proxy_20)
+                and proxy_today > 0 and proxy_20 > 0):
+            base["H189研究估算當日成交額百萬"] = round(proxy_today, 3)
+            base["H189研究估算20日均成交額百萬"] = round(proxy_20, 3)
+            base["H189研究估算成交額依據"] = (
+                "研究代理估值｜當日收盤價×成交量；前20交易日收盤價×成交量平均；"
+                "非實際成交金額，禁止用於H113/H126正式流動性認證")
         avg20 = df["lots"].iloc[-21:-1].mean()
         ratio = last["lots"] / avg20 if avg20 > 0 else None
         base["H114K線量比"] = round(ratio, 3) if ratio is not None else None

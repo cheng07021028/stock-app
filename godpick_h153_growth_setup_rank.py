@@ -150,8 +150,20 @@ def build_growth_setup_ranking(*, diagnosis_frame: Any, research_frame: Any,
             counts['ETF或其他非一般個股（保留來源分類）']+=1;continue
         if not _good_day(r,day):
             counts['同日有效K線／60根證據不足']+=1;continue
-        amount=_n(r,'H113當日成交額百萬','成交額百萬')
-        avg=_n(r,'H113二十日均成交額百萬','20日均成交額百萬')
+        # H189: H113 is only available for the limited audit subset in some
+        # full-universe runs. Do not classify absent H113 as low liquidity.
+        # With 60 independently valid same-day OHLCV bars, CLOSE × volume is
+        # a transparent *research proxy*, never an H113/H126 official value.
+        amount_h113=_n(r,'H113當日成交額百萬','成交額百萬')
+        avg_h113=_n(r,'H113二十日均成交額百萬','20日均成交額百萬')
+        amount=(amount_h113 if amount_h113 is not None else
+                _n(r,'H189研究估算當日成交額百萬'))
+        avg=(avg_h113 if avg_h113 is not None else
+             _n(r,'H189研究估算20日均成交額百萬'))
+        proxy_used=(amount_h113 is None or avg_h113 is None) and (
+            amount is not None or avg is not None)
+        proxy_note=('研究代理成交額，非官方實際成交金額，H113/H126不變' if proxy_used
+                    else '原有H113量能欄位')
         lots=_n(r,'H114當日成交量張')
         ratio=_n(r,'H114K線量比')
         # H153.1: an independently auditable reason per missing or failing
@@ -306,6 +318,8 @@ def build_growth_setup_ranking(*, diagnosis_frame: Any, research_frame: Any,
         if not raw_valuation_ok:missing.append('官方原始PE／EPS證據不足')
         elif not value_verified:missing.append('同日同業PE樣本不足；原始PE／EPS仍可研究')
         if not growth and revenue_verified:missing.append('營收成長尚未滿足研究假設')
+        if proxy_used:
+            missing.append('H189成交額僅為收盤價×成交量研究代理值；需補官方實際成交金額，H113/H126不得因此通過')
         if inst!='PROVEN_FLOW':missing.append('H123法人待證')
         if tdcc!='VERIFIED_RISING':missing.append('H124集保週增待證')
         if adx is not None and adx>=25 and dmi.startswith('空向'):
@@ -326,7 +340,8 @@ def build_growth_setup_ranking(*, diagnosis_frame: Any, research_frame: Any,
             '下月營收模型情境(百萬)':scenario['estimate_m'],
             '營收預估創高判定':scenario['record_state'],
             '預估資料限制':scenario['note'],
-            '技術來源狀態':'H114同日VALID_OHLCV ≥60根','量能驗證':f'成交額{amount:g}/均額{avg:g}百萬；量{lots:g}張；比{ratio:g}',
+            '技術來源狀態':'H114同日VALID_OHLCV ≥60根',
+            '量能驗證':f'成交額{amount:g}/均額{avg:g}百萬；量{lots:g}張；比{ratio:g}；{proxy_note}',
             '法人／大戶':inst+'／'+tdcc,'H109風控':risk,
             '研究成立理由':'；'.join(evidence) or '已核對量價',
             '反證與待補':'；'.join(missing),'研究聲明':WATCH_ONLY,
