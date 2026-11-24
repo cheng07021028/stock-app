@@ -1,0 +1,51 @@
+name: H192 official financial growth archive
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'godpick_h192_financial_growth.py'
+      - 'tools/h192_financial_collect.py'
+      - '.github/workflows/h192_financial_archive.yml'
+  schedule:
+    # Taiwan 22:05 every day; separate from the H190 interactive scan.
+    - cron: '5 14 * * *'
+permissions:
+  contents: write
+concurrency:
+  group: h192-financial-archive-main
+  cancel-in-progress: false
+jobs:
+  collect:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install HTTP dependency
+        run: python -m pip install 'requests>=2.31,<3'
+      - name: Collect independent official sources
+        id: capture
+        run: python tools/h192_financial_collect.py
+      - name: Persist only H192 public archive and source health
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if [[ -d data/h192 ]]; then git add -f -- data/h192/; fi
+          if ! git diff --cached --quiet; then
+            git commit -m 'data(H192): official financial first-observed archive'
+            git pull --rebase origin main
+            git push origin HEAD:main
+          fi
+      - name: Flag partial or stale sources
+        if: steps.capture.outcome != 'success'
+        run: exit 1

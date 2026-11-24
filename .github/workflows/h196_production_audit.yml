@@ -1,0 +1,35 @@
+name: H196 production data acceptance
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '25 16 * * *'
+  push:
+    branches: [main]
+    paths:
+      - 'tools/h196_production_audit.py'
+      - '.github/workflows/h196_production_audit.yml'
+permissions:
+  contents: read
+concurrency:
+  group: h196-readonly-audit-main
+  cancel-in-progress: false
+jobs:
+  audit:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install 'pandas==2.3.3' 'numpy>=1.26,<3' 'requests>=2.31,<3' 'openpyxl>=3.1.2,<4'
+      - run: python tools/h196_production_audit.py --out h196_output/acceptance.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: H196-production-acceptance-${{ github.run_id }}
+          path: h196_output/
+          retention-days: 90
