@@ -9,6 +9,7 @@ import json, math, re, gzip
 import numpy as np
 import pandas as pd
 import godpick_h190_market_archive as archive
+import godpick_h198_stage_review as stage198
 
 VERSION='V191-H191-MAINSTREAM-BLACKHORSE'
 ROOT=Path(__file__).resolve().parent
@@ -109,7 +110,7 @@ def evaluate(*, master, calendars, markets, rows, asof, factors=None, latest_tdc
     if not 1<=top<=100 or not math.isfinite(min_amount) or min_amount<0: raise ValueError('invalid settings')
     universe=master_map(master); denominators=Counter(r['市場'] for r in universe.values()); industry_den=Counter(r['產業'] for r in universe.values() if r['產業'])
     sessions=sorted(set(d for ds in calendars.values() for d in ds if d<=asof)); expected=sessions[-60:]
-    out={'version':VERSION,'asof':asof,'status':'DATA_PENDING','trade_authority_changed':False,'universe':len(universe),'coverage':{},'reasons':{},'sectors':[],'pools':{p:[] for p in POOLS},'diagnostic':[],'archive_errors':list(errors),'qualified':0,'scope':'研究觀察，非正式推薦','index_available':False}
+    out={'version':VERSION,'asof':asof,'status':'DATA_PENDING','trade_authority_changed':False,'universe':len(universe),'coverage':{},'reasons':{},'sectors':[],'pools':{p:[] for p in POOLS},'diagnostic':[],'archive_errors':list(errors),'qualified':0,'scope':'研究觀察，非正式推薦','index_available':False,'h198':stage198.summarize([],top,len(universe))}
     if len(expected)!=60 or expected[-1]!=asof or not latest_ready or errors:
         out['reasons']={'交易日不足、日期未核實或封存錯誤':len(universe)};out['diagnostic']=[{**r,'資料日期':asof,'缺口':'交易日不足、日期未核實或封存錯誤'} for r in universe.values()];return out
     # Require every calendar month across the window, not just 60 rows from a gapped calendar.
@@ -146,6 +147,7 @@ def evaluate(*, master, calendars, markets, rows, asof, factors=None, latest_tdc
     idx=np.asarray(index_returns,dtype=float) if index_returns is not None else np.array([])
     idx_ok=idx.shape==(20,) and np.isfinite(idx).all() and (idx>-100).all(); out['index_available']=bool(idx_ok)
     down=idx<0 if idx_ok else np.zeros(20,dtype=bool)
+    stage_rows=[]
     for f in features:
         liquid=f['當日成交額']>=min_amount and f['20日均成交額']>=min_amount
         c=f['收盤']; r5=f['5日漲跌%']; r20=f['20日漲跌%']; pos=f['60日區間位置%']; vol=f['量比']; signal=[]
@@ -165,7 +167,10 @@ def evaluate(*, master, calendars, markets, rows, asof, factors=None, latest_tdc
         delta=f['TDCC持股變化pp']; net=f['法人5日買超股數']; streak=f['法人連買天數']
         if liquid and delta is not None and delta>=.3 and net is not None and net>0 and streak is not None and streak>=2:
             add('大戶持股增加',delta*10+min(streak,5),'TDCC千張以上兩期持股比例增加，法人5日淨買超且連買；不等同主力鎖碼')
-        out['diagnostic'].append({'股票代號':f['股票代號'],'股票名稱':f['股票名稱'],'市場':f['市場'],'產業':f['產業'],'流動性通過':liquid,'研究池':'、'.join(signal),'資料日期':asof,'法人資料可用':net is not None,'TDCC資料可用':delta is not None})
+        h198=stage198.assess(rows.get((f['市場'],f['股票代號']),[]),expected,f,liquid=liquid)
+        stage_rows.append({**{k:f[k] for k in ('股票代號','股票名稱','市場','產業','收盤','量比','5日漲跌%','20日漲跌%','當日成交額','20日均成交額')},**h198})
+        out['diagnostic'].append({**h198,'股票代號':f['股票代號'],'股票名稱':f['股票名稱'],'市場':f['市場'],'產業':f['產業'],'流動性通過':liquid,'研究池':'、'.join(signal),'資料日期':asof,'法人資料可用':net is not None,'TDCC資料可用':delta is not None})
+    out['h198']=stage198.summarize(stage_rows,top,len(universe))
     out['pool_counts']={p:len(g) for p,g in out['pools'].items()}
     for p,g in out['pools'].items():
         g.sort(key=lambda r:(-r['研究分'],r['股票代號']));out['pools'][p]=[{**r,'研究排名':i} for i,r in enumerate(g[:top],1)]

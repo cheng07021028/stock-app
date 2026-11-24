@@ -12,6 +12,7 @@ import godpick_h191_opportunity_engine as tech
 import godpick_h192_financial_growth as fin
 import godpick_h184_research_lab as lab
 import godpick_h185_auto_sources as sources
+from godpick_h198_stage_review import FIELDS as STAGE_FIELDS
 
 VERSION='V191-H193-JOINT-RESEARCH'
 ROOT=Path(__file__).resolve().parent
@@ -61,6 +62,9 @@ def combine(t, f):
            '營收年增%':b.get('營收年增%'),'營收月增%':b.get('營收月增%'),'官方PE':b.get('官方PE') if b.get('PE同交易日') and same else None,
            'TTM EPS重建':b.get('TTM EPS重建'),'技術缺口':a.get('缺口','') if a else '無技術診斷',
            '財報缺口':b.get('缺口','') if b else '無財報診斷','交易狀態':'僅研究／未授權','資料一致日':same}
+        # H198 is counter-evidence only; never alter H193 membership, H194 signal or H126.
+        if date_ok and a.get('H198資料日期')==t.get('asof') and k not in td:
+            r.update({field:a.get(field) for field in STAGE_FIELDS})
         audit.append(r)
         if tier:rank[tier].append(r)
     # Ordering is a transparent research triage, NOT predicted return or probability.
@@ -147,6 +151,8 @@ def detail(result,financial,market,code,root=ROOT,now=None):
     thesis=f"{code} 技術研究：{r['技術研究池'] or '無'}；財報研究：{r['財報研究池'] or '無'}。僅研究，證據缺口待核。"
     roles['08']=lab.run_role('08',{},dict(opts,thesis=thesis)).tabular()
     roles['08']['tables']['個股反方查核']=[{'事項':'技術失效','條件':'跌回突破區或失去均線支撐；原始價需核對公司行動','現況':r['技術缺口'] or '待後續行情'},{'事項':'成長失效','條件':'新公告營收或利潤率反轉；核對一次性損益','現況':r['財報缺口'] or '待下期公告'},{'事項':'估值風險','條件':'同業折價可能源自景氣循環、負債或盈利品質','現況':'待商模與現金流核對'}]
+    if r.get('H198階段'):
+        roles['08']['tables']['個股反方查核'].append({'事項':'H198主升段／假突破反證','條件':r.get('H198確認條件',''),'現況':str(r['H198階段'])+'｜'+str(r.get('H198反證','')),'失效參考':r.get('H198失效參考'),'突破基準日':r.get('H198突破基準日')})
     med=profile.get('同業PE中位數') if result['same_session'] else None
     put('09','可比估值研究' if med is not None else '待補證','同市場同產業同期可比PE；非內在價值',['商業模式、股本調整與現金流仍須複核'],metrics={'同業PE中位數':med,'官方PE':r['官方PE'],'可比同業數':profile.get('同市場同產業其他同業數') if med is not None else None,'TTM EPS重建':r['TTM EPS重建']},provenance=['H192 同業估值'] if med is not None else [])
     put('10','待補證','未提供DCF數字或目標價',['缺資本支出、現金流、股數及明示折現假設'])

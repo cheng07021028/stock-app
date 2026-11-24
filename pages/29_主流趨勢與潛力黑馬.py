@@ -48,6 +48,18 @@ for tab,p in zip(st.tabs(list(POOLS)),POOLS):
         if f.empty:st.info('沒有符合該研究池條件的可核驗資料。')
         else:
             order=['研究排名','股票代號','股票名稱','產業','研究分','收盤','日漲跌%','5日漲跌%','20日漲跌%','量比','當日成交額','研究理由','交易狀態','資料日期'];st.dataframe(f[order+[x for x in f if x not in order]],hide_index=True,use_container_width=True)
+st.subheader('H198｜主升段初期與假突破反證')
+st.caption('僅研究：使用原始60日量價，固定突破當時箱頂；缺少法人／TDCC 不視為主力承接。原有研究池及 H126 不變。')
+from godpick_h198_stage_review import POOLS as H198_POOLS
+stage=result.get('h198',{})
+st.caption(f"H198 量價已核驗 {stage.get('valid',0)} / {stage.get('universe',0)} 檔；60日資料待補證 {stage.get('counts',{}).get('待補證',0)} 檔。突破基準只追蹤最近5個交易日，不是永久交易紀錄。")
+for col,p in zip(st.columns(4),H198_POOLS):col.metric(p,stage.get('pool_counts',{}).get(p,0))
+if not any(stage.get('pool_counts',{}).values()):st.info('尚無符合 H198 條件的有效資料；請檢查 H190 封存覆蓋率。')
+for tab,p in zip(st.tabs(list(H198_POOLS)),H198_POOLS):
+    with tab:
+        sf=pd.DataFrame(stage.get('pools',{}).get(p,[]))
+        if sf.empty:st.info('本池無具名候選。')
+        else:st.dataframe(sf,hide_index=True,use_container_width=True)
 with st.expander('逐股稽核（含缺口）'):st.dataframe(pd.DataFrame(result['diagnostic']),hide_index=True,use_container_width=True)
 def safe(frame):
     f=pd.DataFrame(frame);return f.apply(lambda s:s.map(lambda x:"'"+x if isinstance(x,str) and x.lstrip().startswith(('=','+','-','@')) else x))
@@ -57,4 +69,5 @@ with pd.ExcelWriter(buf,engine='openpyxl') as writer:
     safe(result['sectors']).to_excel(writer,sheet_name='01_產業',index=False)
     for i,p in enumerate(POOLS,2):safe(result['pools'][p]).to_excel(writer,sheet_name=f'{i:02d}_{p}',index=False)
     safe(result['diagnostic']).to_excel(writer,sheet_name='07_逐股稽核',index=False)
+    for i,p in enumerate(H198_POOLS,8):safe(stage.get('pools',{}).get(p,[])).to_excel(writer,sheet_name=f'{i:02d}_{p}',index=False)
 st.download_button('下載 H191 獨立研究報表',buf.getvalue(),f'H191_Research_{result["asof"]}.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')

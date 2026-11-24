@@ -16,6 +16,10 @@ REL=Path('data/h195/latest.json.gz')
 TIERS=joint.TIERS
 FIELDS=['研究分級','研究順序','市場','股票代號','股票名稱','產業','技術研究池','財報研究池','技術日','營收年月','三率季度','營收年增%','營收月增%','官方PE','TTM EPS重建','技術缺口','財報缺口','官方原始收盤價','收盤日','隔日預測日','上漲機率%','盤整機率%','下跌機率%','預測狀態','交易狀態']
 
+# Append only; retain every original column and its position.
+from godpick_h198_stage_review import FIELDS as STAGE_FIELDS
+FIELDS.extend(STAGE_FIELDS)
+
 def stamp(v): return perf.stamp(v)
 def expected_day(now):
     d=now.date() if now.time()>=time(18,15) else now.date()-timedelta(days=1)
@@ -66,6 +70,8 @@ def build(result,financial,root=ROOT,now=None,detail_limit=3):
                     if s['forecast'] is not None:
                         for i,c in enumerate(perf.CLASSES):r[c+'機率%']=round(s['forecast'][i]*100,4)
                 elif s:r['預測狀態']='當日封存研究與目前證據不一致，不沿用機率'
+            if not tech_current:
+                for field in STAGE_FIELDS:r[field]=None
             rows.append(r);counts[tier]+=1
             for pool in set((str(x['技術研究池'])+'、'+str(x['財報研究池'])).split('、')):
                 if pool:radar[pool]+=1
@@ -157,6 +163,9 @@ def render_inline(root=ROOT):
     st.caption('快照 '+msg+'｜目標交易日 '+b['expected_session']+'｜技術日 '+(b['market_day'] or '待補證'))
     for c,t in zip(st.columns(4),TIERS):c.metric(t,b['counts'][t])
     rows=[r for t in TIERS for r in [x for x in b['rows'] if x['研究分級']==t][:3]]
-    if rows:st.dataframe(pd.DataFrame(rows)[['研究分級','研究順序','股票代號','股票名稱','技術研究池','財報研究池','上漲機率%','預測狀態']],hide_index=True,use_container_width=True)
+    if rows:
+        frame=pd.DataFrame(rows); cols=['研究分級','研究順序','股票代號','股票名稱','技術研究池','財報研究池','上漲機率%','預測狀態']
+        cols.extend(k for k in ('H198階段','H198反證') if k in frame.columns)
+        st.dataframe(frame[cols],hide_index=True,use_container_width=True)
     else:st.warning('無具名研究；請檢查 H190／H192 來源健康與覆蓋率，非市場無機會。')
     if b['errors'] or not b['technical_current'] or b['health'].get('technical_status')!='CROSS_MARKET_RESEARCH_READY':st.caption('部分來源／技術資料待核實，詳細診斷見第33頁。')
