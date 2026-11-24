@@ -18,6 +18,8 @@ a,b,c=st.columns(3)
 a.page_link('pages/7_股神推薦.py',label='股神推薦',icon='📊')
 b.page_link('pages/29_主流趨勢與潛力黑馬.py',label='H191 技術研究',icon='📈')
 c.page_link('pages/30_財報成長與合理估值.py',label='H192 財報研究',icon='📋')
+if (Path(__file__).parent/'32_隔日預測與AI績效學習.py').is_file():
+    st.page_link('pages/32_隔日預測與AI績效學習.py',label='H194 隔日預測與AI績效學習',icon='🎯')
 root=Path(__file__).resolve().parents[1]
 @st.cache_data(ttl=120,show_spinner=False)
 def cached(path):return run(Path(path))
