@@ -162,7 +162,7 @@ def quality(root=ROOT,now=None):
     from godpick_h209_rolling_backtest import read_signals
     from godpick_h211_counterevidence import read_history
     from godpick_h195_command_center import VERSION as JV,REL as JR
-    root=Path(root);now=perf.stamp(now or datetime.now(ar.TZ));h=run(root,now);m=perf.Market(root,now);b=build(root,now);day=b['day'];today=now.date().isoformat();target=today if now.time()>=time(18,15) and now.weekday()<5 else day;checks={'archive_ok':not m.errors,'calendar':m.today_confirmed(target) if target==today else target in m.days,'both_quotes':bool(target) and all(m.quotes(x,target) for x in URLS)};errors=[]
+    root=Path(root);now=perf.stamp(now or datetime.now(ar.TZ));h=run(root,now);m=perf.Market(root,now);b=build(root,now);day=b['day'];today=now.date().isoformat();obs=m.cal_observed.get(today[:7]);closed=bool(obs and obs.date().isoformat()==today and obs.time()>=time(18,15) and today not in m.days);target=today if now.time()>=time(18,15) and now.weekday()<5 and not closed else day;checks={'archive_ok':not m.errors,'calendar':m.today_confirmed(target) if target==today else target in m.days,'both_quotes':bool(target) and all(m.quotes(x,target) for x in URLS)};errors=[]
     try:
         ss,_=perf.read_ledger(root);checks['H194']=any(k[0]==target and perf.stamp(v['created_at'])<=now for k,v in ss.items())
         s2=read_signals(root,now);checks['H209']=any(s['source']=='H209' and s['signal_day']==target for s in s2)

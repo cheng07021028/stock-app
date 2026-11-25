@@ -252,3 +252,28 @@ if st.checkbox('載入 H214 有效母體與還原技術研究（唯讀）'):
             from godpick_h214_universe import excel as excel_h214
             st.download_button('下載 H214 品質校正',excel_h214(h214),'H214_Universe.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     except Exception as e:st.error('H214 資料驗證失敗：'+str(e)[:180])
+
+st.divider()
+st.subheader('H215｜資料實證、交易狀態及每日強制驗收')
+st.caption('只讀驗收；公告命中不等於完整停牌，缺日不補零，日終閘門與成熟績效分開，不更改H126正式買進授權。')
+@st.cache_data(ttl=300,show_spinner=False)
+def load_h215(path):
+    from godpick_h215_proof import run
+    return run(Path(path))
+if st.checkbox('載入 H215 每日實證驗收（唯讀）'):
+    try:
+        if st.button('重新讀取 H215'):load_h215.clear()
+        with st.spinner('核實官方狀態、每日封存及成熟績效…'):h215=load_h215(str(root))
+        st.caption(h215['version']+'｜'+h215['asof']+'｜資料日 '+str(h215['session']))
+        g215=h215['gate'];st.metric('每日資料閘門（非勝率）',str(g215['daily_passed'])+'/'+str(g215['daily_total']))
+        if g215['daily_status']=='FAIL_DAILY':st.error('日終驗收未通過；不得宣稱資料管線就緒。')
+        st.write(g215['daily_status'],g215['mature_status'],g215['shadow_status'])
+        st.dataframe(pd.DataFrame(g215['daily_checks']),hide_index=True,use_container_width=True)
+        st.dataframe(pd.DataFrame(h215['coverage']),hide_index=True,use_container_width=True,column_config={k:st.column_config.NumberColumn(k,format='percent') for k in ('原始覆蓋率','有效母體原價覆蓋率','還原覆蓋率')})
+        st.write('官方狀態來源',h215['status_sources'],'缺日分類',h215['status_summary'])
+        with st.expander('逐股缺日與官方交易狀態核對'):st.dataframe(pd.DataFrame(h215['status_detail']),hide_index=True,use_container_width=True)
+        with st.expander('管線健康與來源回應診斷'):st.json(h215['health']);st.write(h215['errors'])
+        if st.checkbox('產生 H215 實證 Excel'):
+            from godpick_h215_proof import excel as excel_h215
+            st.download_button('下載 H215 實證驗收',excel_h215(h215),'H215_Proof.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    except Exception as e:st.error('H215 資料驗收失敗：'+str(e)[:180])

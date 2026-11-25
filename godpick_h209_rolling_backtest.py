@@ -29,7 +29,24 @@ def _dates(raw,table):
         for a,b in [('startDate','endDate'),('start_date','end_date')]:
             if a in obj and b in obj:
                 found.update([ar._day(obj[a]),ar._day(obj[b])])
+        # Some official titles use compact ROC dates; inspect metadata only,
+        # never infer a query range from the event rows or request arguments.
+        for k in ('title','subtitle','name','queryDateRange','dateRange'):
+            value=str(obj.get(k,''))
+            for a,b in re.findall(r'(?<!\d)(\d{7,8})\s*(?:至|到|~|～|—|–)\s*(\d{7,8})(?!\d)',value):
+                found.update((ar._day(a),ar._day(b)))
     return found
+
+
+def response_diagnostic(raw):
+    # Capture bounded public metadata from rejected replies for schema debugging;
+    # never retain cookies, headers, tokens, or the response's entire row data.
+    if not isinstance(raw,dict):return {'type':type(raw).__name__}
+    def summarize(t):
+        return {'keys':sorted(str(k) for k in t)[:50],
+                'metadata':{k:str(t[k])[:300] for k in ('stat','title','subtitle','name','date','dataDate','startDate','endDate','start_date','end_date','dateRange','queryDateRange','total','totalCount','recordsTotal','recordsFiltered') if k in t},
+                'fields':[str(x)[:80] for x in (t.get('fields') or t.get('headers') or [])[:40]],'row_count':len(t['data']) if isinstance(t.get('data'),list) else None}
+    return {'root':summarize(raw),'tables':[summarize(t) for t in (raw.get('tables') or [])[:8] if isinstance(t,dict)]}
 
 
 def parse_actions(raw,market,day,now,*,start=None,end=None,source_url=None):
@@ -92,7 +109,7 @@ def read_actions(root,m,d,now):
 
 def collect_actions(root,market,now,required,*,budget=24,http=None):
     import requests
-    http=http or requests.Session();errors={};saved=0;attempted=0
+    http=http or requests.Session();errors={};diagnostics={};saved=0;attempted=0
     # Most recent 20 trading days also bootstrap when no research has matured.
     keys=set(required)|{(m,d) for m in URLS for d in market.days[-20:]}
     keys={(m,d) for m,d in keys if d<now.date().isoformat() or (d==now.date().isoformat() and now.time()>=time(18,15))}
@@ -120,7 +137,11 @@ def collect_actions(root,market,now,required,*,budget=24,http=None):
             fmt=lambda x:x.replace('-','') if m=='TWSE' else x.replace('-','/')
             def fetch(lo,hi):
                 res=http.get(URLS[m],params={'startDate':fmt(lo),'endDate':fmt(hi),'response':'json'},timeout=12);res.raise_for_status()
-                raw=res.json();parse_actions(raw,m,d,now,start=lo,end=hi);return raw
+                raw=res.json()
+                try:parse_actions(raw,m,d,now,start=lo,end=hi)
+                except Exception as ex:
+                    diagnostics[key]={'start':lo,'end':hi,'error':str(ex)[:180],**response_diagnostic(raw)};raise
+                return raw
             try:raw=fetch(start,end)
             except Exception:
                 if start==end or attempted>=limit:raise
@@ -131,7 +152,7 @@ def collect_actions(root,market,now,required,*,budget=24,http=None):
                 if p.exists():raise ValueError('action archive appeared concurrently; no overwrite')
                 ar._write(p,ar._seal(v));read_actions(root,m,dd,now);saved+=1;remaining.remove((m,dd));attempts[m+':'+dd]=now.isoformat()
         except Exception as e:errors[key]=str(e)[:180]
-    health={'version':VERSION,'asof':now.isoformat(),'attempted':attempted,'saved':saved,'errors':errors,'attempts':attempts,'pending':len(missing)-saved}
+    health={'version':VERSION,'asof':now.isoformat(),'attempted':attempted,'saved':saved,'errors':errors,'diagnostics':diagnostics,'attempts':attempts,'pending':len(missing)-saved}
     ar._write(hp,ar._seal(health));return health
 
 
