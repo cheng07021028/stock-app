@@ -130,3 +130,36 @@ if st.checkbox('載入 H209 滾動回測（只讀封存，不連網）'):
             from godpick_h209_rolling_backtest import excel as excel_h209
             st.download_button('下載 H209 滾動回測',excel_h209(backtest),'H209_Backtest.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     except Exception as e:st.error('H209 研究證據驗證失敗：'+str(e)[:180])
+
+st.divider()
+st.subheader('H210｜多策略競爭與市場環境適應')
+st.caption('同市場／同持有期間／同研究日，採 H209.1 權息及成本後模擬淨報酬。只提出研究複核；不自動淘汰策略、不修改正式買進權重。')
+@st.cache_data(ttl=300,show_spinner=False)
+def load_h210(path):
+    from godpick_h210_strategy_competition import run
+    return run(Path(path))
+if st.checkbox('載入 H210 策略競爭與失效監控（唯讀）'):
+    try:
+        if st.button('重新讀取 H210'):load_h210.clear()
+        with st.spinner('核對同日績效與市場環境…'):competition=load_h210(str(root))
+        st.caption(competition['asof']+'｜'+competition['basis'])
+        st.write({'研究封存筆數':competition['upstream']['signal_count'],'有效策略交易樣本':competition['upstream']['valid_rows'],'研究複核候選':competition['review_count']})
+        if competition['status']=='BASELINE_ONLY':st.info('尚無符合全部驗證門檻的研究複核候選，維持原權重 1.0 倍。無樣本不代表策略失效。')
+        if competition['archive_errors']:st.warning('行情封存異常，禁止策略競爭判定。')
+        st.dataframe(pd.DataFrame(competition['current_regime']),hide_index=True,use_container_width=True)
+        market_filter=st.selectbox('H210 市場',['全部','TWSE','TPEX'])
+        horizon_filter=st.selectbox('H210 持有期間',[5,1,3,10,20],format_func=lambda n:f'T+{n}')
+        def h210_filtered(rows):return [x for x in rows if (market_filter=='全部' or x['市場']==market_filter) and x['期間']==horizon_filter]
+        st.caption('主要 T+5：20訓練窗＋10留出窗，至少兩輪連續完整留出（相同母體），其他期間僅供觀察。每個策略窗至少3檔且100%有效。')
+        st.dataframe(pd.DataFrame(h210_filtered(competition['recommendations'])),hide_index=True,use_container_width=True,column_config={k:st.column_config.NumberColumn(k,format='percent') for k in ('最近留出均值','最近留出相對差','最近留出勝窗率','前輪留出相對差','近期未滿輪相對差')})
+        with st.expander('市場環境與滾動留出驗證'):
+            st.dataframe(pd.DataFrame(h210_filtered(competition['models'])),hide_index=True,use_container_width=True)
+            st.dataframe(pd.DataFrame(h210_filtered(competition['folds'])),hide_index=True,use_container_width=True)
+            st.dataframe(pd.DataFrame(h210_filtered(competition['scores'])),hide_index=True,use_container_width=True)
+        with st.expander('候選樣本、權息與資料覆蓋稽核'):
+            st.json(competition['upstream']);st.json(competition['thresholds'])
+            st.dataframe(pd.DataFrame(h210_filtered(competition['audit'])),hide_index=True,use_container_width=True)
+        if st.checkbox('產生 H210 策略競爭 Excel'):
+            from godpick_h210_strategy_competition import excel as excel_h210
+            st.download_button('下載 H210 策略競爭',excel_h210(competition),'H210_StrategyCompetition.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    except Exception as e:st.error('H210 研究驗證失敗：'+str(e)[:180])
