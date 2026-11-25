@@ -1,6 +1,10 @@
 name: H209 prospective rolling backtest
 on:
   workflow_dispatch:
+  workflow_run:
+    workflows: ["H190 official full-market historical archive"]
+    types: [completed]
+    branches: [main]
   push:
     branches: [main]
     paths:
@@ -8,6 +12,7 @@ on:
       - tools/h209_daily_backtest.py
       - .github/workflows/h209_rolling_backtest.yml
   schedule:
+    - cron: '35 12 * * *'
     # Taiwan 23:20 and 07:20. Never backdate recall signals after midnight.
     - cron: '20 15 * * *'
     - cron: '20 23 * * *'
@@ -17,8 +22,24 @@ concurrency:
   group: h209-public-backtest-main
   cancel-in-progress: false
 jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      proceed: ${{ steps.window.outputs.proceed }}
+    steps:
+      - id: window
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          t=$(TZ=Asia/Taipei date +%H%M)
+          if [[ "$EVENT" != workflow_run || "$t" > 1814 ]]; then
+            echo 'proceed=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'proceed=false' >> "$GITHUB_OUTPUT"
+          fi
   backtest:
-    if: github.ref == 'refs/heads/main'
+    needs: gate
+    if: needs.gate.outputs.proceed == 'true' && github.ref == 'refs/heads/main' && (github.event_name != 'workflow_run' || (github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository))
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -54,7 +75,7 @@ jobs:
           import json,os
           h=json.load(open('h209_output/health.json',encoding='utf-8'))
           with open(os.environ['GITHUB_STEP_SUMMARY'],'a',encoding='utf-8') as f:
-              for k in ('status','capture','signal_count','valid_rows','reasons','archive_errors','collector'):
+              for k in ('revision','status','capture','signal_count','valid_rows','pending','source_counts','reasons','archive_errors','collector'):
                   f.write(str(k)+': '+str(h[k])+'\n\n')
           if h['status']=='DATA_PENDING' or h['archive_errors'] or h['collector'].get('errors'):
               print('::warning::H209 evidence incomplete; not a validated investment return')

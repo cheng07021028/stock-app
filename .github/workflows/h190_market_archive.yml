@@ -10,6 +10,9 @@ on:
   schedule:
     # Asia/Taipei 03:35, 09:35, 15:35, 21:35. Today's data only after 18:15.
     - cron: '35 1,7,13,19 * * *'
+    # 18:25 / 19:45 Taipei: allow same-evening downstream capture.
+    - cron: '25 10 * * *'
+    - cron: '45 11 * * *'
 permissions:
   contents: write
 concurrency:
