@@ -39,7 +39,7 @@ def master_map(items):
         out[c]={'股票代號':c,'股票名稱':str(r.get('name') or c),'市場':m,'產業':str(r.get('official_industry') or '').strip()}
     return {c:r for c,r in out.items() if c not in duplicates}
 
-def calc_features(seq,expected):
+def calc_features(seq,expected,*,adjusted_prices=None):
     """Exact 60 sessions; avoid sorting away duplicates, reject suspicious raw gaps."""
     if len(expected)!=60: return None,'不足60個交易日'
     s=sorted((r for r in seq if expected[0]<=r[0]<=expected[-1]),key=lambda r:r[0])
@@ -49,6 +49,13 @@ def calc_features(seq,expected):
     if a.shape!=(60,6) or not np.isfinite(a).all() or (a<=0).any(): return None,'量價缺值或非正值'
     o,h,l,c,v,amt=a.T
     if ((h<np.maximum.reduce([o,l,c]))|(l>np.minimum.reduce([o,h,c]))|(amt/v<l*.5)|(amt/v>h*2)|(v%1!=0)|(amt%1!=0)).any(): return None,'OHLCV或金額單位異常'
+    if adjusted_prices is not None:
+        try: adjusted=np.asarray(adjusted_prices,dtype=float)
+        except (ValueError,TypeError): return None,'還原量價格式錯誤'
+        if adjusted.shape!=(60,4) or not np.isfinite(adjusted).all() or (adjusted<=0).any():return None,'還原價格缺值或非正值'
+        ratios=adjusted/a[:,:4]
+        if not np.allclose(ratios,ratios[:,0,None],rtol=1e-10,atol=1e-12) or not np.allclose(adjusted[-1],a[-1,:4]):return None,'還原比例或當日原價衝突'
+        o,h,l,c=adjusted.T
     # Ex-date changes can be smaller than 12%; this detects only large gaps, not corporate actions.
     if (np.abs(o[1:]/c[:-1]-1)>.12).any() or (np.abs(c[1:]/c[:-1]-1)>.15).any(): return None,'原始價格異常跳空待查'
     r=lambda n: float((c[-1]/c[-1-n]-1)*100)

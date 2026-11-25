@@ -17866,6 +17866,17 @@ def _build_excel_bytes_fast_h85(
         _h195_ws=wb.create_sheet('H195_聯合決策研究')
         _h195_ws.append(['H195 資料無法讀取，原有報表不受影響', type(_h195_exc).__name__])
 
+    # H214 same-export independent H195 versus original H126; no authority writes.
+    try:
+        from godpick_h214_universe import append_formal_audit as _h214_append
+        _h214_append(wb, Path(__file__).resolve().parents[1], research_day=locals().get('_h148_research_day'),
+            parity=locals().get('_h154_audit'), bridge=locals().get('_h145_bridge'),
+            authority=tables.get('h126_authority'), trace=locals().get('h148_trace'))
+    except Exception as _h214_exc:
+        if 'H214_正式研究差異' in wb.sheetnames:
+            del wb['H214_正式研究差異']
+        wb.create_sheet('H214_正式研究差異').append(['H214 對帳暫不可用；原報表不受影響',type(_h214_exc).__name__])
+
     # H206 same-export reconciliation, independent public market snapshot.
     try:
         from godpick_h206_market_gap import load as _h206_load, compare_export as _h206_compare, append_sheet as _h206_append

@@ -1,0 +1,9 @@
+........................................................................ [ 17%]
+........................................................................ [ 35%]
+........................................................................ [ 52%]
+........................................................................ [ 70%]
+........................................................................ [ 88%]
+.................................................                        [100%]
+409 passed in 21.81s
+
+Live roster requests: {"TWSE": {"status": "PENDING", "reason": "HTTPSConnectionPool(host='isin.twse.com.tw', port=443): Max retries exceeded with url: /isin/C_public.jsp?strMode=2 (Caused by NameResolutionError(\"HTTPSConnection(host='isin.twse."}, "TPEX": {"status": "PENDING", "reason": "HTTPSConnectionPool(host='isin.twse.com.tw', port=443): Max retries exceeded with url: /isin/C_public.jsp?strMode=4 (Caused by NameResolutionError(\"HTTPSConnection(host='isin.twse."}}

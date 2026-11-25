@@ -297,7 +297,10 @@ def run(root=ROOT,now=None,*,update=False,budget=24,http=None):
             if not m.errors:
                 audit_keys={(r['市場'],r['交易日']) for r in jump_audit(root,now,gaps(root,now)) if r['權息狀態']=='權息證據待抓'}
         except Exception as ex:audit_error=type(ex).__name__+': '+str(ex)[:120]
-        health=collect_actions(root,m,now,required|audit_keys,budget=budget,http=http)
+        # H214 shadow technical window: same bounded collector, no parallel writer.
+        shadow_keys={(market,d) for market in URLS for d in m.days[-60:][1:]}
+        health=collect_actions(root,m,now,required|audit_keys|shadow_keys,budget=budget,http=http)
+        health['h214_window_keys']=len(shadow_keys)
         health['h213_jump_dates']=len(audit_keys);health['h213_jump_audit_error']=audit_error
     rows,summary,cohorts,folds,_=evaluate(ss,m,Evidence(root,m,now),now)
     valid=sum(r['status']=='VALID_CASH_MODEL' for r in rows)

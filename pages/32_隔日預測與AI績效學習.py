@@ -228,3 +228,27 @@ if st.checkbox('載入 H213 每日品質驗收（唯讀）'):
             from godpick_h213_quality_gate import excel as excel_h213
             st.download_button('下載 H213 品質驗收',excel_h213(h213),'H213_Quality.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     except Exception as e:st.error('H213 資料驗證失敗：'+str(e)[:180])
+
+st.divider()
+st.subheader('H214｜雙母體、權息還原與實戰品質校正')
+st.caption('唯讀影子研究：保留原始覆蓋率、原始價格及正式買進權威；只分流官方證實的短歷史，不將缺日當作停牌。')
+@st.cache_data(ttl=300,show_spinner=False)
+def load_h214(path):
+    from godpick_h214_universe import run
+    return run(Path(path))
+if st.checkbox('載入 H214 有效母體與還原技術研究（唯讀）'):
+    try:
+        if st.button('重新讀取 H214'):load_h214.clear()
+        with st.spinner('核對官方名冊、權息與技術證據…'):h214=load_h214(str(root))
+        st.caption(h214['version']+'｜'+h214['asof']+'｜資料日 '+h214['session'])
+        st.write(h214['status'],h214['basis'])
+        st.dataframe(pd.DataFrame(h214['coverage']),hide_index=True,use_container_width=True,column_config={k:st.column_config.NumberColumn(k,format='percent') for k in ('原始覆蓋率','有效母體原價覆蓋率','還原覆蓋率')})
+        st.write('正式推薦對帳',h214['formal_comparison']);st.write('資料異常',h214['errors'])
+        with st.expander('短歷史獨立研究（非正式推薦）'):st.dataframe(pd.DataFrame(h214['short']),hide_index=True,use_container_width=True)
+        with st.expander('原始與還原技術差異'):st.dataframe(pd.DataFrame(h214['changes']),hide_index=True,use_container_width=True)
+        with st.expander('全母體逐股稽核'):st.dataframe(pd.DataFrame(h214['detail']),hide_index=True,use_container_width=True)
+        with st.expander('官方名冊與主檔差異'):st.dataframe(pd.DataFrame(h214['roster_reconcile']),hide_index=True,use_container_width=True)
+        if st.checkbox('產生 H214 品質 Excel'):
+            from godpick_h214_universe import excel as excel_h214
+            st.download_button('下載 H214 品質校正',excel_h214(h214),'H214_Universe.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    except Exception as e:st.error('H214 資料驗證失敗：'+str(e)[:180])
