@@ -10,6 +10,8 @@ on:
     paths:
       - godpick_h209_rolling_backtest.py
       - tools/h209_daily_backtest.py
+      - godpick_h210_strategy_competition.py
+      - tools/h210_daily_competition.py
       - .github/workflows/h209_rolling_backtest.yml
   schedule:
     - cron: '35 12 * * *'
@@ -63,6 +65,8 @@ jobs:
             git pull --rebase origin main
             git push origin HEAD:main
           fi
+      - name: H210 read-only strategy competition after H209 persistence
+        run: python tools/h210_daily_competition.py --out h209_output
       - uses: actions/upload-artifact@v4
         if: always()
         with:
