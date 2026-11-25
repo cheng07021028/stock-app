@@ -1,0 +1,54 @@
+name: H213 daily research quality and bounded recovery
+on:
+  workflow_dispatch:
+  schedule:
+    # Taipei 21:55 / 22:40 / 23:15 / 08:20. Morning is report-only.
+    - cron: '55 13 * * *'
+    - cron: '40 14 * * *'
+    - cron: '15 15 * * *'
+    - cron: '20 0 * * *'
+permissions:
+  contents: read
+  actions: write
+concurrency:
+  group: h213-quality-main
+  cancel-in-progress: false
+jobs:
+  quality:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install 'pandas==2.3.3' 'numpy>=1.26,<3' 'requests>=2.31,<3' 'openpyxl>=3.1.2,<4'
+      - name: Verify daily public research quality
+        run: python tools/h213_quality.py report --out h213_output
+      - name: Bounded recovery of existing main workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python tools/h213_dispatch.py h213_output/quality.json --out h213_output/recovery.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: H213-quality-${{ github.run_id }}
+          path: h213_output/
+          retention-days: 90
+      - name: Summarize daily quality (not investment accuracy)
+        if: always()
+        run: |
+          python - <<'PY'
+          import json,os,pathlib
+          p=pathlib.Path('h213_output/quality.json')
+          with open(os.environ['GITHUB_STEP_SUMMARY'],'a',encoding='utf-8') as f:
+              if not p.exists(): f.write('H213 report failed; inspect logs.\n')
+              else:
+                  r=json.loads(p.read_text('utf-8'))
+                  f.write(f"{r['asof']} | {r['status']} | {r['passed']}/{r['total']} quality gates\n\n")
+                  for x in r['checks']:f.write(f"- {x['環節']}: {x['狀態']}\n")
+                  f.write('\nDispatch requests are not completed recovery.\n')
+          PY

@@ -8,6 +8,8 @@ on:
       - 'tools/h190_market_archive.py'
       - 'godpick_h212_data_recovery.py'
       - 'tools/h212_data_recovery.py'
+      - 'godpick_h213_quality_gate.py'
+      - 'tools/h213_quality.py'
       - '.github/workflows/h190_market_archive.yml'
   schedule:
     # Asia/Taipei 03:35, 09:35, 15:35, 21:35. Today's data only after 18:15.
@@ -43,6 +45,10 @@ jobs:
         id: repair
         continue-on-error: true
         run: python tools/h212_data_recovery.py repair --budget 8
+      - name: H213 bounded alternate official monthly evidence
+        id: monthly
+        continue-on-error: true
+        run: python tools/h213_quality.py collect --budget 6
       - name: Persist only H190 public archive and health
         if: always()
         shell: bash
@@ -52,6 +58,7 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           if [[ -d data/h190 ]]; then git add -f -- data/h190/; fi
           if [[ -f data/h212/repair.json ]]; then git add -f -- data/h212/repair.json; fi
+          if [[ -d data/h213 ]]; then git add -f -- data/h213/; fi
           if ! git diff --cached --quiet; then
             git commit -m 'data(H190): official date-batch history and coverage'
             git pull --rebase origin main
