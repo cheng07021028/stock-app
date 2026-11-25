@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""H204 sidebar navigation with explicit module numbers.
+"""H207 grouped sidebar navigation, retaining H204 module numbers.
 
 Purpose
 -------
@@ -12,27 +12,24 @@ Design principles
 -----------------
 - Preserve current page scripts; do not rewrite page logic.
 - Prefer readable UTF-8 page filenames when duplicates exist.
-- Fall back to the original ``streamlit_app.py`` behavior if navigation setup
-  cannot be completed.
+- Retain the original entrypoint fallback only if the navigation API is unavailable.
+- Do not swallow errors from the selected page.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
 import re
+import logging
 from typing import Callable, Dict, List, Optional
 
 try:
     import streamlit as st
-except Exception:  # pragma: no cover - test environment fallback
-    class _DummyStreamlit:
-        def Page(self, *args, **kwargs):
-            return (args, kwargs)
+except ImportError:  # permits pure catalog tests without Streamlit installed
+    st = None
 
-        def navigation(self, *args, **kwargs):
-            raise RuntimeError('streamlit not available')
-
-    st = _DummyStreamlit()
+LOG = logging.getLogger(__name__)
+NAVIGATION_VERSION = "V191-H207"
 
 PAGE_TITLE_MAP: Dict[int, str] = {
     0: "00｜大盤走勢",
@@ -72,6 +69,71 @@ PAGE_TITLE_MAP: Dict[int, str] = {
 }
 
 HOME_TITLE = "首頁"
+
+# Group order is deliberate: everyday use first, system maintenance last.
+# Existing page numbers, titles, script paths and URL inference are retained.
+GROUPS = (
+    ("首頁／行情研究", (0, 1, 2, 3, 4, 5, 6)),
+    ("推薦／決策戰情", (7, 8, 10, 12, 25, 33)),
+    ("AI研究／績效學習", (14, 18, 19, 21, 22, 23, 24, 26, 28, 29, 30, 31, 32)),
+    ("資料／系統維運", (9, 11, 15, 16, 17, 20, 27, 98)),
+)
+GROUP_BY_NUMBER = {number: label for label, numbers in GROUPS for number in numbers}
+# Future numbered modules remain accessible even before a group is defined.
+FUTURE_GROUP = "其他／新增模組"
+
+
+# Shared layout, independent of menu item order or number of pages.  Keep
+# existing theme colors and native active/hover states, including dark themes.
+SIDEBAR_STYLE = """<style>
+section[data-testid="stSidebar"] [data-testid="stSidebarNav"] a,
+section[data-testid="stSidebar"] [data-testid="stSidebarNavLink"] {
+    padding-left: .65rem !important;
+    padding-right: .65rem !important;
+    min-height: 36px !important;
+    height: auto !important;
+    white-space: normal !important;
+    align-items: center !important;
+    overflow: visible !important;
+    min-width: 0 !important;
+}
+section[data-testid="stSidebar"] [data-testid="stSidebarNav"] a span,
+section[data-testid="stSidebar"] [data-testid="stSidebarNav"] a p,
+section[data-testid="stSidebar"] [data-testid="stSidebarNavLink"] span,
+section[data-testid="stSidebar"] [data-testid="stSidebarNavLink"] p,
+section[data-testid="stSidebar"] [data-testid="stSidebarNavLinkText"] {
+    white-space: normal !important;
+    overflow: visible !important;
+    text-overflow: clip !important;
+    overflow-wrap: anywhere !important;
+    min-width: 0 !important;
+    max-width: 100% !important;
+    line-height: 1.4 !important;
+}
+/* Defensive reset of legacy generated text; never introduce an extra number. */
+section[data-testid="stSidebar"] [data-testid="stSidebarNav"] a::before,
+section[data-testid="stSidebar"] [data-testid="stSidebarNav"] a span::before,
+section[data-testid="stSidebar"] [data-testid="stSidebarNav"] a p::before,
+section[data-testid="stSidebar"] [data-testid="stSidebarNavLink"]::before,
+section[data-testid="stSidebar"] [data-testid="stSidebarNavLink"] span::before,
+section[data-testid="stSidebar"] [data-testid="stSidebarNavLink"] p::before {
+    content: none !important;
+    display: none !important;
+}
+</style>"""
+
+
+def inject_sidebar_layout() -> None:
+    # CSS-only st.html does not create a visible main-area element.  No page
+    # content, login, session state, or URL rewriting is performed here.
+    html = getattr(st, "html", None)
+    if callable(html):
+        html(SIDEBAR_STYLE)
+    else:
+        markdown = getattr(st, "markdown", None)
+        if callable(markdown):
+            markdown(SIDEBAR_STYLE, unsafe_allow_html=True)
+
 
 
 @dataclass(frozen=True)
@@ -136,19 +198,53 @@ def discover_page_entries() -> List[PageEntry]:
     return entries
 
 
+def _home_page(home_callable: Callable[[], None]):
+    # Keep the root URL and existing home callable, as in H204.
+    return st.Page(home_callable, title=HOME_TITLE, icon="🏠", default=True)
+
+
+def _script_page(entry: PageEntry):
+    # The same source path as H204: do not override Streamlit's inferred URL.
+    return st.Page(str(entry.path), title=entry.title)
+
+
+def group_page_entries(entries: List[PageEntry]) -> Dict[str, List[PageEntry]]:
+    """Pure grouping. Preserve every discovered numbered module exactly once."""
+    grouped = {label: [] for label, _ in GROUPS}
+    for entry in sorted(entries, key=lambda item: (item.page_no, item.path.name)):
+        label = GROUP_BY_NUMBER.get(entry.page_no, FUTURE_GROUP)
+        grouped.setdefault(label, []).append(entry)
+    return grouped
+
+
 def build_streamlit_pages(home_callable: Callable[[], None]):
-    pages = [st.Page(home_callable, title=HOME_TITLE, icon="🏠")]
-    for entry in discover_page_entries():
-        pages.append(st.Page(str(entry.path), title=entry.title))
+    """H204-compatible flat catalog, retained for callers and diagnostics."""
+    return [_home_page(home_callable)] + [_script_page(entry) for entry in discover_page_entries()]
+
+
+def build_grouped_pages(home_callable: Callable[[], None]):
+    """Build Streamlit's native grouped menu without renaming scripts."""
+    grouped = group_page_entries(discover_page_entries())
+    first_group = GROUPS[0][0]
+    pages = {first_group: [_home_page(home_callable)]}
+    for label, entries in grouped.items():
+        if entries:
+            pages.setdefault(label, []).extend(_script_page(entry) for entry in entries)
     return pages
 
 
 def run_numbered_navigation(home_callable: Callable[[], None]) -> bool:
-    """Run explicit sidebar navigation. Returns True when handled."""
-    try:
-        pages = build_streamlit_pages(home_callable)
-        navigator = st.navigation(pages, position="sidebar")
-        navigator.run()
-        return True
-    except Exception:
+    """Register the navigation once, and execute only the selected page.
+
+    Legacy fallback is safe only before navigation is registered, and only if
+    the API does not exist. Runtime failures must remain visible; executing
+    the home page after a partially executed module can duplicate side effects.
+    """
+    if not callable(getattr(st, "Page", None)) or not callable(getattr(st, "navigation", None)):
+        LOG.warning("%s: Streamlit navigation API unavailable; using legacy entrypoint", NAVIGATION_VERSION)
         return False
+    pages = build_grouped_pages(home_callable)
+    navigator = st.navigation(pages, position="sidebar", expanded=True)
+    inject_sidebar_layout()
+    navigator.run()
+    return True

@@ -99,31 +99,9 @@ def _ensure_sidebar_numbers_for_this_page() -> None:
             return
         except Exception:
             pass
-    st.markdown(
-        """
-        <style>
-        [data-testid="stSidebarNav"] ul li span::before {
-            display:inline-block; min-width:2.8em; font-weight:800; color:#334155;
-        }
-        [data-testid="stSidebarNav"] ul li:nth-of-type(1) span::before { content:"00. "; }
-        [data-testid="stSidebarNav"] ul li:nth-of-type(2) span::before { content:"01. "; }
-        [data-testid="stSidebarNav"] ul li:nth-of-type(3) span::before { content:"02. "; }
-        [data-testid="stSidebarNav"] ul li:nth-of-type(4) span::before { content:"03. "; }
-        [data-testid="stSidebarNav"] ul li:nth-of-type(5) span::before { content:"04. "; }
-        [data-testid="stSidebarNav"] ul li:nth-of-type(6) span::before { content:"05. "; }
-        [data-testid="stSidebarNav"] ul li:nth-of-type(7) span::before { content:"06. "; }
-        [data-testid="stSidebarNav"] ul li:nth-of-type(8) span::before { content:"07. "; }
-        [data-testid="stSidebarNav"] ul li:nth-of-type(9) span::before { content:"08. "; }
-        [data-testid="stSidebarNav"] ul li:nth-of-type(10) span::before { content:"09. "; }
-        [data-testid="stSidebarNav"] ul li:nth-of-type(11) span::before { content:"10. "; }
-        [data-testid="stSidebarNav"] ul li:nth-of-type(12) span::before { content:"11. "; }
-        [data-testid="stSidebarNav"] ul li:nth-of-type(13) span::before { content:"12. "; }
-        [data-testid="stSidebarNav"] ul li:nth-of-type(14) span::before { content:"13. "; }
-        [data-testid="stSidebarNav"] ul li:nth-of-type(15) span::before { content:"14. "; }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
+    # H207: navigation already provides the authoritative numbered titles.
+    # Never generate numbering from menu positions, including theme fallback.
+    return
 
 
 def _json_safe_value_for_download(obj: Any) -> Any:
