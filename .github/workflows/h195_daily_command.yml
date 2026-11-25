@@ -4,11 +4,15 @@ on:
   push:
     branches: [main]
     paths:
+      - godpick_h211_counterevidence.py
+      - godpick_h191_opportunity_engine.py
+      - godpick_h193_joint_decision.py
       - godpick_h200_integrated.py
       - godpick_h195_command_center.py
       - godpick_h199_adaptive_weights.py
       - .github/workflows/h195_daily_command.yml
   schedule:
+    - cron: '15 13 * * *' # 21:15 Taipei, same-day prospective evidence
     - cron: '55 15 * * *'
     - cron: '45 0 * * *'
 permissions:
@@ -38,6 +42,7 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -f -- data/h195/latest.json.gz
+          if [ -d data/h211/daily ]; then git add -f -- data/h211/daily; fi
           if ! git diff --cached --quiet; then
             git commit -m 'data(H195): consolidated public research snapshot'
             git pull --rebase origin main
