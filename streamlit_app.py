@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """Streamlit entry wrapper with runtime GitHub branch isolation.
 
 The real home page lives in ``streamlit_app_core.py``.  Importing that module
@@ -14,5 +14,7 @@ install_runtime_branch_guard()
 
 from streamlit_app_core import *  # noqa: F401,F403
 from streamlit_app_core import main as _run_home_page
+from godpick_h204_sidebar_navigation import run_numbered_navigation as _run_numbered_navigation
 
-_run_home_page()
+if not _run_numbered_navigation(_run_home_page):
+    _run_home_page()
