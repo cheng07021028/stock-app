@@ -98,3 +98,32 @@ if st.checkbox('載入 H199 市場輪動與權重研究'):
             from godpick_h199_adaptive_weights import excel as excel_h199
             st.download_button('下載 H199 權重研究',excel_h199(adaptive),'H199_AdaptiveWeights.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     except Exception as e:st.error('H199 研究驗證失敗：'+str(e)[:180])
+
+st.divider()
+st.subheader('H209｜多策略滾動回測與除權息績效')
+st.caption('研究封存後下一交易日開盤模擬進場，按官方交易日出場；含現金股利應收及交易成本。複雜權息只列參考價代理，非真實成交、非買進授權。')
+@st.cache_data(ttl=300,show_spinner=False)
+def load_h209(path):
+    from godpick_h209_rolling_backtest import run
+    return run(Path(path))
+if st.checkbox('載入 H209 滾動回測（只讀封存，不連網）'):
+    try:
+        if st.button('重新讀取 H209'):load_h209.clear()
+        with st.spinner('驗證研究、官方行情及權息證據…'):backtest=load_h209(str(root))
+        st.caption(backtest['basis'])
+        if backtest['status']=='DATA_PENDING':st.warning('尚無有效成熟淨報酬樣本，不能認定策略有效。')
+        st.write({'研究封存筆數':backtest['signal_count'],'成熟策略樣本':backtest['mature_strategy_rows'],'有效淨報酬樣本':backtest['valid_rows'],'排除原因':backtest['reasons']})
+        st.dataframe(pd.DataFrame(backtest['summary']),hide_index=True,use_container_width=True)
+        st.caption('非重疊固定研究窗：20窗訓練期觀察、10窗樣本外；不調參。任一候選缺證不產生該窗組合淨績效。期末再平衡回撤不是盤中最大回撤。')
+        st.dataframe(pd.DataFrame(backtest['folds']),hide_index=True,use_container_width=True)
+        with st.expander('逐筆與非重疊研究窗'):
+            st.dataframe(pd.DataFrame(backtest['cohorts']),hide_index=True,use_container_width=True)
+            st.dataframe(pd.DataFrame(backtest['detail']),hide_index=True,use_container_width=True)
+        with st.expander('H209 成本假設及最近自動排程'):
+            st.json(backtest['cost'])
+            try:st.json(ar._read(root/'data/h209/collector.json'))
+            except (OSError,ValueError):st.info('尚無權息抓取診斷。')
+        if st.checkbox('產生 H209 回測 Excel'):
+            from godpick_h209_rolling_backtest import excel as excel_h209
+            st.download_button('下載 H209 滾動回測',excel_h209(backtest),'H209_Backtest.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    except Exception as e:st.error('H209 研究證據驗證失敗：'+str(e)[:180])
