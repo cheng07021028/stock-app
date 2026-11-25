@@ -21,6 +21,8 @@ from godpick_h198_stage_review import FIELDS as STAGE_FIELDS
 FIELDS.extend(STAGE_FIELDS)
 import godpick_h200_integrated as h200
 FIELDS.extend(h200.FIELDS)
+import godpick_h211_counterevidence as h211
+FIELDS.extend(h211.FIELDS)
 
 def stamp(v): return perf.stamp(v)
 def expected_day(now):
@@ -72,6 +74,8 @@ def build(result,financial,root=ROOT,now=None,detail_limit=3,*,learn=False):
                     if s['forecast'] is not None:
                         for i,c in enumerate(perf.CLASSES):r[c+'機率%']=round(s['forecast'][i]*100,4)
                 elif s:r['預測狀態']='當日封存研究與目前證據不一致，不沿用機率'
+            r['H211技術證據']=x.get('H211技術證據') if tech_current else None
+            r['H211營收證據']=x.get('H211營收證據')
             if not tech_current:
                 for field in STAGE_FIELDS:r[field]=None
             rows.append(r);counts[tier]+=1
@@ -87,6 +91,10 @@ def build(result,financial,root=ROOT,now=None,detail_limit=3,*,learn=False):
         except Exception as e:
             body['errors'].append('H199: '+type(e).__name__+': '+str(e)[:180])
     h200.enrich(body,result,adaptive,now)
+    try:
+        h211.enrich(body,root,market,ss,now)
+    except Exception as e:
+        body['errors'].append('H211: '+type(e).__name__+': '+str(e)[:180])
     # Review the actual new priority shortlist, not the old pre-weight top three.
     for tier in TIERS:
         for r in h200.ordered([x for x in rows if x['研究分級']==tier])[:max(0,detail_limit)]:
@@ -106,7 +114,13 @@ def publish(root=ROOT,now=None):
     sealed=ar._seal(body)
     # Use the same bounds as archive reader; fail before replacing old snapshot.
     if len(ar._bytes(sealed))>16_000_000:raise ValueError('H195 snapshot exceeds verified reader size')
-    ar._write(p,sealed);return body
+    ar._write(p,sealed)
+    try:h211.freeze(body,root)
+    except Exception as e:
+        # H195 publication remains usable; surface history write failure in its health report.
+        body['errors'].append('H211 freeze: '+type(e).__name__+': '+str(e)[:180])
+        ar._write(p,ar._seal(body))
+    return body
 
 @lru_cache(maxsize=2)
 def _cached(path,mtime,size):return ar._read(path)
@@ -128,7 +142,7 @@ def cache_token(root=ROOT,now=None):
     try:
         st=(Path(root)/REL).stat();sig=f'{st.st_mtime_ns}:{st.st_size}'
     except OSError:sig=''
-    return VERSION+'|'+h200.VERSION+'|'+s+'|'+str(b.get('asof',''))+'|'+sig
+    return VERSION+'|'+h200.VERSION+'|'+h211.VERSION+'|'+s+'|'+str(b.get('asof',''))+'|'+sig
 
 def safe(v):
     if isinstance(v,(list,dict)):v=json.dumps(v,ensure_ascii=False,default=str)
@@ -159,7 +173,7 @@ def append_manager(wb,root=ROOT,research_day=None,now=None,*,formal=None):
     else:ws.append(['待確認同日快照；歷史研究請至33頁'])
     for cell in ws[7]:cell.font=Font(color='FFFFFF',bold=True);cell.fill=PatternFill('solid',fgColor='185C70');cell.alignment=Alignment(wrap_text=True)
     ws.freeze_panes='D8';ws.auto_filter.ref=f'A7:{get_column_letter(len(FIELDS))}{ws.max_row}'
-    for i,k in enumerate(FIELDS,1):ws.column_dimensions[get_column_letter(i)].width=36 if '缺口' in k or '研究池' in k else 18
+    for i,k in enumerate(FIELDS,1):ws.column_dimensions[get_column_letter(i)].width=36 if '缺口' in k or '研究池' in k or k in ('H211反證','H211新證據','H211歷史覆蓋','H211複核條件') else 18
     ws.sheet_properties.tabColor='185C70'
     return ws
 
@@ -167,7 +181,7 @@ def workbook(root=ROOT,now=None):
     from openpyxl import Workbook
     b,s,msg=load(root,now);w=Workbook();w.remove(w.active)
     append_manager(w,root,b.get('expected_session'),now)
-    for name,rows in [('策略績效',b.get('performance',{}).get('metrics',[])),('研究雷達',[{'研究池':k,'檔數':v} for k,v in b.get('radar',{}).items()]),('資料健康',[{'欄位':k,'內容':v} for k,v in {**b.get('health',{}),'H200整合診斷':b.get('h200',{})}.items()]),('十二研究員',[{'市場':r['市場'],'股票代號':r['股票代號'],**o} for r in b.get('reviews',[]) for o in r['roles']])]:
+    for name,rows in [('策略績效',b.get('performance',{}).get('metrics',[])),('研究雷達',[{'研究池':k,'檔數':v} for k,v in b.get('radar',{}).items()]),('資料健康',[{'欄位':k,'內容':v} for k,v in {**b.get('health',{}),'H200整合診斷':b.get('h200',{}),'H211反證診斷':b.get('h211',{})}.items()]),('十二研究員',[{'市場':r['市場'],'股票代號':r['股票代號'],**o} for r in b.get('reviews',[]) for o in r['roles']])]:
         ws=w.create_sheet(name);ws.append(['快照時間',safe(msg),'狀態',s]);cols=list(dict.fromkeys(k for r in rows for k in r));ws.append(cols or ['無資料'])
         for r in rows:ws.append([safe(r.get(k)) for k in cols])
         ws.freeze_panes='A3'
@@ -193,4 +207,14 @@ def render_inline(root=ROOT):
         cols.extend(k for k in ('H198階段','H198反證','H200研究優先序','H200研究權重','H200風險複核') if k in frame.columns)
         st.dataframe(frame[cols],hide_index=True,use_container_width=True)
     else:st.warning('無具名研究；請檢查 H190／H192 來源健康與覆蓋率，非市場無機會。')
+    if b.get('h211',{}).get('version')==h211.VERSION:
+        st.subheader('H211｜反證與新證據研究優先序（不改正式推薦）')
+        diag=b['h211'];st.caption(str(diag['status'])+'｜歷史完整窗 '+str(diag['history_days'])+'/10；僅獨立H195研究')
+        st.write(diag['counts'])
+        rr=[r for t in TIERS for r in h211.ordered([x for x in b['rows'] if x['研究分級']==t])[:10]]
+        if rr:
+            cols=['研究分級','股票代號','股票名稱','H200研究優先序',*h211.FIELDS]
+            st.dataframe(pd.DataFrame(rr).reindex(columns=cols),hide_index=True,use_container_width=True)
+        with st.expander('H211 證據缺口與限制'):st.json(diag)
+    else:st.caption('等待 H211 每日研究快照。')
     if b['errors'] or not b['technical_current'] or b['health'].get('technical_status')!='CROSS_MARKET_RESEARCH_READY':st.caption('部分來源／技術資料待核實，詳細診斷見第33頁。')

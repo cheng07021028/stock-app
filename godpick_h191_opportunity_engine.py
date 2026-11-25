@@ -144,6 +144,7 @@ def evaluate(*, master, calendars, markets, rows, asof, factors=None, latest_tdc
         out['sectors'].append({'產業':name,'有效檔數':n,'主檔檔數':industry_den[name],'覆蓋率%':coverage*100,'5日中位漲跌%':r5,'上漲家數比%':breadth*100,'成交額活躍比':activity,'主流成立':qualified,'相對母體中位數pp':r5-market_r5})
     out['sectors'].sort(key=lambda x:(not x['主流成立'],-x['相對母體中位數pp'],-x['成交額活躍比'],x['產業']))
     leaders={r['產業'] for r in out['sectors'] if r['主流成立']}
+    h211_sectors={r['產業']:r for r in out['sectors']}
     idx=np.asarray(index_returns,dtype=float) if index_returns is not None else np.array([])
     idx_ok=idx.shape==(20,) and np.isfinite(idx).all() and (idx>-100).all(); out['index_available']=bool(idx_ok)
     down=idx<0 if idx_ok else np.zeros(20,dtype=bool)
@@ -169,7 +170,10 @@ def evaluate(*, master, calendars, markets, rows, asof, factors=None, latest_tdc
             add('大戶持股增加',delta*10+min(streak,5),'TDCC千張以上兩期持股比例增加，法人5日淨買超且連買；不等同主力鎖碼')
         h198=stage198.assess(rows.get((f['市場'],f['股票代號']),[]),expected,f,liquid=liquid)
         stage_rows.append({**{k:f[k] for k in ('股票代號','股票名稱','市場','產業','收盤','量比','5日漲跌%','20日漲跌%','當日成交額','20日均成交額')},**h198})
-        out['diagnostic'].append({**h198,'股票代號':f['股票代號'],'股票名稱':f['股票名稱'],'市場':f['市場'],'產業':f['產業'],'流動性通過':liquid,'研究池':'、'.join(signal),'資料日期':asof,'法人資料可用':net is not None,'TDCC資料可用':delta is not None})
+        sector=h211_sectors.get(f['產業'],{})
+        h211={k:f.get(k) for k in ('收盤','MA20','MA20前5日','5日漲跌%','20日漲跌%','60日區間位置%','量比')}
+        h211.update({'全市場技術覆蓋':full,'流動性通過':liquid,**{'產業'+k:sector.get(k) for k in ('覆蓋率%','有效檔數','成交額活躍比','上漲家數比%','主流成立')}})
+        out['diagnostic'].append({**h198,'H211技術證據':h211,'股票代號':f['股票代號'],'股票名稱':f['股票名稱'],'市場':f['市場'],'產業':f['產業'],'流動性通過':liquid,'研究池':'、'.join(signal),'資料日期':asof,'法人資料可用':net is not None,'TDCC資料可用':delta is not None})
     out['h198']=stage198.summarize(stage_rows,top,len(universe))
     out['pool_counts']={p:len(g) for p,g in out['pools'].items()}
     for p,g in out['pools'].items():

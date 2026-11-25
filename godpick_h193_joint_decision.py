@@ -65,6 +65,8 @@ def combine(t, f):
         # H198 is counter-evidence only; never alter H193 membership, H194 signal or H126.
         if date_ok and a.get('H198資料日期')==t.get('asof') and k not in td:
             r.update({field:a.get(field) for field in STAGE_FIELDS})
+            r['H211技術證據']=a.get('H211技術證據')
+        r['H211營收證據']={'新鮮':b.get('營收新鮮') is True,'可得時間':b.get('營收可得時間'),'來源':b.get('營收來源')} if b and k not in fd else None
         audit.append(r)
         if tier:rank[tier].append(r)
     # Ordering is a transparent research triage, NOT predicted return or probability.

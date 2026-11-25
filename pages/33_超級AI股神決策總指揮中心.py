@@ -7,6 +7,7 @@ from app_auth import require_login
 require_login()
 from godpick_h195_command_center import VERSION,TIERS,load,workbook,render_inline
 from godpick_h200_integrated import ordered, VERSION as H200_VERSION
+from godpick_h211_counterevidence import ordered as h211_ordered, FIELDS as H211_FIELDS
 try:
     from godpick_bi_theme import install_bi_dashboard_style
     install_bi_dashboard_style('33_h195')
@@ -26,6 +27,12 @@ if not b:st.info('請確認 GitHub Actions H195 已執行並提交 data/h195/lat
 if s!='CURRENT':
     st.warning('以下為歷史快照，不是目前研究或當日預測。')
     if not st.checkbox('查看歷史快照（僅供查核）'):st.stop()
+if b.get('h211'):
+    st.subheader('H211｜完整反證與重複研究清單')
+    for tab,t in zip(st.tabs(list(TIERS)),TIERS):
+        with tab:
+            rr=h211_ordered([r for r in b['rows'] if r['研究分級']==t])
+            st.dataframe(pd.DataFrame(rr).reindex(columns=['股票代號','股票名稱','H200研究優先序',*H211_FIELDS]),hide_index=True,use_container_width=True)
 for tab,t in zip(st.tabs(list(TIERS)),TIERS):
     with tab:
         df=pd.DataFrame(ordered([r for r in b['rows'] if r['研究分級']==t]));st.dataframe(df,hide_index=True,use_container_width=True) if not df.empty else st.info('此池未找到具備對應證據的股票。')
