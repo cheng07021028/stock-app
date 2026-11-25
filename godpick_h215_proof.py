@@ -94,17 +94,28 @@ def gate(q,u,now,market,errors=()):
 def run(root=ROOT,now=None):
     from godpick_h213_quality_gate import quality
     from godpick_h214_universe import run as universe
-    from godpick_h212_data_recovery import gaps
-    root=Path(root);now=perf.stamp(now or datetime.now(ar.TZ));q=quality(root,now);u=universe(root,now);g=gaps(root,now);m=perf.Market(root,now)
+    from godpick_h212_data_recovery import run as recovery
+    from godpick_h206_market_gap import build
+    from godpick_h191_opportunity_engine import run as technical
+    from time import perf_counter
+    root=Path(root);now=perf.stamp(now or datetime.now(ar.TZ));timings={};archive_signature=ar._archive_manifest(root/'data/h190')[1]
+    def timed(name,fn):
+        start=perf_counter();value=fn();timings[name]=round(perf_counter()-start,3);return value
+    t=timed('H191',lambda:technical(root,now=now,top=100))
+    b=timed('H206',lambda:build(root,now))
+    h=timed('H212',lambda:recovery(root,now,technical=t,market_report=b))
+    q=timed('H213',lambda:quality(root,now,technical=t,market_report=b,recovery_report=h))
+    u=timed('H214',lambda:universe(root,now,technical=t));g=h['gap'];m=perf.Market(root,now)
     events,errs=load_status(root,now);detail=classify_gaps(g['stock_gaps'],events)
     gts=gate(q,u,now,m,errs+g['archive_errors']);coverage=u['coverage']
     health={}
-    for rel in ('h190/health.json','h209/collector.json','h194/latest.json.gz','h212/repair.json','h213/monthly_health.json'):
+    for rel in ('h190/health.json','h190/session_health.json','h209/collector.json','h194/latest.json.gz','h212/repair.json','h213/monthly_health.json'):
         try:
             v=ar._read(root/'data'/rel);ts=v.get('asof',v.get('observed_at'))
-            if ts and perf.stamp(ts)<=now:health[rel]={k:v[k] for k in ('asof','observed_at','status','new_files','paired_files_present','new_valid_rows','saved','pending','attempted','errors','diagnostics','signals','mature','capture_status') if k in v}
+            if ts and perf.stamp(ts)<=now:health[rel]={k:v[k] for k in ('asof','observed_at','status','new_files','calendar_confirmed','markets','paired_files_present','new_valid_rows','saved','pending','attempted','errors','diagnostics','request_log','signals','mature','capture_status','capture_gate') if k in v}
         except (OSError,ValueError,KeyError,TypeError):pass
-    return {'version':VERSION,'asof':now.isoformat(),'session':q['session'],'gate':gts,'coverage':coverage,'counts':q['counts'],'recall':q['recall'],'status_sources':{k:len(v) for k,v in events.items()},'status_summary':dict(Counter(r['狀態'] for r in detail)),'status_detail':detail,'errors':errs+q['errors']+u['errors'],'health':health,'trade_authority_changed':False}
+    if ar._archive_manifest(root/'data/h190')[1]!=archive_signature:raise RuntimeError('official archive changed during H216 report; retry with a single generation')
+    return {'version':VERSION,'asof':now.isoformat(),'session':q['session'],'gate':gts,'coverage':coverage,'counts':q['counts'],'recall':q['recall'],'status_sources':{k:len(v) for k,v in events.items()},'status_summary':dict(Counter(r['狀態'] for r in detail)),'status_detail':detail,'errors':errs+q['errors']+u['errors'],'health':health,'h216_stage_seconds':timings,'trade_authority_changed':False}
 
 def excel(r):
     import openpyxl
@@ -127,4 +138,5 @@ def excel(r):
             s.column_dimensions[get_column_letter(i)].width=min(45,max(15,len(k)*2+3))
             if '覆蓋率' in k or k=='研究榜召回率':
                 for c in list(s.columns)[i-1][1:]:c.number_format='0.00%'
-    sheet('01_強制驗收',[{'資料日':r['session'],'觀測時間':r['asof'],**{k:v for k,v in r['gate'].items() if k!='daily_checks'}}]);sheet('02_每日閘門',r['gate']['daily_checks']);sheet('03_母體覆蓋',r['coverage']);sheet('04_交易狀態',r['status_detail']);sheet('05_成熟召回',r['recall']);sheet('06_管線健康',[{'來源':k,**v} for k,v in r['health'].items()]);sheet('07_來源異常',[{'錯誤':x} for x in r['errors']]);b=io.BytesIO();w.save(b);return b.getvalue()
+    sheet('01_強制驗收',[{'資料日':r['session'],'觀測時間':r['asof'],**{k:v for k,v in r['gate'].items() if k!='daily_checks'}}]);sheet('02_每日閘門',r['gate']['daily_checks']);sheet('03_母體覆蓋',r['coverage']);sheet('04_交易狀態',r['status_detail']);sheet('05_成熟召回',r['recall']);sheet('06_管線健康',[{'來源':k,**v} for k,v in r['health'].items()]+[{'來源':'H216 '+k,'運算秒數':v} for k,v in r.get('h216_stage_seconds',{}).items()]);sheet('07_來源異常',[{'錯誤':x} for x in r['errors']]);
+    b=io.BytesIO();w.save(b);return b.getvalue()

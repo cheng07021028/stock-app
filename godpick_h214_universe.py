@@ -134,8 +134,8 @@ def analyze(master,expected,markets,rows,rosters,events,*,ready,raw_diagnostics=
         coverage.append({'市場':m,'原始母體':len(rr),'原始有效':raw,'原始覆蓋率':raw/len(rr) if rr else None,'官方短歷史分流':len(rr)-len(eligible),'有效研究母體':len(eligible),'有效母體原價有效':raw_eligible,'有效母體原價覆蓋率':raw_eligible/len(eligible) if eligible else None,'還原有效':adjusted,'還原覆蓋率':adjusted/len(eligible) if eligible else None,'權息證據日數':sum(d in events.get(m,{}) for d in expected[1:])})
     return coverage,detail,short,changes
 
-def run(root=ROOT,now=None):
-    root=Path(root);now=perf.stamp(now or datetime.now(ar.TZ));t=tech.run(root,now=now,top=100);cal,markets,rows,errors=ar._index(root/'data/h190',asof=now);day=t['asof'];expected=sorted({d for ds in cal.values() for d in ds if d<=day})[-60:];rosters,re=load_rosters(root,now);events={m:{} for m in URLS};action_errors=[]
+def run(root=ROOT,now=None,*,technical=None):
+    root=Path(root);now=perf.stamp(now or datetime.now(ar.TZ));t=technical if technical is not None else tech.run(root,now=now,top=100);cal,markets,rows,errors=ar._index(root/'data/h190',asof=now);day=t['asof'];expected=sorted({d for ds in cal.values() for d in ds if d<=day})[-60:];rosters,re=load_rosters(root,now);events={m:{} for m in URLS};action_errors=[]
     for m in URLS:
         for d in expected[1:]:
             try:events[m][d]=actions.read_actions(root,m,d,now)[0]

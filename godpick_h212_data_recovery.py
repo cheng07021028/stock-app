@@ -135,11 +135,11 @@ def attribution(detail):
     return out,[{'市場':m,'策略':s,'期間':n,'結果分類':k,'策略列數':v} for (m,s,n,k),v in sorted(summary.items())]
 
 
-def run(root=ROOT,now=None):
+def run(root=ROOT,now=None,*,technical=None,market_report=None):
     from godpick_h193_joint_decision import run as joint
     from godpick_h206_market_gap import build
     from godpick_h209_rolling_backtest import run as backtest
-    root=Path(root);now=perf.stamp(now or datetime.now(ar.TZ));t=tech.run(root,now=now,top=100);g=gaps(root,now,t);j,_=joint(root,now=now);b=backtest(root,now=now);m=build(root,now)
+    root=Path(root);now=perf.stamp(now or datetime.now(ar.TZ));t=technical if technical is not None else tech.run(root,now=now,top=100);g=gaps(root,now,t);j,_=joint(root,now=now,technical=t);b=backtest(root,now=now);m=market_report if market_report is not None else build(root,now)
     intersections=[];cnt=Counter();audit={(x['市場'],x['股票代號']):x for x in j['audit']}
     for x in j['audit']:
         if x['研究分級'] not in ('財報研究','雙證據研究','技術研究'):continue

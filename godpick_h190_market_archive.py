@@ -299,6 +299,55 @@ def collect(root=ROOT, *, http=None, now=None, budget=24, target=250, timeout=12
         'corporate_actions':'UNADJUSTED; historical PIT / total return not certified','trade_authority_changed':False}
     _write(state,_seal(result)); return result
 
+def collect_session(root=ROOT, *, http=None, now=None, timeout=12, pause=1.2):
+    """Collect today's official evidence first, before any historical recovery.
+
+    Preserve the same source validators and immutable partitions. A missing index
+    date is not itself an attestation of holiday or a reason to synthesize bars.
+    """
+    live=now is None; now=(now or datetime.now(TZ)).astimezone(TZ); root=Path(root)
+    day=now.date().isoformat();month=day[:7]
+    health={'version':VERSION,'day':day,'observed_at':now.isoformat(),'status':'BEFORE_CAPTURE_WINDOW',
+            'calendar_confirmed':False,'markets':{},'requests':0,'new_files':0,'errors':{},'trade_authority_changed':False}
+    if now.time()<clock(18,15):return health
+    if http is None:
+        import requests
+        http=requests.Session()
+    def observation():
+        obs=datetime.now(TZ) if live else now
+        if obs.date().isoformat()!=day or obs<now:raise ValueError('session collection window expired')
+        return obs.isoformat()
+    try:
+        health['requests']+=1
+        raw=_get(http,CAL_URL,{'date':month.replace('-','')+'01','response':'json'},timeout)
+        obs=observation();payload=parse_calendar(raw,month,observed_at=obs)
+        save_calendar(root,payload)
+        v=_read(root/'calendar'/(month+'.json'));ts=datetime.fromisoformat(v['observed_at']).astimezone(TZ)
+        health['calendar_confirmed']=day in v['days'] and ts.date().isoformat()==day and ts.time()>=clock(18,15)
+        health['status']='CALENDAR_NO_SESSION_REVIEW' if day not in v['days'] else 'CALENDAR_PENDING'
+    except Exception as ex:
+        health['errors']['calendar']=type(ex).__name__+': '+str(ex)[:120]
+        health['status']='CALENDAR_PENDING'
+    if health['calendar_confirmed']:
+        for m in URLS:
+            try:
+                path=root/'daily'/m/(day+'.json.gz')
+                if not path.exists():
+                    time.sleep(pause);health['requests']+=1
+                    params={'date':day.replace('-',''),'type':'ALLBUT0999','response':'json'} if m=='TWSE' else {'date':day.replace('-','/'),'type':'EW','response':'json'}
+                    raw=_get(http,URLS[m],params,timeout);obs=observation()
+                    health['new_files']+=int(save_day(root,parse_daily(raw,m,day,observed_at=obs)))
+                check=datetime.fromisoformat(observation())
+                q=quote_rows(root,m,day,check)
+                if not q:raise ValueError('empty or future observation')
+                health['markets'][m]={'status':'VERIFIED','rows':len(q)}
+            except Exception as ex:
+                health['errors'][m]=type(ex).__name__+': '+str(ex)[:120]
+                health['markets'][m]={'status':'PENDING','rows':0}
+        health['status']='SESSION_QUOTES_VERIFIED' if all(health['markets'].get(m,{}).get('status')=='VERIFIED' for m in URLS) else 'SESSION_QUOTES_PENDING'
+    health['observed_at']=(datetime.now(TZ) if live else now).isoformat()
+    _write(root/'session_health.json',_seal(health));return health
+
 # Read only: a single process-level index shared across scan threads.  No HTTP.
 _LOCK=threading.RLock(); _CACHE={}
 
@@ -307,6 +356,16 @@ def _invalidate(root):
         for k in list(_CACHE):
             if k[0]==str(Path(root).resolve()):_CACHE.pop(k,None)
 
+def _archive_manifest(root):
+    root=Path(root)
+    primary=sorted((root/'calendar').glob('*.json'))+sorted((root/'daily').glob('*/*.json.gz'))
+    all_paths=primary+sorted((root/'supplemental').glob('*/*.json.gz'))
+    signature=[]
+    for p in all_paths:
+        st=p.stat()
+        signature.append((str(p),st.st_mtime_ns,st.st_ctime_ns,st.st_size,st.st_ino))
+    return primary,tuple(signature)
+
 def _index(root,asof=None):
     root=Path(root); key=str(root.resolve()); explicit=asof is not None; asof=asof or datetime.now(TZ)
     # Do not reuse a current index for a different historical observation cutoff.
@@ -314,10 +373,10 @@ def _index(root,asof=None):
     key=(key,explicit_key)
     with _LOCK:
         old=_CACHE.get(key); now=time.monotonic()
-        if old and now-old[0]<60: return old[1]
-        paths=sorted((root/'calendar').glob('*.json'))+sorted((root/'daily').glob('*/*.json.gz'))
-        sig=tuple((str(p),p.stat().st_mtime_ns,p.stat().st_size) for p in paths+sorted((root/'supplemental').glob('*/*.json.gz')))
-        if old and old[2]==sig:
+        paths,sig=_archive_manifest(root)
+        # Exact historical cutoffs can share a verified index, but a changed
+        # archive must invalidate immediately, even within the former TTL.
+        if old and old[2]==sig and (explicit or now-old[0]<60):
             _CACHE[key]=(now,old[1],sig); return old[1]
         calendars={}; markets={m:{} for m in URLS}; rows=defaultdict(list); errors=[]
         for p in paths:
@@ -341,6 +400,9 @@ def _index(root,asof=None):
                 markets[m][d]=len(q)
                 for r,_ in q.values():rows[m,r[0]].append((d,*r[1:]))
             except Exception as e: errors.append(p.name+': '+str(e)[:100])
+        if _archive_manifest(root)[1]!=sig:
+            # Do not certify a mixed-generation index during concurrent writes.
+            return ({},{m:{} for m in URLS},defaultdict(list),errors+['archive changed during index read; retry'])
         data=(calendars,markets,rows,errors)
         _CACHE.clear(); _CACHE[key]=(now,data,sig); return data
 

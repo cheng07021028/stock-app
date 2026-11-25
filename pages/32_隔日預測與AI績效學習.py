@@ -272,7 +272,8 @@ if st.checkbox('載入 H215 每日實證驗收（唯讀）'):
         st.dataframe(pd.DataFrame(h215['coverage']),hide_index=True,use_container_width=True,column_config={k:st.column_config.NumberColumn(k,format='percent') for k in ('原始覆蓋率','有效母體原價覆蓋率','還原覆蓋率')})
         st.write('官方狀態來源',h215['status_sources'],'缺日分類',h215['status_summary'])
         with st.expander('逐股缺日與官方交易狀態核對'):st.dataframe(pd.DataFrame(h215['status_detail']),hide_index=True,use_container_width=True)
-        with st.expander('管線健康與來源回應診斷'):st.json(h215['health']);st.write(h215['errors'])
+        with st.expander('管線健康與來源回應診斷'):
+            st.caption('H216 同輪運算耗時（秒）');st.json(h215.get('h216_stage_seconds',{}));st.json(h215['health']);st.write(h215['errors'])
         if st.checkbox('產生 H215 實證 Excel'):
             from godpick_h215_proof import excel as excel_h215
             st.download_button('下載 H215 實證驗收',excel_h215(h215),'H215_Proof.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')

@@ -3,14 +3,16 @@ from pathlib import Path
 import argparse,json,sys
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
-from godpick_h190_market_archive import collect,inspect
+from godpick_h190_market_archive import collect,inspect,collect_session
 
 def main():
     p=argparse.ArgumentParser(description='H190 date-batch official history collector / read-only inspection')
-    p.add_argument('action',choices=('collect','inspect'))
+    p.add_argument('action',choices=('collect','inspect','today'))
     p.add_argument('--root',type=Path,default=ROOT/'data'/'h190')
     p.add_argument('--budget',type=int,default=24)
     args=p.parse_args()
+    if args.action=='today':
+        result=collect_session(args.root);print(json.dumps(result,ensure_ascii=False,indent=2));return 2 if result['errors'] else 0
     if args.action=='collect':
         result=collect(args.root,budget=args.budget)
         print(json.dumps(result,ensure_ascii=False,indent=2))

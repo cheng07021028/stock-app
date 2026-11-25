@@ -87,11 +87,11 @@ def combine(t, f):
             'counts':{p:len(v) for p,v in rank.items()},'pools':rank,'audit':audit,
             'duplicate_identities':sorted(td|fd),'trade_authority_changed':False,'status':'RESEARCH_AVAILABLE' if any(rank.values()) else 'NO_MATCH_OR_EVIDENCE_PENDING'}
 
-def run(root=ROOT, now=None):
+def run(root=ROOT, now=None, *, technical=None):
     root=Path(root);now=now or datetime.now(archive.TZ)
     if now.tzinfo is None:raise ValueError('timezone required')
     now=now.astimezone(archive.TZ)
-    t=tech.run(root,now=now,top=100)
+    t=technical if technical is not None else tech.run(root,now=now,top=100)
     data,errors=fin.load_inputs(root)
     master=fin.read_json(root/'stock_master_cache.json',[],errors)
     f=fin.evaluate(master=master,data=data,now=now,market_day=t['asof'] if t.get('calendar_fresh') else '',opportunities=t,top=100,errors=errors)

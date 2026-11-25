@@ -25,16 +25,33 @@ BASIS='前瞻封存研究；T+1開盤至T+N收盤，現金股利應收、固定1
 
 def _dates(raw,table):
     found=ar._date_evidence(raw,table)
+    objects=[raw,table]
     for obj in (raw,table):
-        for a,b in [('startDate','endDate'),('start_date','end_date')]:
-            if a in obj and b in obj:
-                found.update([ar._day(obj[a]),ar._day(obj[b])])
+        for key in ('query','queryParams','queryParameters','dateRange','queryDateRange'):
+            if isinstance(obj.get(key),dict):objects.append(obj[key])
+    for obj in objects:
+        for a,b in [('startDate','endDate'),('start_date','end_date'),('queryStartDate','queryEndDate'),('reportStartDate','reportEndDate')]:
+            if a in obj or b in obj:
+                if a not in obj or b not in obj:raise ValueError('incomplete source range metadata')
+                lo,hi=ar._day(obj[a]),ar._day(obj[b])
+                if lo>hi:raise ValueError('reversed source range metadata')
+                found.update((lo,hi))
+        for key in ('dateRange','queryDateRange'):
+            value=obj.get(key)
+            if isinstance(value,list):
+                if len(value)!=2:raise ValueError('invalid source range list')
+                lo,hi=map(ar._day,value)
+                if lo>hi:raise ValueError('reversed source range metadata')
+                found.update((lo,hi))
         # Some official titles use compact ROC dates; inspect metadata only,
         # never infer a query range from the event rows or request arguments.
         for k in ('title','subtitle','name','queryDateRange','dateRange'):
             value=str(obj.get(k,''))
-            for a,b in re.findall(r'(?<!\d)(\d{7,8})\s*(?:至|到|~|～|—|–)\s*(\d{7,8})(?!\d)',value):
-                found.update((ar._day(a),ar._day(b)))
+            token=r'(?:\d{7,8}|\d{2,4}[-/年]\d{1,2}[-/月]\d{1,2}日?)'
+            for a,b in re.findall(r'(?<!\d)('+token+r')\s*(?:至|到|~|～|—|–|\s-\s)\s*('+token+r')(?!\d)',value):
+                lo,hi=ar._day(a),ar._day(b)
+                if lo>hi:raise ValueError('reversed source range metadata')
+                found.update((lo,hi))
     return found
 
 
@@ -43,10 +60,13 @@ def response_diagnostic(raw):
     # never retain cookies, headers, tokens, or the response's entire row data.
     if not isinstance(raw,dict):return {'type':type(raw).__name__}
     def summarize(t):
+        fields=t.get('fields') or t.get('headers') or []
+        if not isinstance(fields,list):fields=[]
         return {'keys':sorted(str(k) for k in t)[:50],
-                'metadata':{k:str(t[k])[:300] for k in ('stat','title','subtitle','name','date','dataDate','startDate','endDate','start_date','end_date','dateRange','queryDateRange','total','totalCount','recordsTotal','recordsFiltered') if k in t},
-                'fields':[str(x)[:80] for x in (t.get('fields') or t.get('headers') or [])[:40]],'row_count':len(t['data']) if isinstance(t.get('data'),list) else None}
-    return {'root':summarize(raw),'tables':[summarize(t) for t in (raw.get('tables') or [])[:8] if isinstance(t,dict)]}
+                'metadata':{k:str(t[k])[:300] for k in ('stat','title','subtitle','name','date','dataDate','startDate','endDate','start_date','end_date','dateRange','queryDateRange','queryStartDate','queryEndDate','reportStartDate','reportEndDate','total','totalCount','recordsTotal','recordsFiltered') if k in t},
+                'fields':[str(x)[:80] for x in fields[:40]],'row_count':len(t['data']) if isinstance(t.get('data'),list) else None}
+    tables=raw.get('tables')
+    return {'root':summarize(raw),'tables':[summarize(t) for t in (tables[:8] if isinstance(tables,list) else []) if isinstance(t,dict)]}
 
 
 def parse_actions(raw,market,day,now,*,start=None,end=None,source_url=None):
@@ -109,7 +129,7 @@ def read_actions(root,m,d,now):
 
 def collect_actions(root,market,now,required,*,budget=24,http=None):
     import requests
-    http=http or requests.Session();errors={};diagnostics={};saved=0;attempted=0
+    http=http or requests.Session();errors={};diagnostics={};request_log=[];saved=0;attempted=0
     # Most recent 20 trading days also bootstrap when no research has matured.
     keys=set(required)|{(m,d) for m in URLS for d in market.days[-20:]}
     keys={(m,d) for m,d in keys if d<now.date().isoformat() or (d==now.date().isoformat() and now.time()>=time(18,15))}
@@ -130,18 +150,25 @@ def collect_actions(root,market,now,required,*,budget=24,http=None):
         if (m,d) not in remaining:continue
         # Query a bounded past week first: on no-event days the official table
         # often omits data entirely. A dated range with rows can attest those days.
-        start=max(d[:8]+'01',(date.fromisoformat(d)-timedelta(days=6)).isoformat())
+        # Wider bounded TPEX request to avoid unnecessary repeated requests on no-event days.
+        # Explicit returned bounds remain mandatory.
+        start=max(d[:8]+'01',(date.fromisoformat(d)-timedelta(days=13 if m=='TPEX' else 6)).isoformat())
         end=d;key=m+':'+d;attempted+=1
         attempts[key]=now.isoformat()
         try:
             fmt=lambda x:x.replace('-','') if m=='TWSE' else x.replace('-','/')
             def fetch(lo,hi):
-                res=http.get(URLS[m],params={'startDate':fmt(lo),'endDate':fmt(hi),'response':'json'},timeout=12);res.raise_for_status()
-                raw=res.json()
-                try:parse_actions(raw,m,d,now,start=lo,end=hi)
+                item={'market':m,'day':d,'start':lo,'end':hi};raw=None
+                try:
+                    res=http.get(URLS[m],params={'startDate':fmt(lo),'endDate':fmt(hi),'response':'json'},timeout=12);res.raise_for_status()
+                    raw=res.json();parse_actions(raw,m,d,now,start=lo,end=hi)
+                    item.update(status='VERIFIED_RANGE',**response_diagnostic(raw))
+                    return raw
                 except Exception as ex:
-                    diagnostics[key]={'start':lo,'end':hi,'error':str(ex)[:180],**response_diagnostic(raw)};raise
-                return raw
+                    err=str(ex)[:180] if isinstance(ex,(ValueError,TypeError,KeyError)) else type(ex).__name__
+                    item.update(status='REJECTED',error=err,**response_diagnostic(raw))
+                    diagnostics[key]={k:v for k,v in item.items() if k not in ('market','day','status')};raise
+                finally:request_log.append(item)
             try:raw=fetch(start,end)
             except Exception:
                 if start==end or attempted>=limit:raise
@@ -152,7 +179,7 @@ def collect_actions(root,market,now,required,*,budget=24,http=None):
                 if p.exists():raise ValueError('action archive appeared concurrently; no overwrite')
                 ar._write(p,ar._seal(v));read_actions(root,m,dd,now);saved+=1;remaining.remove((m,dd));attempts[m+':'+dd]=now.isoformat()
         except Exception as e:errors[key]=str(e)[:180]
-    health={'version':VERSION,'asof':now.isoformat(),'attempted':attempted,'saved':saved,'errors':errors,'diagnostics':diagnostics,'attempts':attempts,'pending':len(missing)-saved}
+    health={'version':VERSION,'asof':now.isoformat(),'attempted':attempted,'saved':saved,'errors':errors,'diagnostics':diagnostics,'request_log':request_log,'attempts':attempts,'pending':len(missing)-saved}
     ar._write(hp,ar._seal(health));return health
 
 

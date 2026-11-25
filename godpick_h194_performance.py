@@ -62,7 +62,7 @@ def immutable(path,body):
 class Market:
     def __init__(self,root,now):
         self.root=Path(root);self.now=stamp(now);self.p=self.root/'data/h190'
-        ar._invalidate(self.p);cal,markets,rows,errors=ar._index(self.p,asof=self.now)
+        cal,markets,rows,errors=ar._index(self.p,asof=self.now)
         self.errors=errors;self.cal={};self.cal_observed={};self.market=markets;self.cache={};self.bench={}
         # Never use a calendar/daily partition observed after the calculation time.
         for month,days in cal.items():
@@ -202,7 +202,7 @@ def report(signals,outcomes,market,now,model,gaps=None):
 
 def run(root=ROOT,now=None):
     from godpick_h193_joint_decision import run as joint
-    now=stamp(now or datetime.now(ar.TZ));root=Path(root);p=root/'data/h194'
+    live=now is None;now=stamp(now or datetime.now(ar.TZ));root=Path(root);p=root/'data/h194'
     signals,outcomes=read_ledger(root);market=Market(root,now)
     new,gaps=settle(signals,outcomes,market,now)
     if new:
@@ -211,11 +211,28 @@ def run(root=ROOT,now=None):
         outcomes.update({okey(o):o for o in new})
     model=models(signals,outcomes,now);day=now.date().isoformat();path=p/'signals'/(day+'.json.gz')
     status='當日已有不可覆寫快照'
+    capture_gate={'day':day,'calendar_confirmed':market.today_confirmed(day),'archive_errors':list(market.errors),
+                  'market_quote_counts':{m:len(market.quotes(m,day)) for m in ar.URLS},'reason':'ALREADY_CAPTURED'}
     if not path.exists():
-        r,_=joint(root,now=now);body,status=freeze(r,market,model,now)
-        if body:
-            immutable(path,body);signals.update({sid(s):s for s in body['rows']})
-    out=report(signals,outcomes,market,now,model,gaps);out['capture_status']=status;out['archive_errors']=market.errors;out['new_outcomes']=len(new)
+        if now.time()<time(18,15):reason='BEFORE_CAPTURE_WINDOW'
+        elif market.errors:reason='ARCHIVE_ERROR'
+        elif not market.today_confirmed(day):reason='CALENDAR_NOT_CONFIRMED'
+        elif not any(capture_gate['market_quote_counts'].values()):reason='NO_CURRENT_QUOTES'
+        else:reason='EVALUATE'
+        capture_gate['reason']=reason
+        if reason!='EVALUATE':status='當日聯合行情未核實／不回填預測：'+reason
+        else:
+            r,_=joint(root,now=now)
+            finished=stamp(datetime.now(ar.TZ)) if live else now
+            if finished.date()!=now.date() or finished<now:
+                body=None;status='當日聯合行情未核實／不回填預測：CAPTURE_WINDOW_EXPIRED';capture_gate['reason']='CAPTURE_WINDOW_EXPIRED'
+            else:
+                body,status=freeze(r,market,model,finished)
+                capture_gate['reason']='CAPTURED' if body else 'NO_ELIGIBLE_CURRENT_RESEARCH'
+                capture_gate['research_day']=r.get('market_day');capture_gate['same_session']=r.get('same_session')
+                if body:
+                    immutable(path,body);signals.update({sid(s):s for s in body['rows']});now=finished
+    out=report(signals,outcomes,market,now,model,gaps);out['capture_status']=status;out['capture_gate']=capture_gate;out['archive_errors']=market.errors;out['new_outcomes']=len(new)
     # Health/report is replaceable; source signals and outcomes are not.
     ar._write(p/'latest.json.gz',ar._seal({k:v for k,v in out.items() if k not in ('outcomes','latest_signals')}))
     return out
