@@ -6,6 +6,8 @@ on:
     paths:
       - 'godpick_h190_market_archive.py'
       - 'tools/h190_market_archive.py'
+      - 'godpick_h212_data_recovery.py'
+      - 'tools/h212_data_recovery.py'
       - '.github/workflows/h190_market_archive.yml'
   schedule:
     # Asia/Taipei 03:35, 09:35, 15:35, 21:35. Today's data only after 18:15.
@@ -35,7 +37,12 @@ jobs:
         run: python -m pip install 'requests>=2.31,<3' 'pandas>=2.2,<3'
       - name: Collect bounded batches and verify archive
         id: collect
+        continue-on-error: true
         run: python tools/h190_market_archive.py collect --budget 24
+      - name: H212 bounded individual gap recovery
+        id: repair
+        continue-on-error: true
+        run: python tools/h212_data_recovery.py repair --budget 8
       - name: Persist only H190 public archive and health
         if: always()
         shell: bash
@@ -44,11 +51,18 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           if [[ -d data/h190 ]]; then git add -f -- data/h190/; fi
+          if [[ -f data/h212/repair.json ]]; then git add -f -- data/h212/repair.json; fi
           if ! git diff --cached --quiet; then
             git commit -m 'data(H190): official date-batch history and coverage'
             git pull --rebase origin main
             git push origin HEAD:main
           fi
-      - name: Flag source gaps explicitly
-        if: steps.collect.outcome != 'success'
-        run: exit 1
+      - name: Verify published archive and warn on partial historical gaps
+        env:
+          COLLECT: ${{ steps.collect.outcome }}
+          REPAIR: ${{ steps.repair.outcome }}
+        run: |
+          python tools/h190_market_archive.py inspect
+          if [[ "$COLLECT" != success || "$REPAIR" != success ]]; then
+            echo '::warning::H190/H212 partial source recovery; downstream must independently verify same-day evidence'
+          fi

@@ -2,7 +2,7 @@ name: H209 prospective rolling backtest
 on:
   workflow_dispatch:
   workflow_run:
-    workflows: ["H190 official full-market historical archive"]
+    workflows: ["H190 official full-market historical archive", "H194 prospective research performance"]
     types: [completed]
     branches: [main]
   push:
@@ -67,6 +67,9 @@ jobs:
           fi
       - name: H210 read-only strategy competition after H209 persistence
         run: python tools/h210_daily_competition.py --out h209_output
+      - name: H212 read-only gap and outcome audit
+        continue-on-error: true
+        run: python tools/h212_data_recovery.py report --out h209_output
       - uses: actions/upload-artifact@v4
         if: always()
         with:
