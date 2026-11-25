@@ -1,0 +1,44 @@
+name: H214 official roster and shadow research
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '25 14 * * 1-5'
+permissions:
+  contents: write
+concurrency:
+  group: h214-roster-main
+  cancel-in-progress: false
+jobs:
+  research:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install 'pandas==2.3.3' 'numpy>=1.26,<3' 'requests>=2.31,<3' 'openpyxl>=3.1.2,<4' 'lxml>=5,<7'
+      - run: python tools/h214_universe.py --collect --out h214_output
+      - name: Persist only official public roster evidence
+        run: |
+          set -euo pipefail
+          if [ -d data/h214/roster ]; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add -f -- data/h214/roster/
+            if ! git diff --cached --quiet; then
+              git commit -m 'data(H214): official roster evidence'
+              git pull --rebase origin main
+              git push origin HEAD:main
+            fi
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: H214-shadow-${{ github.run_id }}
+          path: h214_output/
+          retention-days: 90
