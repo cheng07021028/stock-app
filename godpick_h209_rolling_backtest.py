@@ -287,7 +287,18 @@ def run(root=ROOT,now=None,*,update=False,budget=24,http=None):
         try:capture=capture_recall(root,m,now)
         except (OSError,ValueError,TypeError,KeyError) as ex:capture='H208封存待查：'+str(ex)[:180]
     ss=read_signals(root,now);required={(s['market'],d) for s in ss for n in HORIZONS for d in m.span(s['signal_day'],n)[1:]}
-    if update:health=collect_actions(root,m,now,required,budget=budget,http=http)
+    if update:
+        # H213: include suspicious raw gap dates in the existing bounded official
+        # action collector; never treat a missing action as a verified no-event.
+        audit_keys=set();audit_error=''
+        try:
+            from godpick_h212_data_recovery import gaps
+            from godpick_h213_quality_gate import jump_audit
+            if not m.errors:
+                audit_keys={(r['市場'],r['交易日']) for r in jump_audit(root,now,gaps(root,now)) if r['權息狀態']=='權息證據待抓'}
+        except Exception as ex:audit_error=type(ex).__name__+': '+str(ex)[:120]
+        health=collect_actions(root,m,now,required|audit_keys,budget=budget,http=http)
+        health['h213_jump_dates']=len(audit_keys);health['h213_jump_audit_error']=audit_error
     rows,summary,cohorts,folds,_=evaluate(ss,m,Evidence(root,m,now),now)
     valid=sum(r['status']=='VALID_CASH_MODEL' for r in rows)
     pending=Counter()

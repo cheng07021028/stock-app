@@ -56,13 +56,26 @@ def repair(root=ROOT,now=None,*,budget=8,http=None,pause=1.2,timeout=12):
     tried=[];added=0;fail=Counter();n=0
     # Round-robin market queues to avoid one market consuming the entire budget.
     qs={m:[] for m in ar.URLS}
-    for row in before['day_queue']:
+    # H213 cross-report candidates prioritize a fresh full-market recheck once
+    # per observation. Monthly evidence alone never changes the quote archive.
+    corroboration={}
+    try:
+        h=ar._read(root/'data/h213/monthly_health.json')
+        if h.get('version')=='V191-H213-QUALITY-GATE' and perf.stamp(h['asof'])<=now:
+            for v in h['attempts'].values():
+                at=perf.stamp(v['at'])
+                if at>now:continue
+                for x in v.get('detail',[]):
+                    if x.get('補證狀態')=='CROSS_REPORT_CANDIDATE':
+                        k=x['市場']+':'+x['交易日'];corroboration[k]=max(at.isoformat(),corroboration.get(k,''))
+    except (OSError,ValueError,TypeError,KeyError):pass
+    for row in sorted(before['day_queue'],key=lambda x:(not bool(corroboration.get(x['市場']+':'+x['交易日'])), -x['缺檔數'],x['市場'],x['交易日'])):
         m,d=row['市場'],row['交易日'];k=m+':'+d
         if ar.supplemental_path(p,m,d).exists():continue
         prev=state.get(k,{})
         try:due=perf.stamp(prev['at'])+timedelta(days=7 if prev['status']=='NO_NEW_VALID_ROWS' else 1)<=now
         except (ValueError,KeyError,TypeError):due=True
-        if due:qs[m].append(row)
+        if due or (corroboration.get(k,'')>prev.get('at','') and prev.get('status')=='NO_NEW_VALID_ROWS'):qs[m].append(row)
     while n<budget and any(qs.values()):
         for m in ar.URLS:
             if n>=budget:break

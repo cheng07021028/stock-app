@@ -200,3 +200,31 @@ if st.checkbox('載入 H212 資料修復與研究歸因（唯讀）'):
             from godpick_h212_data_recovery import excel as excel_h212
             st.download_button('下載 H212 資料修復與歸因',excel_h212(h212),'H212_DataRecovery.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     except Exception as e:st.error('H212 資料驗證失敗：'+str(e)[:180])
+
+
+st.divider()
+st.subheader('H213｜每日推薦品質驗收與官方多源補證')
+st.caption('品質環節通過數不是選股勝率；月表補證僅供核實，來源範圍不一致不直接注入K線。復原由GitHub Actions執行。')
+@st.cache_data(ttl=300,show_spinner=False)
+def load_h213(path):
+    from godpick_h213_quality_gate import quality
+    return quality(Path(path))
+if st.checkbox('載入 H213 每日品質驗收（唯讀）'):
+    try:
+        if st.button('重新讀取 H213'):load_h213.clear()
+        with st.spinner('核對資料品質、前瞻封存與召回證據…'):h213=load_h213(str(root))
+        st.caption(h213['version']+'｜'+h213['asof']+'｜資料日 '+str(h213['session']))
+        st.metric('品質環節通過（非勝率）',f"{h213['passed']}/{h213['total']}")
+        if h213['status']!='RESEARCH_PIPELINE_READY':st.warning('尚待證據；不得據此提升正式權重。')
+        st.dataframe(pd.DataFrame(h213['checks']),hide_index=True,use_container_width=True)
+        st.dataframe(pd.DataFrame(h213['recall']),hide_index=True,use_container_width=True,column_config={'研究榜召回率':st.column_config.NumberColumn('研究榜召回率',format='percent')})
+        st.write('復原建議（非已完成）',h213['repair_plan']);st.write('錯誤',h213['errors'])
+        with st.expander('官方個股月表補證（隔離證據）'):
+            st.dataframe(pd.DataFrame(h213['monthly_detail']),hide_index=True,use_container_width=True)
+            st.write(h213['monthly'])
+        with st.expander('權息跳空證據核對（原始價格不改寫）'):
+            st.dataframe(pd.DataFrame(h213['jumps']),hide_index=True,use_container_width=True)
+        if st.checkbox('產生 H213 品質驗收 Excel'):
+            from godpick_h213_quality_gate import excel as excel_h213
+            st.download_button('下載 H213 品質驗收',excel_h213(h213),'H213_Quality.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    except Exception as e:st.error('H213 資料驗證失敗：'+str(e)[:180])
