@@ -172,7 +172,17 @@ def freeze(result,market,model,now):
             mod=model[m+'|'+tier]
             rows.append({'signal_day':day,'created_at':ts,'market':m,'code':c,'name':str(x['股票名稱']),'tier':tier,'tech_pools':x['技術研究池'],'financial_pools':x['財報研究池'],'base_close':price,'research_rank':x['研究順序'],'forecast':mod['probabilities'],'forecast_status':mod['status'],'model_hash':digest(mod),'authority':'RESEARCH_ONLY'})
     if not rows:return None,'沒有可封存的同日具名研究證據'
-    return {'version':VERSION,'kind':'signals','day':day,'created_at':ts,'h193_hash':digest(result),'models':model,'gaps':dict(gaps),'rows':rows},'當日研究快照建立'
+    # H217: immutable contemporaneous H193 diagnostics, not reconstructed later.
+    audit=[]
+    for x in result.get('audit',[]):
+        m,c=x.get('市場'),x.get('股票代號')
+        if m not in ar.URLS or not isinstance(c,str) or not re.fullmatch('[1-9][0-9]{3}',c):continue
+        context=x.get('H211技術證據') or {}
+        audit.append({'market':m,'code':c,'tier':str(x.get('研究分級') or ''),'tech_gap':str(x.get('技術缺口') or ''),'financial_gap':str(x.get('財報缺口') or ''),'liquid':context.get('流動性通過') if isinstance(context,dict) else None,'tech_pools':str(x.get('技術研究池') or ''),'financial_pools':str(x.get('財報研究池') or '')})
+    body={'version':VERSION,'kind':'signals','day':day,'created_at':ts,'h193_hash':digest(result),'models':model,'gaps':dict(gaps),'rows':rows}
+    if audit and len({(x['market'],x['code']) for x in audit})==len(audit):
+        body['h217_audit']={'decision_day':day,'market_day':result.get('market_day'),'same_session':result.get('same_session') is True,'rows':audit}
+    return body,'當日研究快照建立'
 
 def report(signals,outcomes,market,now,model,gaps=None):
     # Report only as-of-visible observations; benchmarks may become available later.

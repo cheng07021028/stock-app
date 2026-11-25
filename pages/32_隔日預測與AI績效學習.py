@@ -278,3 +278,30 @@ if st.checkbox('載入 H215 每日實證驗收（唯讀）'):
             from godpick_h215_proof import excel as excel_h215
             st.download_button('下載 H215 實證驗收',excel_h215(h215),'H215_Proof.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     except Exception as e:st.error('H215 資料驗收失敗：'+str(e)[:180])
+
+st.divider()
+st.subheader('H217｜前瞻績效閉環與強勢股漏選實證')
+st.caption('H194／H209 獨立研究對帳，不等同 H126 正式買進。含成本模擬淨報酬非真實成交；未成熟或未封存時不顯示虛假勝率。')
+@st.cache_data(ttl=300,show_spinner=False)
+def load_h217(path):
+    from godpick_h217_prospective_quality import run
+    return run(Path(path))
+if st.checkbox('載入 H217 前瞻品質閉環（唯讀）'):
+    try:
+        if st.button('重新讀取 H217'):load_h217.clear()
+        with st.spinner('核對前瞻封存、成熟樣本與強勢股…'):h217=load_h217(str(root))
+        st.caption(h217['version']+'｜'+h217['asof']+'｜資料日 '+h217['day'])
+        if h217['status']=='DATA_PENDING':st.warning('前瞻或成熟證據待補，維持原有研究權重。')
+        st.write(h217['counts']);st.write(h217['pending']);st.write(h217['errors'])
+        st.markdown('**當日研究榜召回（非正式漏選）**');st.dataframe(pd.DataFrame(h217['recall']),hide_index=True,use_container_width=True,column_config={k:st.column_config.NumberColumn(k,format='percent') for k in ('雙日覆蓋率','研究召回率')})
+        with st.expander('逐股漏選與當時原因證據'):st.dataframe(pd.DataFrame(h217['miss']),hide_index=True,use_container_width=True)
+        with st.expander('歷史不可覆寫召回驗收'):st.dataframe(pd.DataFrame(h217['history']),hide_index=True,use_container_width=True)
+        with st.expander('成熟績效及同日新舊研究對照'):
+            st.dataframe(pd.DataFrame(h217['summary']),hide_index=True,use_container_width=True,column_config={k:st.column_config.NumberColumn(k,format='percent') for k in ('覆蓋率','平均淨報酬','勝率')})
+            st.dataframe(pd.DataFrame(h217['paired']),hide_index=True,use_container_width=True,column_config={k:st.column_config.NumberColumn(k,format='percent') for k in ('重複組平均淨報酬','近窗未見組平均淨報酬','未見組相對差')})
+        with st.expander('H194／H209 管線健康證據'):st.json(h217['pipeline'])
+        with st.expander('樣本外研究優先序人工複核（不自動調權）'):st.dataframe(pd.DataFrame(h217['review']),hide_index=True,use_container_width=True,column_config={k:st.column_config.NumberColumn(k,format='percent') for k in ('訓練平均差','留出平均差')})
+        if st.checkbox('產生 H217 前瞻品質 Excel'):
+            from godpick_h217_prospective_quality import excel as excel_h217
+            st.download_button('下載 H217 前瞻品質',excel_h217(h217),'H217_Quality.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    except Exception as e:st.error('H217 資料驗證失敗：'+str(e)[:180])

@@ -30,7 +30,16 @@ def _dates(raw,table):
         for key in ('query','queryParams','queryParameters','dateRange','queryDateRange'):
             if isinstance(obj.get(key),dict):objects.append(obj[key])
     for obj in objects:
-        for a,b in [('startDate','endDate'),('start_date','end_date'),('queryStartDate','queryEndDate'),('reportStartDate','reportEndDate')]:
+        # Live H216 diagnostics (2026-11-25) prove TWSE returns strDate/endDate.
+        # Validate both aliases when present, not just whichever one is convenient.
+        if any(k in obj for k in ('startDate','strDate','endDate')):
+            starts=[ar._day(obj[k]) for k in ('startDate','strDate') if k in obj]
+            if not starts or 'endDate' not in obj:raise ValueError('incomplete source range metadata')
+            if len(set(starts))!=1:raise ValueError('conflicting source start aliases')
+            lo,hi=starts[0],ar._day(obj['endDate'])
+            if lo>hi:raise ValueError('reversed source range metadata')
+            found.update((lo,hi))
+        for a,b in [('start_date','end_date'),('queryStartDate','queryEndDate'),('reportStartDate','reportEndDate')]:
             if a in obj or b in obj:
                 if a not in obj or b not in obj:raise ValueError('incomplete source range metadata')
                 lo,hi=ar._day(obj[a]),ar._day(obj[b])
@@ -45,7 +54,9 @@ def _dates(raw,table):
                 found.update((lo,hi))
         # Some official titles use compact ROC dates; inspect metadata only,
         # never infer a query range from the event rows or request arguments.
-        for k in ('title','subtitle','name','queryDateRange','dateRange'):
+        # Live TPEX response root.date = '20261112~20261125'. A scalar date
+        # still follows the existing date evidence path. Never infer from rows.
+        for k in ('title','subtitle','name','queryDateRange','dateRange','date','Date'):
             value=str(obj.get(k,''))
             token=r'(?:\d{7,8}|\d{2,4}[-/年]\d{1,2}[-/月]\d{1,2}日?)'
             for a,b in re.findall(r'(?<!\d)('+token+r')\s*(?:至|到|~|～|—|–|\s-\s)\s*('+token+r')(?!\d)',value):
@@ -63,7 +74,7 @@ def response_diagnostic(raw):
         fields=t.get('fields') or t.get('headers') or []
         if not isinstance(fields,list):fields=[]
         return {'keys':sorted(str(k) for k in t)[:50],
-                'metadata':{k:str(t[k])[:300] for k in ('stat','title','subtitle','name','date','dataDate','startDate','endDate','start_date','end_date','dateRange','queryDateRange','queryStartDate','queryEndDate','reportStartDate','reportEndDate','total','totalCount','recordsTotal','recordsFiltered') if k in t},
+                'metadata':{k:str(t[k])[:300] for k in ('stat','title','subtitle','name','date','dataDate','startDate','strDate','endDate','start_date','end_date','dateRange','queryDateRange','queryStartDate','queryEndDate','reportStartDate','reportEndDate','total','totalCount','recordsTotal','recordsFiltered') if k in t},
                 'fields':[str(x)[:80] for x in fields[:40]],'row_count':len(t['data']) if isinstance(t.get('data'),list) else None}
     tables=raw.get('tables')
     return {'root':summarize(raw),'tables':[summarize(t) for t in (tables[:8] if isinstance(tables,list) else []) if isinstance(t,dict)]}
@@ -133,11 +144,11 @@ def collect_actions(root,market,now,required,*,budget=24,http=None):
     # Most recent 20 trading days also bootstrap when no research has matured.
     keys=set(required)|{(m,d) for m in URLS for d in market.days[-20:]}
     keys={(m,d) for m,d in keys if d<now.date().isoformat() or (d==now.date().isoformat() and now.time()>=time(18,15))}
-    missing=[]
+    missing=[];invalid_existing=[]
     for m,d in sorted(keys,key=lambda k:(k[1],k[0]),reverse=True):
         try:read_actions(root,m,d,now)
         except FileNotFoundError:missing.append((m,d))
-        except (ValueError,TypeError,KeyError,OSError) as e:errors[m+':'+d]=str(e)[:160]
+        except (ValueError,TypeError,KeyError,OSError) as e:errors[m+':'+d]=str(e)[:160];invalid_existing.append(m+':'+d)
     # rotate failures across runs so a bad endpoint/day cannot starve every other day
     hp=Path(root)/'data/h209/collector.json'
     try:previous=ar._read(hp).get('attempts',{})
@@ -179,7 +190,7 @@ def collect_actions(root,market,now,required,*,budget=24,http=None):
                 if p.exists():raise ValueError('action archive appeared concurrently; no overwrite')
                 ar._write(p,ar._seal(v));read_actions(root,m,dd,now);saved+=1;remaining.remove((m,dd));attempts[m+':'+dd]=now.isoformat()
         except Exception as e:errors[key]=str(e)[:180]
-    health={'version':VERSION,'asof':now.isoformat(),'attempted':attempted,'saved':saved,'errors':errors,'diagnostics':diagnostics,'request_log':request_log,'attempts':attempts,'pending':len(missing)-saved}
+    health={'version':VERSION,'asof':now.isoformat(),'attempted':attempted,'saved':saved,'errors':errors,'diagnostics':diagnostics,'request_log':request_log,'attempts':attempts,'pending':len(missing)-saved,'invalid_existing_count':len(invalid_existing),'invalid_existing':invalid_existing,'unverified_total':len(missing)-saved+len(invalid_existing)}
     ar._write(hp,ar._seal(health));return health
 
 
@@ -204,9 +215,9 @@ def capture_recall(root,market,now):
     return f'H208封存 {len(rows)} 檔'
 
 
-def read_signals(root,now):
+def read_signals(root,now,*,ledger=None):
     from godpick_h197_strategy_review import memberships
-    ss,_=perf.read_ledger(root);out=[]
+    ss,_=perf.read_ledger(root) if ledger is None else ledger;out=[]
     for s in ss.values():
         if perf.stamp(s['created_at'])<=now and s['tier'] in perf.TIERS[:3]:
             strategies=sorted(memberships(s))
