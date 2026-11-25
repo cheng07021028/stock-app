@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - godpick_h206_market_gap.py
+      - godpick_h208_recall_review.py
       - tools/h206_daily_review.py
       - .github/workflows/h206_market_gap.yml
   schedule:
@@ -50,3 +51,18 @@ jobs:
           retention-days: 90
       - name: Flag incomplete market archive
         run: python -c "import json,sys; sys.exit(0 if json.load(open('h206_output/health.json',encoding='utf-8'))['status']=='MARKET_READY' else 2)"
+      - name: H208 recall acceptance
+        if: always()
+        run: |
+          python - <<'PY'
+          import json, os, sys
+          with open('h206_output/health.json', encoding='utf-8') as f:
+              h = json.load(f).get('h208', {})
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as f:
+              f.write('## H208 研究召回驗收\n')
+              f.write('狀態：' + str(h.get('status', 'DATA_PENDING')) + '\n\n')
+              f.write('候選數：' + str(h.get('candidate_count', 0)) + '\n\n')
+              f.write('覆蓋：`' + json.dumps(h.get('coverage', {}), ensure_ascii=False) + '`\n\n')
+              f.write('缺口：`' + json.dumps(h.get('errors', []), ensure_ascii=False) + '`\n')
+          sys.exit(0 if h.get('status') == 'RESEARCH_READY' else 2)
+          PY
