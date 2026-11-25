@@ -109,15 +109,15 @@ def _events(root,code,market,now):
     if not snap or not _observed(snap.get('observed_at'),now):return []
     return [r for r in snap['rows'] if r.get('code')==code and r.get('published_at','9999')<=now.date().isoformat() and _observed(r.get('available_at'),now)]
 
-def _bars(root,code,market,day):
+def _bars(root,code,market,day,now=None):
     if not day:return pd.DataFrame()
-    ar=root/'data/h190';cal,markets,rows,errors=archive._index(ar)
+    ar=root/'data/h190';cal,markets,rows,errors=archive._index(ar,asof=now)
     sessions=sorted({d for ds in cal.values() for d in ds if d<=day})[-60:]
     if errors or len(sessions)!=60 or sessions[-1]!=day:return pd.DataFrame()
     seq=rows.get((market,code),[])
     if any(d not in markets.get(market,{}) for d in sessions) or tech.calc_features(seq,sessions)[0] is None:return pd.DataFrame()
     # Reuse exactly the H191 feature window; no unadjusted P&L.
-    raw=archive.archive_history(code,market,sessions[0],day,root=ar)
+    raw=archive.archive_history(code,market,sessions[0],day,root=ar,asof=now)
     if len(raw)!=60:return pd.DataFrame()
     return raw.rename(columns=dict(zip(archive.COLS,['date','open','high','low','close','volume','amount','trades','source']))).assign(code=code)
 
@@ -127,7 +127,7 @@ def detail(result,financial,market,code,root=ROOT,now=None):
     if not r:raise ValueError('unknown identity')
     profile=next((x for x in financial['profiles'] if x['市場']==market and x['股票代號']==code),{})
     ev=[x for x in financial['evidence'] if x['市場']==market and x['股票代號']==code and _observed(x.get('首次觀察或公告時間'),now)]
-    bars=_bars(root,code,market,result['market_day'])
+    bars=_bars(root,code,market,result['market_day'],now)
     events=_events(root,code,market,now)
     data={'ohlcv':bars,'events':pd.DataFrame(events)}
     opts={'code':code,'asof':now.date().isoformat()}

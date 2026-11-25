@@ -66,7 +66,7 @@ def build(root,market_report,now):
     b={'version':VERSION,'day':day,'asof':now.isoformat(),'status':'DATA_PENDING','rows':[],'coverage':{},'reasons':{},'errors':[],'trade_authority_changed':False}
     if not day or day!=market_report.get('expected_day') or not market_report.get('coverage'):
         b['errors'].append('H206 交易日／行情未核實');return b
-    p=root/'data/h190';cal,markets,rows,errors=ar._index(p)
+    p=root/'data/h190';cal,markets,rows,errors=ar._index(p,asof=now)
     if errors:b['errors']=list(errors[:10]);return b
     expected=sorted(set(d for ds in cal.values() for d in ds if d<=day))[-60:]
     if len(expected)!=60 or expected[-1]!=day:b['errors'].append('未滿60個官方交易日');return b

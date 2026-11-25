@@ -182,11 +182,10 @@ class Evidence:
     def quote(self,m,d,c):
         k=m,d
         if k not in self.bars:
-            self.bars[k]=({},None)
+            self.bars[k]={}
             if not self.market.errors and d in self.market.market.get(m,{}):
-                v=ar._read(self.root/'data/h190/daily'/m/(d+'.json.gz'));obs=perf.stamp(v['observed_at'])
-                if obs<=self.now:self.bars[k]=({r[0]:r for r in v['rows']},obs)
-        rows,obs=self.bars[k];return rows.get(c),obs
+                self.bars[k]=ar.quote_rows(self.root/'data/h190',m,d,self.now)
+        return self.bars[k].get(c,(None,None))
     def action(self,m,d,c):
         k=m,d
         if k not in self.events:

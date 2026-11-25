@@ -45,12 +45,13 @@ def read_quotes(root,m,d,now):
     v=ar._read(path)
     if (v.get('version')!=ar.VERSION or v.get('day')!=d or v.get('market')!=m or v.get('source_url')!=ar.URLS[m] or v.get('basis')!='RAW_UNADJUSTED_FIRST_OBSERVED_BACKFILL' or perf.stamp(v['observed_at'])>now or v['row_count']!=len(v['rows']) or len(v['rows'])<ar.MIN_ROWS[m]):raise ValueError('H190 provenance or coverage mismatch')
     out={}
-    for r in v['rows']:
+    q=ar.quote_rows(Path(root)/'data/h190',m,d,now,base=v)
+    for r,obs in q.values():
         if len(r)!=8 or r[0] in out:raise ValueError('H190 duplicate or invalid row')
         o,h,l,c,vol,amt=map(positive,r[1:7])
         if not all((o,h,l,c,vol,amt)) or h<max(o,l,c) or l>min(o,h,c) or vol%1 or amt%1 or not l*.5<=amt/vol<=h*2:raise ValueError('H190 invalid OHLCV/amount')
         out[r[0]]=(c,amt)
-    return out,v['observed_at']
+    return out,max([perf.stamp(v['observed_at']),*(t for _,t in q.values())]).isoformat()
 
 def leaders(master,current,previous,m,d,prev):
     universe={c:r for c,r in master.items() if r['市場']==m}

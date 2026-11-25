@@ -28,7 +28,7 @@ def evidence(r):
 def ctx(r):return r.get('H211技術證據') if isinstance(r.get('H211技術證據'),dict) else {}
 def valid_key(r):return r.get('市場') in ar.URLS and isinstance(r.get('股票代號'),str) and bool(re.fullmatch('[1-9][0-9]{3}',r['股票代號']))
 def tech_ok(r,day):
-    c=ctx(r);return bool(r.get('技術日')==day and r.get('H198資料日期')==day and r.get('H198階段') not in (None,'','待補證') and c.get('流動性通過') is True and all(finite(c.get(k)) for k in ('收盤','MA20','MA20前5日','5日漲跌%','20日漲跌%','量比')) and min(c['收盤'],c['MA20'],c['MA20前5日'],c['量比'])>0)
+    c=ctx(r);return bool((r.get('技術日')==day or (not r.get('技術研究池') and not r.get('技術日'))) and r.get('H198資料日期')==day and r.get('H198階段') not in (None,'','待補證') and c.get('流動性通過') is True and all(finite(c.get(k)) for k in ('收盤','MA20','MA20前5日','5日漲跌%','20日漲跌%','量比')) and min(c['收盤'],c['MA20'],c['MA20前5日'],c['量比'])>0)
 def sector_ok(c):return c.get('全市場技術覆蓋') is True and finite(c.get('產業覆蓋率%')) and c['產業覆蓋率%']>=70 and finite(c.get('產業有效檔數')) and c['產業有效檔數']>=5 and finite(c.get('產業成交額活躍比')) and finite(c.get('產業上漲家數比%')) and isinstance(c.get('產業主流成立'),bool)
 
 def read_history(root,days,now):
@@ -81,7 +81,7 @@ def evaluate(r,day,history,days,legacy,now=None):
     elif prior:status=STATES[2] if prior_day==days[-1] else STATES[3]
     elif seen or not complete:status=STATES[3]
     else:status=STATES[5]
-    action={STATES[0]:'等待反證解除並重新核實原條件',STATES[1]:'補齊同日技術及產業證據',STATES[2]:'保留原研究；等待新突破、研究池或已驗證新財報證據',STATES[3]:'補齊前次證據；不可宣稱新興股票或無新證據',STATES[4]:'核對新增證據與失效條件',STATES[5]:'近10個合格封存窗未入封存技術研究名單；可能曾未覆蓋，不代表首次推薦'}[status]
+    action={STATES[0]:'等待反證解除並重新核實原條件',STATES[1]:'補齊同日技術及產業證據',STATES[2]:'保留原研究；等待新突破、研究池或已驗證新財報證據',STATES[3]:'補齊前次證據；不可宣稱新興股票或無新證據',STATES[4]:'核對新增證據與失效條件',STATES[5]:'近10個合格封存窗未入封存具技術證據研究名單；可能曾未覆蓋，不代表首次推薦'}[status]
     return dict(zip(FIELDS,(None,status,'；'.join(risks+missing) or '未觸發本規則（非無風險）','；'.join(new) or '未核實新增證據',prior_day or (max(seen) if seen else ''),len(seen) if history or legacy else None,f'{len(history)}/{LOOKBACK}合格技術封存窗；已見次數為下限',action)))
 
 def enrich(body,root,market,legacy,now):

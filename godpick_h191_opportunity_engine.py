@@ -182,7 +182,7 @@ def evaluate(*, master, calendars, markets, rows, asof, factors=None, latest_tdc
 
 def run(root=ROOT,now=None,top=20,min_amount=20_000_000):
     root=Path(root); now=(now or datetime.now(archive.TZ)).astimezone(archive.TZ); ar=root/'data/h190'
-    cal,markets,rows,errors=archive._index(ar)
+    cal,markets,rows,errors=archive._index(ar,asof=now)
     cutoff=(now.date() if now.time()>=time(18,15) else now.date()-timedelta(days=1)).isoformat()
     sessions=sorted(d for ds in cal.values() for d in ds if d<=cutoff);asof=sessions[-1] if sessions else cutoff
     # Calendar must have been checked after the target cutoff (even on a holiday), not just an old archive date.

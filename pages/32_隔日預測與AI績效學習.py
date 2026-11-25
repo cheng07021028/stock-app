@@ -163,3 +163,40 @@ if st.checkbox('載入 H210 策略競爭與失效監控（唯讀）'):
             from godpick_h210_strategy_competition import excel as excel_h210
             st.download_button('下載 H210 策略競爭',excel_h210(competition),'H210_StrategyCompetition.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     except Exception as e:st.error('H210 研究驗證失敗：'+str(e)[:180])
+
+
+st.divider()
+st.subheader('H212｜全市場資料修復與績效失敗歸因')
+st.caption('查核60個官方交易日、逐股缺日、財技交叉及封存狀態；修復由後台排程執行，頁面只讀。不得用零值、推算K線或事後資料補造研究。')
+@st.cache_data(ttl=300,show_spinner=False)
+def load_h212(path):
+    from godpick_h212_data_recovery import run
+    return run(Path(path))
+if st.checkbox('載入 H212 資料修復與研究歸因（唯讀）'):
+    try:
+        if st.button('重新讀取 H212'):load_h212.clear()
+        with st.spinner('核對官方日線、研究封存與成熟績效…'):h212=load_h212(str(root))
+        st.caption(h212['version']+'｜'+h212['asof']+'｜'+h212['status'])
+        if h212['status']=='DATA_PENDING':st.warning('資料覆蓋或成熟績效尚不足；不宣稱已達有效策略學習。')
+        st.write(h212['counts'])
+        st.dataframe(pd.DataFrame([{'市場':m,**v} for m,v in h212['gap']['coverage'].items()]),hide_index=True,use_container_width=True,column_config={'ratio':st.column_config.NumberColumn('60日有效覆蓋',format='percent')})
+        st.dataframe(pd.DataFrame(h212['gap']['gap_summary']),hide_index=True,use_container_width=True)
+        st.markdown('**前瞻封存管線**');st.dataframe(pd.DataFrame(h212['capture']),hide_index=True,use_container_width=True)
+        st.markdown('**財報與技術交叉診斷**');st.dataframe(pd.DataFrame(h212['intersection_summary']),hide_index=True,use_container_width=True)
+        with st.expander('逐股缺日、日期補抓與最近修復結果'):
+            st.dataframe(pd.DataFrame(h212['gap']['stock_gaps']),hide_index=True,use_container_width=True)
+            st.dataframe(pd.DataFrame(h212['gap']['day_queue']),hide_index=True,use_container_width=True)
+            st.dataframe(pd.DataFrame(h212['gap']['market_missing']),hide_index=True,use_container_width=True)
+            st.json(h212['gap']['archive_errors'])
+            st.write({k:v for k,v in h212['repair'].items() if k not in ('attempts','tried')})
+            st.dataframe(pd.DataFrame(h212['repair'].get('tried',[])),hide_index=True,use_container_width=True)
+        with st.expander('強勢股對帳與財技逐股分析（非正式漏選證明）'):
+            st.dataframe(pd.DataFrame(h212['leaders']),hide_index=True,use_container_width=True)
+            st.dataframe(pd.DataFrame(h212['intersection']),hide_index=True,use_container_width=True)
+        with st.expander('成熟績效描述性歸因（非因果）'):
+            st.dataframe(pd.DataFrame(h212['outcome_summary']),hide_index=True,use_container_width=True)
+            st.dataframe(pd.DataFrame(h212['outcomes']),hide_index=True,use_container_width=True)
+        if st.checkbox('產生 H212 診斷 Excel'):
+            from godpick_h212_data_recovery import excel as excel_h212
+            st.download_button('下載 H212 資料修復與歸因',excel_h212(h212),'H212_DataRecovery.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    except Exception as e:st.error('H212 資料驗證失敗：'+str(e)[:180])

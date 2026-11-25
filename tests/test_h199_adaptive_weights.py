@@ -41,9 +41,11 @@ def test_market_regime(mode,reg):assert FakeEvidence(mode).regime('TWSE','2026-1
 def test_missing_market():
     e=FakeEvidence(1);e.window=lambda *args:(['x']*6,[{}]*6);assert e.regime('TWSE','2026-11-23',NOW)['狀態']=='待補證'
 
-def test_future_archive(tmp_path):
-    class M:errors=[];market={'TWSE':{'2026-11-23':1}};p=tmp_path
-    path=tmp_path/'daily/TWSE/2026-11-23.json.gz';h.ar._write(path,h.ar._seal({'observed_at':'2026-11-24T18:30:00+08:00','rows':[['2330',100,101,99,100,100,10000,1]]}))
+def test_future_archive(tmp_path,monkeypatch):
+    monkeypatch.setitem(h.ar.MIN_ROWS,'TWSE',1)
+    class M:errors=[];market={'TWSE':{'2026-11-23':1}};p=tmp_path;now=NOW
+    raw={'stat':'OK','date':'20261123','fields':['證券代號','開盤價','最高價','最低價','收盤價','成交股數','成交金額','成交筆數'],'data':[['2330',100,101,99,100,100,10000,1]]}
+    h.ar.save_day(tmp_path,h.ar.parse_daily(raw,'TWSE','2026-11-23',observed_at='2026-11-24T18:30:00+08:00'))
     e=h.Evidence(M());assert not e.quotes('TWSE','2026-11-23',h.p.stamp('2026-11-23T22:00:00+08:00'));assert e.quotes('TWSE','2026-11-23',NOW)['2330']==(100,10000)
 
 def test_repeat_no_penalty():

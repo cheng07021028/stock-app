@@ -143,6 +143,58 @@ def save_day(root, payload):
         return False
     _write(path,payload); _read(path); _invalidate(root); return True
 
+def supplemental_path(root,market,day):
+    return Path(root)/'supplemental'/market/(day+'.json.gz')
+
+
+def _supplement_rows(root,market,day,base,asof):
+    path=supplemental_path(root,market,day)
+    if not path.exists():return {}
+    v=_read(path); obs=datetime.fromisoformat(v['observed_at']); old=datetime.fromisoformat(base['observed_at'])
+    if v.get('version')!='V191-H212-ADDITIVE-QUOTES' or v.get('market')!=market or v.get('day')!=day or v.get('base_sha256')!=_seal(base)['sha256'] or obs<old or obs.tzinfo is None or obs.astimezone(TZ).date().isoformat()<day:raise ValueError('supplement provenance mismatch')
+    # Reparse the original dated official response on every verified read.
+    fresh=_verify(parse_daily(v['raw'],market,day,observed_at=v['observed_at']))
+    original={r[0]:r for r in base['rows']}; new={r[0]:r for r in fresh['rows']}
+    if any(new.get(k)!=r for k,r in original.items()):raise ValueError('supplement original overlap conflict')
+    added={k:r for k,r in new.items() if k not in original}
+    if not added or sorted(added.values())!=v['rows']:raise ValueError('supplement additions mismatch')
+    return {k:(r,obs) for k,r in added.items()} if obs<=asof else {}
+
+
+def quote_rows(root,market,day,asof,*,base=None):
+    """Return each row with its own first verified observation timestamp."""
+    if asof.tzinfo is None:raise ValueError('timezone required')
+    v=base if base is not None else _read(Path(root)/'daily'/market/(day+'.json.gz'))
+    obs=datetime.fromisoformat(v['observed_at'])
+    if v.get('version')!=VERSION or v.get('market')!=market or v.get('day')!=day or v.get('source_url')!=URLS[market] or v.get('basis')!='RAW_UNADJUSTED_FIRST_OBSERVED_BACKFILL' or v.get('row_count')!=len(v['rows']) or len(v['rows'])<MIN_ROWS[market] or len({r[0] for r in v['rows']})!=len(v['rows']):raise ValueError('daily provenance mismatch')
+    result={r[0]:(r,obs) for r in v['rows']} if obs<=asof else {}
+    result.update(_supplement_rows(root,market,day,v,asof))
+    return result
+
+
+def save_supplement(root,market,day,raw,observed_at):
+    """Only add newly evidenced positive-volume rows; never change original bytes."""
+    base=_read(Path(root)/'daily'/market/(day+'.json.gz'))
+    fresh=_verify(parse_daily(raw,market,day,observed_at=observed_at)); obs=datetime.fromisoformat(observed_at)
+    original=quote_rows(root,market,day,obs,base=base)
+    path=supplemental_path(root,market,day)
+    if path.exists():return 0
+    old={r[0]:r for r in base['rows']}; new={r[0]:r for r in fresh['rows']}
+    if obs<datetime.fromisoformat(base['observed_at']) or any(new.get(k)!=r for k,r in old.items()):raise ValueError('official re-fetch conflicts with immutable original')
+    added=sorted(r for k,r in new.items() if k not in old)
+    if not added:return 0
+    payload=_seal({'version':'V191-H212-ADDITIVE-QUOTES','market':market,'day':day,'observed_at':observed_at,'base_sha256':_seal(base)['sha256'],'raw':raw,'rows':added})
+    # Exclusive creation (no overwrite on concurrent requests).
+    path.parent.mkdir(parents=True,exist_ok=True)
+    fd,tmp=tempfile.mkstemp(dir=path.parent,prefix='.h212-')
+    try:
+        with os.fdopen(fd,'wb') as f:f.write(gzip.compress(_bytes(payload),mtime=0));f.flush();os.fsync(f.fileno())
+        try:os.link(tmp,path)
+        except FileExistsError:return 0
+    finally:os.unlink(tmp)
+    _invalidate(root);_supplement_rows(root,market,day,base,obs);return len(added)
+
+
 def parse_calendar(raw, month, *, observed_at):
     """Historical TAIEX daily index dates, not guessed Mon-Fri sessions."""
     if not isinstance(raw,dict) or str(raw.get('stat','')).strip().lower()!='ok': raise ValueError('calendar source unavailable')
@@ -251,15 +303,20 @@ def collect(root=ROOT, *, http=None, now=None, budget=24, target=250, timeout=12
 _LOCK=threading.RLock(); _CACHE={}
 
 def _invalidate(root):
-    with _LOCK: _CACHE.pop(str(Path(root).resolve()),None)
+    with _LOCK:
+        for k in list(_CACHE):
+            if k[0]==str(Path(root).resolve()):_CACHE.pop(k,None)
 
-def _index(root):
-    root=Path(root); key=str(root.resolve())
+def _index(root,asof=None):
+    root=Path(root); key=str(root.resolve()); explicit=asof is not None; asof=asof or datetime.now(TZ)
+    # Do not reuse a current index for a different historical observation cutoff.
+    explicit_key=asof.isoformat() if explicit else "current"
+    key=(key,explicit_key)
     with _LOCK:
         old=_CACHE.get(key); now=time.monotonic()
         if old and now-old[0]<60: return old[1]
         paths=sorted((root/'calendar').glob('*.json'))+sorted((root/'daily').glob('*/*.json.gz'))
-        sig=tuple((str(p),p.stat().st_mtime_ns,p.stat().st_size) for p in paths)
+        sig=tuple((str(p),p.stat().st_mtime_ns,p.stat().st_size) for p in paths+sorted((root/'supplemental').glob('*/*.json.gz')))
         if old and old[2]==sig:
             _CACHE[key]=(now,old[1],sig); return old[1]
         calendars={}; markets={m:{} for m in URLS}; rows=defaultdict(list); errors=[]
@@ -272,19 +329,22 @@ def _index(root):
                     if v['month']<datetime.now(TZ).date().isoformat()[:7] and v['observed_at'][:7]<=v['month']:
                         raise ValueError('past month not finalized by later observation')
                     if any(_day(d)!=d or d[:7]!=v['month'] for d in v['days']): raise ValueError('invalid calendar day')
-                    calendars[v['month']]=set(v['days']); continue
+                    if not explicit or datetime.fromisoformat(v['observed_at'])<=asof:calendars[v['month']]=set(v['days'])
+                    continue
                 m=p.parent.name; d=v['day']
                 if _day(d)!=d or d>datetime.fromisoformat(v['observed_at']).astimezone(TZ).date().isoformat(): raise ValueError('day after observation')
                 if m not in URLS or v['market']!=m or p.name!=d+'.json.gz' or v['source_url']!=URLS[m] or v['row_count']!=len(v['rows']) or len(v['rows'])<MIN_ROWS[m] or v.get('basis')!='RAW_UNADJUSTED_FIRST_OBSERVED_BACKFILL': raise ValueError('day provenance/coverage mismatch')
                 codes=[r[0] for r in v['rows']]
                 if len(set(codes))!=len(codes): raise ValueError('duplicate day keys')
-                markets[m][d]=len(codes)
-                for r in v['rows']: rows[m,r[0]].append((d,*r[1:]))
+                q=quote_rows(root,m,d,asof,base=v)
+                if not q:continue
+                markets[m][d]=len(q)
+                for r,_ in q.values():rows[m,r[0]].append((d,*r[1:]))
             except Exception as e: errors.append(p.name+': '+str(e)[:100])
         data=(calendars,markets,rows,errors)
         _CACHE.clear(); _CACHE[key]=(now,data,sig); return data
 
-def archive_history(code,market,start,end,*,root=ROOT):
+def archive_history(code,market,start,end,*,root=ROOT,asof=None):
     """Return only full requested calendar span with exact stock session coverage.
 
     Missing days, new listing, suspension, stale calendar, unknown market or
@@ -296,7 +356,7 @@ def archive_history(code,market,start,end,*,root=ROOT):
     if not market or not CODE.fullmatch(str(code)): return empty
     start=date.fromisoformat(str(start)[:10]); end=date.fromisoformat(str(end)[:10])
     if start>end or end>datetime.now(TZ).date(): return empty
-    calendars,markets,rows,errors=_index(root)
+    calendars,markets,rows,errors=_index(root,asof=asof)
     months=list(_months(start,end))
     if any(m not in calendars for m in months): return empty
     expected=sorted(d for m in months for d in calendars[m] if start.isoformat()<=d<=end.isoformat())

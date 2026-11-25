@@ -28,11 +28,9 @@ class Evidence:
         if k not in self.cache:
             self.cache[k]=None
             if not self.market.errors and d in self.market.market.get(m,{}):
-                v=ar._read(self.market.p/'daily'/m/(d+'.json.gz'))
-                obs=p.stamp(v['observed_at'])
-                self.cache[k]=(obs,{r[0]:(float(r[4]),float(r[6])) for r in v['rows'] if re.fullmatch('[1-9][0-9]{3}',r[0]) and p.num(r[4]) and p.num(r[6])})
-        v=self.cache[k]
-        return v[1] if v and v[0]<=cut else {}
+                self.cache[k]=ar.quote_rows(self.market.p,m,d,self.market.now)
+        v=self.cache[k] or {}
+        return {c:(float(r[4]),float(r[6])) for c,(r,obs) in v.items() if obs<=cut and re.fullmatch('[1-9][0-9]{3}',c) and p.num(r[4]) and p.num(r[6])}
     def window(self,m,d,cut,n):
         days=self.market.days
         if d not in days:return [],[]

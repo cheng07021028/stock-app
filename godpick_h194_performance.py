@@ -62,7 +62,7 @@ def immutable(path,body):
 class Market:
     def __init__(self,root,now):
         self.root=Path(root);self.now=stamp(now);self.p=self.root/'data/h190'
-        ar._invalidate(self.p);cal,markets,rows,errors=ar._index(self.p)
+        ar._invalidate(self.p);cal,markets,rows,errors=ar._index(self.p,asof=self.now)
         self.errors=errors;self.cal={};self.cal_observed={};self.market=markets;self.cache={};self.bench={}
         # Never use a calendar/daily partition observed after the calculation time.
         for month,days in cal.items():
@@ -77,9 +77,7 @@ class Market:
         if k not in self.cache:
             self.cache[k]={}
             if self.errors or d not in self.market.get(m,{}):return self.cache[k]
-            p=self.p/'daily'/m/(d+'.json.gz');v=ar._read(p)
-            if stamp(v['observed_at'])<=self.now:
-                self.cache[k]={r[0]:r[4] for r in v['rows'] if num(r[4])}
+            self.cache[k]={c:r[4] for c,(r,t) in ar.quote_rows(self.p,m,d,self.now).items() if num(r[4])}
         return self.cache[k]
     def span(self,day,n):
         if day not in self.days:return []
