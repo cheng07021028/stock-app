@@ -130,6 +130,10 @@ def build(root=ROOT,now=None):
 
 def publish(root=ROOT,now=None):
     b=build(root,now);p=Path(root)/REL
+    # H208 runs only in the daily job, never in interactive Excel export.
+    from godpick_h208_recall_review import build as recall_build, VERSION as recall_version
+    try:b['h208']=recall_build(root,b,perf.stamp(b['asof']))
+    except Exception as e:b['h208']={'version':recall_version,'day':b['day'],'asof':b['asof'],'status':'DATA_PENDING','rows':[],'coverage':{},'reasons':{},'errors':[type(e).__name__+': '+str(e)[:180]],'trade_authority_changed':False}
     if p.exists():
         old=ar._read(p)
         if perf.stamp(old['asof'])>perf.stamp(b['asof']):raise ValueError('refuse H206 rollback')
@@ -180,7 +184,14 @@ def compare_export(b,*,research_day,parity,bridge,authority,trace):
         else:status='本輪未見逐股證據／待查'
         x.update({'本輪對帳':status,'H126原始狀態':text(a.get('H126能否買進')) if consistent else '', 'H148漏網位置':text(t.get('H148漏網位置')) if matched else '', 'H148量價狀態':text(t.get('H148量價狀態')) if matched else '', 'H109原風控':text(t.get('H148風控')) if matched else '', '待查原因':text(t.get('H148補證優先')) if matched else '', 'H126原缺失':text(a.get('H126缺失與處置')) if consistent else ''})
         out.append(x)
-    return {'day':day,'market_day':b.get('day',''),'run_id':p.get('run_id',''),'same_run_verified':bool(consistent),'complete_scope':bool(complete and consistent),'h126_buyable':len(positives) if consistent else None,'status_counts':dict(Counter(r['本輪對帳'] for r in out)),'rows':out}
+    result={'day':day,'market_day':b.get('day',''),'run_id':p.get('run_id',''),'same_run_verified':bool(consistent),'complete_scope':bool(complete and consistent),'h126_buyable':len(positives) if consistent else None,'status_counts':dict(Counter(r['本輪對帳'] for r in out)),'rows':out}
+    from godpick_h208_recall_review import valid as recall_valid
+    if recall_valid(b):
+        try:
+            result['h208_comparison']=compare_export({'day':b['day'],'rows':b['h208']['rows']},research_day=research_day,parity=parity,bridge=bridge,authority=authority,trace=trace)
+        except Exception as e:
+            result['h208_comparison_error']=type(e).__name__
+    return result
 
 def append_sheet(wb,b,comparison=None):
     from openpyxl.styles import Font,PatternFill,Alignment
@@ -193,7 +204,16 @@ def append_sheet(wb,b,comparison=None):
     if not rr:ws.append(['無有效市場強勢資料；不可推論無股票'])
     for cell in ws[6]:cell.font=Font(bold=True,color='FFFFFF');cell.fill=PatternFill('solid',fgColor='185C70');cell.alignment=Alignment(wrap_text=True)
     for i,k in enumerate(cols,1):ws.column_dimensions[get_column_letter(i)].width=34 if any(t in k for t in ('原因','狀態','對帳','漏網','缺失')) else 18
-    ws.freeze_panes='D7';ws.auto_filter.ref=f'A6:{get_column_letter(len(cols))}{ws.max_row}';return ws
+    ws.freeze_panes='D7';ws.auto_filter.ref=f'A6:{get_column_letter(len(cols))}{ws.max_row}'
+    # An H208 failure must not remove the original H206 sheet or H126 output.
+    try:
+        from godpick_h208_recall_review import append as recall_append
+        recall_append(wb,b,comparison)
+    except Exception as e:
+        for name in ('H208_潛力召回','H208_漏選複核'):
+            if name in wb.sheetnames:del wb[name]
+        wb.create_sheet('H208_潛力召回').append(['H208暫不可用；原報表不受影響',type(e).__name__])
+    return ws
 
 def workbook(b):
     from openpyxl import Workbook
@@ -211,4 +231,8 @@ def render(root=ROOT):
     st.dataframe(pd.DataFrame(b['rows']),hide_index=True,use_container_width=True)
     with st.expander('來源覆蓋率及前日研究命中'):st.json({'coverage':b['coverage'],'prior_research':b['prior_research'],'joint_research':b.get('joint_research',{}),'errors':b['errors']})
     st.caption('本輪實際 H126 及漏選原因：請看第7頁當輪主管 Excel 的 H206 工作表。')
-    st.download_button('下載 H206 市場差異 Excel',workbook(b),'H206_MarketGap.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    try:
+        from godpick_h208_recall_review import render as recall_render
+        recall_render(b)
+    except Exception as e:st.caption('H208 暫不可用：'+type(e).__name__)
+    st.download_button('下載 H206／H208 市場差異 Excel',workbook(b),'H206_MarketGap.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
