@@ -17866,6 +17866,19 @@ def _build_excel_bytes_fast_h85(
         _h195_ws=wb.create_sheet('H195_聯合決策研究')
         _h195_ws.append(['H195 資料無法讀取，原有報表不受影響', type(_h195_exc).__name__])
 
+    # H206 same-export reconciliation, independent public market snapshot.
+    try:
+        from godpick_h206_market_gap import load as _h206_load, compare_export as _h206_compare, append_sheet as _h206_append
+        _h206_market = _h206_load(Path(__file__).resolve().parents[1])
+        _h206_result = _h206_compare(_h206_market, research_day=locals().get('_h148_research_day'),
+            parity=locals().get('_h154_audit'), bridge=locals().get('_h145_bridge'),
+            authority=tables.get('h126_authority'), trace=locals().get('h148_trace'))
+        _h206_append(wb, _h206_market, _h206_result)
+    except Exception as _h206_exc:
+        if 'H206_市場強勢差異' in wb.sheetnames:
+            del wb['H206_市場強勢差異']
+        wb.create_sheet('H206_市場強勢差異').append(['H206 稽核暫不可用，原報表不受影響', type(_h206_exc).__name__])
+
     try:
         wb.active = 0
     except Exception:
@@ -17918,6 +17931,11 @@ def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: p
     try:
         from godpick_h195_command_center import cache_token as _h195_token
         sig_raw += '|' + _h195_token(Path(__file__).resolve().parents[1])
+        _h206_path = Path(__file__).resolve().parents[1] / 'data/h206/latest.json.gz'
+        sig_raw += '|H206'
+        if _h206_path.is_file():
+            _h206_stat = _h206_path.stat()
+            sig_raw += ':' + str(_h206_stat.st_mtime_ns) + ':' + str(_h206_stat.st_size)
     except Exception:
         sig_raw += '|H195_UNAVAILABLE'
     sig = hashlib.sha256(sig_raw.encode("utf-8")).hexdigest()[:20]
@@ -18129,7 +18147,11 @@ def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFram
     sig = _result_export_signature_v164(rec_df, f"main|{top_n}|V191-H46-EXCEL-NAME-SORTER|V191-H41-RECOMMENDATION-FUNNEL|V191-H42-DUAL-ROUTE-FOCUS|V191-H47-MAINSTREAM-LEADER-STAGE|V191-H66-ADAPTIVE-ALPHA-T1-TIMING-TRUTH-EXCEL|V191-H67-REGIME-SECTOR-CONSENSUS-PREOPEN-TRUTH-EXCEL|V191-H68-EXECUTION-LEARNING-AUTHORITY-EXCEL|V191-H70-COUNTER-REGIME-SESSION-TRUTH-EXCEL|V191-H72-MULTI-MODEL-ALPHA-ENSEMBLE-EXCEL|V191-H73-LEADERSHIP-BREADTH-DISTRIBUTION-TRUTH-EXCEL|V191-H74-FRESH-MAINSTREAM-CAPITAL-ROTATION-TRUTH-EXCEL|V191-H75-EXECUTIVE-DECISION-EXPORT|V191-H76-DAILY-ALPHA-CORE-SPLIT-REPEAT-EVIDENCE|V191-H77-VERIFIED-DELTA-CHASE-ENTRY-PERFORMANCE-BRAKE|V191-H79-MARKET-SESSION-UNIVERSE-ADAPTIVE-TRUTH|{_layout_sig}")
     try:
         from godpick_h195_command_center import cache_token as _h195_token
-        sig += '|' + _h195_token(Path(__file__).resolve().parents[1])
+        sig += '|' + _h195_token(Path(__file__).resolve().parents[1]) + '|H206'
+        _h206_path = Path(__file__).resolve().parents[1] / 'data/h206/latest.json.gz'
+        if _h206_path.is_file():
+            _h206_stat = _h206_path.stat()
+            sig += '|H206:' + str(_h206_stat.st_mtime_ns) + ':' + str(_h206_stat.st_size)
     except Exception:
         sig += '|H195_UNAVAILABLE'
     cache_key = _k("main_export_cache_v164")

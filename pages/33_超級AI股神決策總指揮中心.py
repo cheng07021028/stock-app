@@ -16,6 +16,11 @@ st.title('33｜超級AI股神決策總指揮中心')
 st.caption(H200_VERSION+'｜'+VERSION+'｜自動封存、只讀資料；H126 正式授權維持獨立。')
 for c,p,label in zip(st.columns(4),['7_股神推薦.py','29_主流趨勢與潛力黑馬.py','30_財報成長與合理估值.py','32_隔日預測與AI績效學習.py'],['正式推薦與風控','技術研究','財報研究','績效與預測']):c.page_link('pages/'+p,label=label)
 render_inline(root)
+try:
+    from godpick_h206_market_gap import render as _h206_render
+    _h206_render(root)
+except Exception as _h206_exc:
+    st.caption('H206 稽核暫不可用：'+type(_h206_exc).__name__)
 b,s,msg=load(root)
 if not b:st.info('請確認 GitHub Actions H195 已執行並提交 data/h195/latest.json.gz。');st.stop()
 if s!='CURRENT':
