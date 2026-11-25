@@ -100,7 +100,7 @@ if st.checkbox('載入 H199 市場輪動與權重研究'):
     except Exception as e:st.error('H199 研究驗證失敗：'+str(e)[:180])
 
 st.divider()
-st.subheader('H209｜多策略滾動回測與除權息績效')
+st.subheader('H209.1｜多策略滾動回測與除權息績效')
 st.caption('研究封存後下一交易日開盤模擬進場，按官方交易日出場；含現金股利應收及交易成本。複雜權息只列參考價代理，非真實成交、非買進授權。')
 @st.cache_data(ttl=300,show_spinner=False)
 def load_h209(path):
@@ -110,7 +110,10 @@ if st.checkbox('載入 H209 滾動回測（只讀封存，不連網）'):
     try:
         if st.button('重新讀取 H209'):load_h209.clear()
         with st.spinner('驗證研究、官方行情及權息證據…'):backtest=load_h209(str(root))
-        st.caption(backtest['basis'])
+        st.caption(backtest['revision']+'｜'+backtest['basis'])
+        if backtest['pending']:st.info('尚待處理：'+str(backtest['pending']))
+        with st.expander('上游封存狀態與訊號來源'):
+            st.json(backtest['upstream']);st.json(backtest['source_counts'])
         if backtest['status']=='DATA_PENDING':st.warning('尚無有效成熟淨報酬樣本，不能認定策略有效。')
         st.write({'研究封存筆數':backtest['signal_count'],'成熟策略樣本':backtest['mature_strategy_rows'],'有效淨報酬樣本':backtest['valid_rows'],'排除原因':backtest['reasons']})
         st.dataframe(pd.DataFrame(backtest['summary']),hide_index=True,use_container_width=True)

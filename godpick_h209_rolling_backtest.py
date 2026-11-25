@@ -11,10 +11,12 @@ import io, math, re, statistics, json
 import godpick_h190_market_archive as ar
 import godpick_h194_performance as perf
 
-VERSION='V191-H209-ROLLING-BACKTEST'
+VERSION='V191-H209-ROLLING-BACKTEST'  # immutable archive schema
+REVISION='V191-H209.1'
 ROOT=Path(__file__).resolve().parent
 REL=Path('data/h209/latest.json.gz')
-URLS={'TWSE':'https://www.twse.com.tw/rwd/zh/announcement/TWT49U',
+LEGACY_TWSE='https://www.twse.com.tw/rwd/zh/announcement/TWT49U'
+URLS={'TWSE':'https://www.twse.com.tw/rwd/zh/exRight/TWT49U',
       'TPEX':'https://www.tpex.org.tw/www/zh-tw/bulletin/exDailyQ'}
 HORIZONS=(1,3,5,10,20)
 COST={'shares':1000,'commission':.001425,'min_commission':20.,'sell_tax':.003,'slippage':.001}
@@ -30,17 +32,19 @@ def _dates(raw,table):
     return found
 
 
-def parse_actions(raw,market,day,now,*,start=None,end=None):
+def parse_actions(raw,market,day,now,*,start=None,end=None,source_url=None):
     """A successful HTTP call or an unqualified empty array is NOT coverage.
     Accept only one dated named results table, with complete rows/counts.
     """
     now=perf.stamp(now);day=ar._day(day);start=ar._day(start or day);end=ar._day(end or day)
-    if not start<=day<=end or (date.fromisoformat(end)-date.fromisoformat(start)).days>14 or end>now.date().isoformat():raise ValueError('invalid range')
+    if not start<=day<=end or (date.fromisoformat(end)-date.fromisoformat(start)).days>14 or end>now.date().isoformat() or (end==now.date().isoformat() and now.time()<time(18,15)):raise ValueError('invalid range')
     if market not in URLS or not isinstance(raw,dict) or day>now.date().isoformat() or (day==now.date().isoformat() and now.time()<time(18,15)):
         raise ValueError('invalid market/day/observation')
+    source_url=source_url or URLS[market]
+    if source_url!=URLS[market] and not (market=='TWSE' and source_url==LEGACY_TWSE):raise ValueError('invalid source URL')
     stat=str(raw.get('stat','')).strip().lower()
     if stat not in ('','ok','success'):raise ValueError('source status: '+stat[:100])
-    aliases={'date':('日期','除權息日期','除權除息日期'),'code':('股票代號','證券代號','代號'),'prev':('除權息前收盤價','除權除息前收盤價','除權息前一日收盤價'),'ref':('除權息參考價','除權除息參考價'),'kind':('權/息','權息','權或息','除權息','除權息別','除權息類別'),'value':('權值+息值','權值＋息值','權息值','息值','現金股利')}
+    aliases={'date':('資料日期','日期','除權息日期','除權除息日期'),'code':('股票代號','證券代號','代號'),'prev':('除權息前收盤價','除權除息前收盤價','除權息前一日收盤價'),'ref':('除權息參考價','除權除息參考價'),'kind':('權/息','權息','權或息','除權息','除權息別','除權息類別'),'value':('權值+息值','權值＋息值','權息值','權值加息值','息值','現金股利'),'cash':('現金股利','息值')}
     candidates=[]
     for t in raw.get('tables') or [raw]:
         if not isinstance(t,dict):continue
@@ -52,22 +56,29 @@ def parse_actions(raw,market,day,now,*,start=None,end=None):
     if _dates(raw,t)!={start,end}:raise ValueError('source range not explicitly confirmed')
     rows=t.get('data')
     if not isinstance(rows,list):raise ValueError('missing source data')
+    counts=[]
     for obj in (raw,t):
-        for key in ('total','totalCount','recordsTotal'):
-            if key in obj and int(obj[key])!=len(rows):raise ValueError('partial/paginated source')
+        for key in ('total','totalCount','recordsTotal','recordsFiltered'):
+            if key in obj:
+                count=int(obj[key]);counts.append(count)
+                if count!=len(rows):raise ValueError('partial/paginated source')
+    if not rows and not counts:raise ValueError('empty table without explicit zero count')
     # Explicit dated empty table with zero rows is allowed; generic no-data response is not.
     out=[];seen=set()
     for row in rows:
-        if not isinstance(row,list) or len(row)<=max(i for i in ix.values() if i is not None):raise ValueError('malformed action row')
+        if not isinstance(row,list) or len(row)!=len(t.get('fields',t.get('headers',[]))):raise ValueError('malformed action row')
         d=ar._day(row[ix['date']]);c=str(row[ix['code']]).strip()
         if not start<=d<=end or not re.fullmatch(r'[0-9A-Z]{4,8}',c) or (d,c) in seen:raise ValueError('action identity/date conflict')
         seen.add((d,c));prev=ar._num(row[ix['prev']]);ref=ar._num(row[ix['ref']]);kind=str(row[ix['kind']]).strip()
         value=ar._num(row[ix['value']]) if ix['value'] is not None else None
+        if ix['cash'] is not None:
+            explicit=ar._num(row[ix['cash']])
+            value=explicit if explicit is not None and (value is None or abs(value-explicit)<=.011) else None
         if not kind:raise ValueError('action type missing')
         # A problematic row is retained and blocks that security, not silently dropped.
         cash=value if kind in ('息','除息') and value is not None and value>=0 and prev and ref and abs(prev-ref-value)<=.011 else None
         if d==day:out.append({'code':c,'kind':kind,'previous_close':prev,'reference':ref,'cash':cash})
-    return {'version':VERSION,'market':market,'day':day,'observed_at':now.isoformat(),'source_url':URLS[market],'range_start':start,'range_end':end,'raw':raw,'rows':out}
+    return {'version':VERSION,'market':market,'day':day,'observed_at':now.isoformat(),'source_url':source_url,'range_start':start,'range_end':end,'raw':raw,'rows':out}
 
 
 def action_path(root,m,d):return Path(root)/'data/h209/actions'/m/(d+'.json.gz')
@@ -75,7 +86,7 @@ def action_path(root,m,d):return Path(root)/'data/h209/actions'/m/(d+'.json.gz')
 
 def read_actions(root,m,d,now):
     v=ar._read(action_path(root,m,d));obs=perf.stamp(v['observed_at'])
-    if obs>now or v!=parse_actions(v['raw'],m,d,obs,start=v['range_start'],end=v['range_end']):raise ValueError('action provenance mismatch')
+    if obs>now or v!=parse_actions(v['raw'],m,d,obs,start=v['range_start'],end=v['range_end'],source_url=v['source_url']):raise ValueError('action provenance mismatch')
     return {r['code']:r for r in v['rows']},obs
 
 
@@ -231,7 +242,7 @@ def trade(s,days,e):
 def stats(rows):
     v=[r['net_return'] for r in rows];wins=sum(x>0 for x in v);loss=sum(-x for x in v if x<0)
     pnl=[r['net_pnl'] for r in rows if 'net_pnl' in r];pnl_loss=sum(-x for x in pnl if x<0)
-    return {'有效交易':len(v),'固定千股淨損益合計':sum(pnl) if pnl and len(pnl)==len(v) else None,'現金損益獲利因子':sum(x for x in pnl if x>0)/pnl_loss if pnl_loss and len(pnl)==len(v) else None,'勝率':wins/len(v) if v else None,'平均淨報酬':statistics.mean(v) if v else None,'標準化報酬獲利因子':sum(x for x in v if x>0)/loss if loss else None,'最差單筆日收盤回撤':min((r['trade_mdd'] for r in rows),default=None)}
+    return {'有效交易':len(v),'固定千股淨損益合計':sum(pnl) if pnl and len(pnl)==len(v) else None,'現金損益獲利因子':sum(x for x in pnl if x>0)/pnl_loss if pnl_loss and len(pnl)==len(v) else None,'勝率':wins/len(v) if v else None,'平均淨報酬':statistics.mean(v) if v else None,'中位數淨報酬':statistics.median(v) if v else None,'同樣本原始均值':statistics.mean(r['raw_return'] for r in rows) if rows and all('raw_return' in r for r in rows) else None,'同樣本股利應收合計':sum(r['cash_dividend'] for r in rows) if rows and all('cash_dividend' in r for r in rows) else None,'標準化報酬獲利因子':sum(x for x in v if x>0)/loss if loss else None,'最差單筆日收盤回撤':min((r['trade_mdd'] for r in rows),default=None)}
 
 
 def evaluate(signals,market,e,now):
@@ -254,7 +265,7 @@ def evaluate(signals,market,e,now):
             if d<=end:continue
             end=rs[0]['出場日'];valid=[r for r in rs if r['status']=='VALID_CASH_MODEL'];cov=len(valid)/len(rs)
             # No survivor-only compounded return: all cohort positions must be resolved.
-            chosen.append({'研究日':d,'出場日':end,'決策時間':min(r['決策時間'] for r in rs),'覆蓋率':cov,'候選':len(rs),'有效':len(valid),'淨報酬':statistics.mean(r['net_return'] for r in valid) if cov==1 else None,'已觀測':max((r['resolved_at'] for r in valid),default='') if cov==1 else ''})
+            chosen.append({'研究日':d,'出場日':end,'決策時間':min((r['決策時間'] for r in rs),key=perf.stamp),'覆蓋率':cov,'候選':len(rs),'有效':len(valid),'淨報酬':statistics.mean(r['net_return'] for r in valid) if cov==1 else None,'已觀測':max((r['resolved_at'] for r in valid),default='') if cov==1 else ''})
         for x in chosen:cohorts.append({'市場':m,'策略':strategy,'期間':n,**x})
         valid=[r for r in rr if r['status']=='VALID_CASH_MODEL'];vals=[x['淨報酬'] for x in chosen];eq=[1.]
         if vals and all(x is not None for x in vals):
@@ -262,8 +273,12 @@ def evaluate(signals,market,e,now):
         summary.append({'市場':m,'策略':strategy,'期間':n,'成熟候選':len(rr),'覆蓋率':len(valid)/len(rr),'非重疊窗':len(chosen),'非重疊完整窗':sum(x is not None for x in vals),'期末再平衡淨報酬':eq[-1]-1 if len(eq)>1 else None,'期末再平衡最大回撤':drawdown(eq) if len(eq)>1 else None,**stats(valid)})
         # Fixed-rule walk-forward: 20 prior windows, 10 unseen windows, no parameter fitting.
         for i in range(20,len(chosen)-9,10):
-            train=chosen[i-20:i];test=chosen[i:i+10];cut=perf.stamp(test[0]['決策時間']);ok=[x for x in train if x['淨報酬'] is not None and perf.stamp(x['已觀測'])<=cut];hold=[x for x in test if x['淨報酬'] is not None]
-            folds.append({'市場':m,'策略':strategy,'期間':n,'訓練開始':train[0]['研究日'],'測試開始':test[0]['研究日'],'測試結束':test[-1]['出場日'],'訓練有效窗':len(ok),'測試有效窗':len(hold),'訓練均值':statistics.mean(x['淨報酬'] for x in ok) if len(ok)==20 else None,'樣本外均值':statistics.mean(x['淨報酬'] for x in hold) if len(ok)==20 and len(hold)==10 else None,'狀態':'FIXED_RULE_OOS' if len(ok)==20 and len(hold)==10 else 'DATA_PENDING'})
+            train=chosen[i-20:i];test=chosen[i:i+10];cut=perf.stamp(test[0]['決策時間']);ok=[x for x in train if x['淨報酬'] is not None and perf.stamp(x['已觀測'])<cut];hold=[x for x in test if x['淨報酬'] is not None]
+            oos_ok=len(ok)==20 and len(hold)==10
+            oos_returns=[x['淨報酬'] for x in hold] if oos_ok else []
+            equity=[1.]
+            for x in oos_returns:equity.append(equity[-1]*(1+x))
+            folds.append({'市場':m,'策略':strategy,'期間':n,'訓練開始':train[0]['研究日'],'測試開始':test[0]['研究日'],'測試結束':test[-1]['出場日'],'訓練有效窗':len(ok),'測試有效窗':len(hold),'訓練均值':statistics.mean(x['淨報酬'] for x in ok) if len(ok)==20 else None,'樣本外均值':statistics.mean(x['淨報酬'] for x in hold) if len(ok)==20 and len(hold)==10 else None,'樣本外勝窗率':sum(x>0 for x in oos_returns)/len(oos_returns) if oos_ok else None,'樣本外累積淨報酬':equity[-1]-1 if oos_ok else None,'樣本外期末回撤':drawdown(equity) if oos_ok else None,'狀態':'FIXED_RULE_OOS' if oos_ok else 'DATA_PENDING'})
     return detail,summary,cohorts,folds,required
 
 
@@ -276,7 +291,21 @@ def run(root=ROOT,now=None,*,update=False,budget=24,http=None):
     if update:health=collect_actions(root,m,now,required,budget=budget,http=http)
     rows,summary,cohorts,folds,_=evaluate(ss,m,Evidence(root,m,now),now)
     valid=sum(r['status']=='VALID_CASH_MODEL' for r in rows)
-    out={'version':VERSION,'asof':now.isoformat(),'basis':BASIS,'cost':COST,'capture':capture,'signal_count':len(ss),'mature_strategy_rows':len(rows),'valid_rows':valid,'status':'DATA_PENDING' if not valid else 'RESEARCH_ONLY','trade_authority_changed':False,'archive_errors':m.errors,'collector':health,'reasons':dict(Counter(r['status'] for r in rows)),'summary':summary,'folds':folds,'cohorts':cohorts,'detail':rows}
+    pending=Counter()
+    for s in ss:
+        for n in HORIZONS:
+            ds=m.span(s['signal_day'],n)
+            if not ds or ds[-1]>now.date().isoformat() or (ds[-1]==now.date().isoformat() and now.time()<time(18,15)):
+                pending['未成熟／交易日曆缺口']+=len(s['strategies'])
+    if not ss:pending['尚無前瞻研究封存']=1
+    if m.errors:pending['行情封存驗證異常']=len(m.errors)
+    upstream={}
+    for name in ('h190/health.json','h194/latest.json.gz','h206/latest.json.gz'):
+        try:
+            v=ar._read(root/'data'/name);when=v.get('asof',v.get('observed_at'))
+            if when and perf.stamp(when)<=now:upstream[name]={k:v[k] for k in ('asof','observed_at','status','capture_status','signals','latest_calendar_session','day','errors') if k in v}
+        except (OSError,ValueError,TypeError,KeyError):pass
+    out={'version':VERSION,'revision':REVISION,'pending':dict(pending),'upstream':upstream,'source_counts':dict(Counter(s['source'] for s in ss)),'asof':now.isoformat(),'basis':BASIS,'cost':COST,'capture':capture,'signal_count':len(ss),'mature_strategy_rows':len(rows),'valid_rows':valid,'status':'DATA_PENDING' if not valid else 'RESEARCH_ONLY','trade_authority_changed':False,'archive_errors':m.errors,'collector':health,'reasons':dict(Counter(r['status'] for r in rows)),'summary':summary,'folds':folds,'cohorts':cohorts,'detail':rows}
     if update:ar._write(root/REL,ar._seal({k:v for k,v in out.items() if k not in ('detail','cohorts')}))
     return out
 
@@ -296,4 +325,9 @@ def excel(r):
         for cell in ws[1]:cell.font=Font(bold=True,color='FFFFFF');cell.fill=PatternFill('solid',fgColor='17365D')
         for i,k in enumerate(cols,1):ws.column_dimensions[get_column_letter(i)].width=min(40,max(14,len(k)*2+3))
         ws.freeze_panes='C2';ws.auto_filter.ref=ws.dimensions
+        percent_cols={'覆蓋率','淨報酬','勝率','平均淨報酬','中位數淨報酬','同樣本原始均值','期末再平衡淨報酬','期末再平衡最大回撤','最差單筆日收盤回撤','訓練均值','樣本外均值','樣本外勝窗率','樣本外累積淨報酬','樣本外期末回撤','raw_return','reference_return','net_return','trade_mdd'}
+        for i,k in enumerate(cols,1):
+            if k in percent_cols:
+                for cells in ws.iter_cols(min_col=i,max_col=i,min_row=2):
+                    for cell in cells:cell.number_format='0.00%;[Red]-0.00%' 
     b=io.BytesIO();w.save(b);return b.getvalue()

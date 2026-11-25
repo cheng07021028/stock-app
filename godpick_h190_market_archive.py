@@ -164,7 +164,15 @@ def save_calendar(root,payload):
     if path.exists():
         old=_read(path)
         if not set(old['days']).issubset(p['days']): raise ValueError('calendar revision conflict')
-        if old['days']==p['days'] and not (old['observed_at'][:7]<=p['month']<p['observed_at'][:7]): return False
+        if old['days']==p['days']:
+            old_obs=datetime.fromisoformat(old['observed_at']).astimezone(TZ)
+            new_obs=datetime.fromisoformat(p['observed_at']).astimezone(TZ)
+            month_finalized=old['observed_at'][:7]<=p['month']<p['observed_at'][:7]
+            # The index can appear before 18:15. Same dates are NOT evidence of
+            # post-close confirmation until a fresh official response is received.
+            eod_confirm=(new_obs.date().isoformat()==max(p['days']) and new_obs.time()>=clock(18,15)
+                         and (old_obs.date()!=new_obs.date() or old_obs.time()<clock(18,15)))
+            if new_obs<=old_obs or not (month_finalized or eod_confirm): return False
     _write(path,payload); _invalidate(root); return True
 
 def _months(start,end):
