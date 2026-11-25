@@ -1,0 +1,60 @@
+name: H215 daily data proof and status audit
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '35 15 * * *' # 23:35 Taipei; strict EOD deadline
+permissions:
+  contents: write
+concurrency:
+  group: h215-proof-main
+  cancel-in-progress: false
+jobs:
+  verify:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install 'pandas==2.3.3' 'numpy>=1.26,<3' 'requests>=2.31,<3' 'openpyxl>=3.1.2,<4' 'lxml>=5,<7'
+      - name: Collect positive official status events and report evidence
+        id: audit
+        run: python tools/h215_proof.py --collect --out h215_output
+      - name: Persist only public status evidence
+        if: always()
+        run: |
+          set -euo pipefail
+          if [[ -d data/h215/status ]]; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add -f -- data/h215/status/
+            if ! git diff --cached --quiet; then
+              git commit -m 'data(H215): official status evidence'
+              git pull --rebase origin main
+              git push origin HEAD:main
+            fi
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: H215-proof-${{ github.run_id }}
+          path: h215_output/
+          retention-days: 90
+          if-no-files-found: error
+      - name: Enforce daily deadline after preserving evidence
+        if: always()
+        run: |
+          python - <<'PY'
+          import json,sys,os
+          h=json.load(open('h215_output/health.json',encoding='utf-8'));g=h['gate']
+          with open(os.environ['GITHUB_STEP_SUMMARY'],'a',encoding='utf-8') as f:
+              f.write('H215 daily status: '+g['daily_status']+'\n\n')
+              for x in g['daily_checks']:f.write('- '+x['環節']+': '+x['狀態']+'\n')
+              f.write('\nMature evidence: '+g['mature_status']+'; shadow: '+g['shadow_status']+'\n')
+          if g['daily_status']=='FAIL_DAILY' or (os.environ.get('GITHUB_EVENT_NAME')=='schedule' and g['daily_status'] not in ('PASS_DAILY','NON_SESSION')):sys.exit(2)
+          PY
