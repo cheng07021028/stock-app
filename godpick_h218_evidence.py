@@ -16,12 +16,11 @@ TRAIN,HOLD,MIN_GROUP=20,10,3
 EDGE,WIN=.005,.6
 
 def due_span(m,day,n,now):
-    ds=m.span(day,n)
-    if not ds or len(ds)!=n+1 or ds[-1]>now.date().isoformat() or (ds[-1]==now.date().isoformat() and now.time()<time(18,15)):return []
-    return ds
+    return p.confirmed_span(m,day,n,now)
+
 
 def scope(m,signals,now):
-    days=[d for d in m.days if d<now.date().isoformat() or (d==now.date().isoformat() and now.time()>=time(18,15))]
+    days=[d for d in m.days if d<now.date().isoformat() or (d==now.date().isoformat() and now.time()>=time(18,15) and m.today_confirmed(d))]
     base={(x,d) for x in ar.URLS for d in days[-60:][1:]}
     required={(s['market'],d) for s in signals if s['source']!='H194' or s.get('tier') in p.TIERS[:3] for n in p.HORIZONS for d in due_span(m,s['signal_day'],n,now)[1:]}
     return base,required,days
@@ -120,7 +119,7 @@ def run(root=ROOT,now=None):
     h194=[{**s,'source':'H194'} for s in ss.values() if p.stamp(s['created_at'])<=now];h209=[s for s in b.read_signals(root,now,ledger=(ss,oo)) if s['source']=='H209'];signals=h194+h209
     action_rows,action_summary=audit_actions(root,m,signals,now);detail,summary=reconcile(signals,oo,m,b.Evidence(root,m,now),now);pairs=source_pairs(detail);reviews=review(pairs)
     # Same-date recall readiness is a diagnostic only, never backdate a missing partition.
-    day=max((d for d in m.days if d<now.date().isoformat() or (d==now.date().isoformat() and now.time()>=time(18,15))),default='');recall={}
+    day=max((d for d in m.days if d<now.date().isoformat() or (d==now.date().isoformat() and now.time()>=time(18,15) and m.today_confirmed(d))),default='');recall={}
     if day and not m.errors:
         from godpick_h206_market_gap import build as gap
         from godpick_h208_recall_review import build as recall_build

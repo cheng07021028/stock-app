@@ -42,7 +42,7 @@ def test_tpex_never_twse(monkeypatch):
 
 def candidate(c='1001',group=h.FULL):return {'市場':'TWSE','股票代號':c,'股票名稱':'=SUM(1,2)','資料日':D,'原始收盤':100,'籌碼分組':group}
 def current(rows=None):return {'day':D,'financial_day':D,'coverage':{'TWSE':{'達標':True}},'rows':[candidate()] if rows is None else rows,'sectors':[],'audit':[],'source_errors':[],'financial_errors':[]}
-def market():return SimpleNamespace(errors=[],days=[D,T],today_confirmed=lambda day:day==D,span=lambda day,n:[D,T] if n==1 else [])
+def market(confirmed=D):return SimpleNamespace(errors=[],days=[D,T],today_confirmed=lambda day:day==confirmed,span=lambda day,n:[D,T] if n==1 else [])
 def test_capture_and_immutable(tmp_path):
     m=market();assert h.snapshot(tmp_path,NOW,current(),m)=='CAPTURED';file=tmp_path/h.REL/(D+'.json.gz');before=file.read_bytes();assert h.snapshot(tmp_path,NOW,current([candidate('1002')]),m)=='ALREADY_CAPTURED';assert file.read_bytes()==before and h.read_history(tmp_path,NOW)[0]['rows'][0]['股票代號']=='1001'
 
@@ -59,8 +59,8 @@ def test_feedback_unknown_excluded_and_full_required(monkeypatch):
     rows=[candidate(str(1001+i),h.FULL if i<3 else h.CONTROL if i<6 else h.UNKNOWN) for i in range(7)]
     hist=[{'day':D,'created_at':NOW.isoformat(),'rows':rows}]
     def trade(s,ds,e):return {'status':'VALID_CASH_MODEL','net_return':.03 if int(s['code'])<=1003 else .01,'resolved_at':LATER.isoformat()}
-    monkeypatch.setattr(h.b,'trade',trade);d,p,r=h.feedback(hist,market(),None,LATER);assert len(d)==35 and len(p)==1 and p[0]['籌碼雙證據相對差']==pytest.approx(.02) and p[0]['籌碼待補']==1 and r[0]['狀態']=='BASELINE_ONLY'
-    monkeypatch.setattr(h.b,'trade',lambda s,ds,e: {'status':'缺權息'} if s['code']=='1001' else trade(s,ds,e));_,p,_=h.feedback(hist,market(),None,LATER);assert p[0]['籌碼雙證據相對差'] is None
+    monkeypatch.setattr(h.b,'trade',trade);d,p,r=h.feedback(hist,market(T),None,LATER);assert len(d)==35 and len(p)==1 and p[0]['籌碼雙證據相對差']==pytest.approx(.02) and p[0]['籌碼待補']==1 and r[0]['狀態']=='BASELINE_ONLY'
+    monkeypatch.setattr(h.b,'trade',lambda s,ds,e: {'status':'缺權息'} if s['code']=='1001' else trade(s,ds,e));_,p,_=h.feedback(hist,market(T),None,LATER);assert p[0]['籌碼雙證據相對差'] is None
 
 def test_feedback_before_close(monkeypatch):
     monkeypatch.setattr(h.b,'trade',lambda *a:pytest.fail('future trade'))

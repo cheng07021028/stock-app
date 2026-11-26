@@ -490,3 +490,19 @@ if st.checkbox('載入 H225 統一驗收（唯讀）'):
             from godpick_h225_integrated_quality import excel as excel_h225
             st.download_button('下載 H225 統一驗收',excel_h225(h225),'H225_IntegratedQuality.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     except Exception as ex:st.error('H225 統一驗收失敗：'+str(ex)[:180])
+
+
+st.subheader('H226｜正式實戰驗收及資料缺口待辦')
+if st.checkbox('載入 H226 實戰驗收（唯讀）'):
+    try:
+        from godpick_h226_live_acceptance import run as live_acceptance,excel as live_excel
+        with st.spinner('核對首批績效、實際資料缺口及研究證據…'):h226=live_acceptance(Path(root))
+        st.caption(h226['version']+'｜'+h226['asof']+'｜'+h226['day'])
+        st.warning('原價、淨績效及預測準確率分開；單批描述性結果不得調整正式權重。')
+        st.write(h226['status'],h226['batch_status'],h226['counts'])
+        st.dataframe(pd.DataFrame(h226['batch']),hide_index=True,use_container_width=True)
+        st.dataframe(pd.DataFrame(h226['tasks']),hide_index=True,use_container_width=True)
+        with st.expander('個股缺日與強勢漏選'):st.dataframe(pd.DataFrame(h226['stock_gaps']),hide_index=True,use_container_width=True);st.dataframe(pd.DataFrame(h226['miss']),hide_index=True,use_container_width=True)
+        if st.checkbox('產生 H226 實戰驗收 Excel'):
+            st.download_button('下載 H226 實戰驗收',live_excel(h226),'H226_LiveAcceptance.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    except Exception as ex:st.error('H226 驗收失敗：'+str(ex)[:180])

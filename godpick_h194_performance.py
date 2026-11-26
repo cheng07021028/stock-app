@@ -101,14 +101,22 @@ class Market:
                 except (ImportError,OSError,ValueError,KeyError,TypeError):pass
         return self.bench[d]
 
+def confirmed_span(market,day,n,now):
+    """A same-day target requires the official end-of-session calendar observation."""
+    ds=market.span(day,n)
+    if not ds or len(ds)!=n+1 or ds[-1]>now.date().isoformat():return []
+    if ds[-1]==now.date().isoformat() and (now.time()<time(18,15) or not market.today_confirmed(ds[-1])):return []
+    return ds
+
+
 def settle(signals,outcomes,market,now):
     new=[]; gaps=Counter(); ts=now.isoformat()
     for k,s in signals.items():
         if stamp(s['created_at'])>=now:continue
         for n in HORIZONS:
             if (*k,n) in outcomes:continue
-            ds=market.span(s['signal_day'],n)
-            if not ds or ds[-1]>now.date().isoformat() or (ds[-1]==now.date().isoformat() and now.time()<time(18,15)):gaps['未成熟或交易日曆缺口']+=1;continue
+            ds=confirmed_span(market,s['signal_day'],n,now)
+            if not ds:gaps['未成熟或交易日曆缺口']+=1;continue
             prices=[market.quotes(s['market'],d).get(s['code']) for d in ds]
             if any(not num(x) for x in prices):gaps['缺官方連續行情（不跳過停牌）']+=1;continue
             if prices[0]!=s['base_close']:gaps['基準價衝突']+=1;continue

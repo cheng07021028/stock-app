@@ -122,14 +122,14 @@ def gate(label,valid,total,action,market='雙市場',*,ready=True,at_least=False
 def fingerprint(root):
     return (ar._archive_manifest(Path(root)/'data/h190')[1],rotation.source_fingerprint(root),scenarios.signature(root),evidence.fingerprint(root),tuple((str(f),f.stat().st_size,f.stat().st_mtime_ns,f.stat().st_ino) for f in sorted([*Path(root,'data/h224/daily').glob('*.json.gz'),*Path(root,'data/h195').glob('*.json.gz')])))
 
-def run(root=ROOT,now=None):
+def run(root=ROOT,now=None,*,include_detail=False):
     root=Path(root);now=p.stamp(now or datetime.now(ar.TZ));sig=fingerprint(root);m=p.Market(root,now);day,items,source,history,errors=snapshots(root,m,now)
     allrows,short,counts=consolidate(items,m,day);review=first.run(root,now);c=closure.inspect(root,now);scope=scenarios.audit(root,now);
     from godpick_h191_opportunity_engine import run as technical
     tech=technical(root,now=now,top=100);
     ss,oo=p.read_ledger(root);signals=[{**s,'source':'H194'} for s in ss.values() if p.stamp(s['created_at'])<=now]+[s for s in back.read_signals(root,now,ledger=(ss,oo)) if s['source']=='H209']
     h224_signals=[{'market':r['市場'],'signal_day':v['day'],'source':'H224'} for v in history for r in v['rows'] if r.get('H220財報交叉一致') is True and p.num(r.get('H220原始收盤'))]
-    _,actions=evidence.audit_actions(root,m,signals+h224_signals,now)
+    action_rows,actions=evidence.audit_actions(root,m,signals+h224_signals,now)
     gates=[]
     # Health collector status is not historical completeness; keep actual observation time.
     health=c['financial_health'];fresh=False
@@ -149,8 +149,13 @@ def run(root=ROOT,now=None):
     except Exception as exc:early=[];errors.append('H220 history: '+str(exc)[:160])
     detail,maturity=mature(history,m,back.Evidence(root,m,now),now,early)
     errors+=list(m.errors)+review['errors']+c['errors']+[r['原因'] for r in scope if r['狀態']=='INVALID']
+    extra={}
+    if include_detail:
+        from godpick_h212_data_recovery import gaps
+        recovery=gaps(root,now,technical=tech)
+        extra={'first_errors':list(m.errors),'first_detail':review['first_detail'],'first':review['first'],'miss':review['miss'],'flows':c['flows'],'action_rows':action_rows,'recovery':recovery,'financial_health':health,'first_signals':[s for s in signals if s['source']=='H194' and s['signal_day']==review['counts']['首批研究日']]}
     if sig!=fingerprint(root):raise RuntimeError('H225 source changed during review; retry')
-    return {'version':VERSION,'asof':now.isoformat(),'day':day,'status':'DATA_GATES_PASS' if gates and all(r['狀態']=='PASS' for r in gates) and not errors else 'EVIDENCE_PENDING','gates':gates,'sources':source,'rows':allrows,'shortlist':short,'counts':counts,'first_counts':review['counts'],'recall':review['recall'],'recall_gaps':review['recall_gaps'],'financial_periods':c['financial'],'scope':scope,'actions':actions,'maturity':maturity,'detail':detail,'errors':errors,'trade_authority_changed':False,'weight_multiplier':1.0}
+    return {**extra,'version':VERSION,'asof':now.isoformat(),'day':day,'status':'DATA_GATES_PASS' if gates and all(r['狀態']=='PASS' for r in gates) and not errors else 'EVIDENCE_PENDING','gates':gates,'sources':source,'rows':allrows,'shortlist':short,'counts':counts,'first_counts':review['counts'],'recall':review['recall'],'recall_gaps':review['recall_gaps'],'financial_periods':c['financial'],'scope':scope,'actions':actions,'maturity':maturity,'detail':detail,'errors':errors,'trade_authority_changed':False,'weight_multiplier':1.0}
 
 def excel(r):
     from openpyxl import Workbook

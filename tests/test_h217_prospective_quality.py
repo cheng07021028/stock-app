@@ -39,6 +39,7 @@ def test_duplicate():
 
 def market(days):
     class M:
+        def today_confirmed(self,d):return d in days
         def span(self,d,n):
             if d not in days:return []
             ds=days[days.index(d):days.index(d)+n+1];return ds if len(ds)==n+1 else []

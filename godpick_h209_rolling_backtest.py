@@ -312,8 +312,8 @@ def evaluate(signals,market,e,now):
     detail=[];groups=defaultdict(list);required=set()
     for s in signals:
         for n in HORIZONS:
-            ds=market.span(s['signal_day'],n)
-            if not ds or ds[-1]>now.date().isoformat() or (ds[-1]==now.date().isoformat() and now.time()<time(18,15)):continue
+            ds=perf.confirmed_span(market,s['signal_day'],n,now)
+            if not ds:continue
             required.update((s['market'],d) for d in ds[1:])
             t=trade(s,ds,e)
             for strategy in s['strategies']:
@@ -371,8 +371,8 @@ def run(root=ROOT,now=None,*,update=False,budget=24,http=None):
     pending=Counter()
     for s in ss:
         for n in HORIZONS:
-            ds=m.span(s['signal_day'],n)
-            if not ds or ds[-1]>now.date().isoformat() or (ds[-1]==now.date().isoformat() and now.time()<time(18,15)):
+            ds=perf.confirmed_span(m,s['signal_day'],n,now)
+            if not ds:
                 pending['未成熟／交易日曆缺口']+=len(s['strategies'])
     if not ss:pending['尚無前瞻研究封存']=1
     if m.errors:pending['行情封存驗證異常']=len(m.errors)
