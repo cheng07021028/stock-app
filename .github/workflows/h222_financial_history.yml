@@ -5,6 +5,9 @@ on:
       months:
         description: 'Historical months (13-36)'
         default: '24'
+      company_codes:
+        description: 'Optional company history fallback: comma-separated stock codes (1-20); blank = market bulk'
+        default: ''
       quarters:
         description: 'Historical quarters (8-12)'
         default: '8'
@@ -12,6 +15,7 @@ on:
     branches: [main]
     paths:
       - 'godpick_h222_financial_history.py'
+      - 'godpick_h231_company_history.py'
       - 'tools/h222_history.py'
       - '.github/workflows/h222_financial_history.yml'
   schedule:
@@ -40,7 +44,13 @@ jobs:
         env:
           MONTHS: ${{ inputs.months || '24' }}
           QUARTERS: ${{ inputs.quarters || '8' }}
-        run: python tools/h222_history.py --collect --months "$MONTHS" --quarters "$QUARTERS" --budget 8
+          COMPANY_CODES: ${{ inputs.company_codes || '' }}
+        run: |
+          if [[ -n "$COMPANY_CODES" ]]; then
+            python tools/h222_history.py --collect --quarters "$QUARTERS" --budget 8 --company-codes "$COMPANY_CODES"
+          else
+            python tools/h222_history.py --collect --months "$MONTHS" --quarters "$QUARTERS" --budget 8
+          fi
       - name: Persist public historical evidence only
         if: always()
         shell: bash
