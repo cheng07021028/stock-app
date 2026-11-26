@@ -5,7 +5,7 @@ Separate immutable period partitions; never rewrite H192 or trading ledgers.
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
-import gzip, hashlib, os, re, tempfile, unicodedata
+import gzip, hashlib, json, os, re, tempfile, unicodedata
 import godpick_h190_market_archive as ar
 import godpick_h192_financial_growth as fin
 
@@ -16,6 +16,9 @@ QUARTER_URL=HOST+'/mops/web/ajax_t163sb04'
 MARKETS={'TWSE':('sii','上市'),'TPEX':('otc','上櫃')}
 LIMITS={'TWSE':500,'TPEX':350}
 MAX_RAW=8_000_000
+SCHEMA_REVISION="H230"
+GROSS_PRIMARY=("營業毛利(毛損)","營業毛利")
+GROSS_NET=("營業毛利(毛損)淨額","營業毛利淨額")
 
 
 def source_url(kind,market,p):
@@ -62,6 +65,11 @@ def _rows(soup,kind):
                 i+=w
             labels=[active.get(j,'') for j in range(max(active,default=-1)+1)]
             hits={k:[i for i,x in enumerate(labels) if x in aliases] for k,aliases in cols.items()}
+            if kind=='ytd':
+                # Gross and gross-net are distinct official fields, not aliases.
+                primary=[i for i,x in enumerate(labels) if x in GROSS_PRIMARY]
+                net=[i for i,x in enumerate(labels) if x in GROSS_NET]
+                hits['gross_profit_ytd']=primary if len(primary)==1 and len(net)<=1 else []
             if all(len(x)==1 for x in hits.values()):ix={k:x[0] for k,x in hits.items()};width=len(labels);continue
             if ix is None or len(labels)!=width:continue
             code=labels[ix['code']]
@@ -77,6 +85,67 @@ def _rows(soup,kind):
     return out
 
 
+def structured_rows(market,p,raw,observed):
+    """Official general-industry current response, not historical request parameters.
+    Only rows explicitly dated to the requested quarter are eligible.
+    Exact named gross (not gross-net) and other five-field comparisons.
+    """
+    if not isinstance(raw,list) or len(raw)>5000:raise ValueError('invalid structured response')
+    out=[]
+    for r in raw:
+        if not isinstance(r,dict):continue
+        keys=[norm(k) for k in r]
+        if len(keys)!=len(set(keys)):continue
+        r=dict(zip(keys,r.values()))
+        def one(names):
+            vals=[r[k] for k in names if k in r]
+            return vals[0] if len(vals)==1 else None
+        code=str(one(('公司代號','SecuritiesCompanyCode','CompanyCode')) or '').strip()
+        year=one(('年度','Year'));q=one(('季別','Season','Quarter'))
+        period=fin.quarter(f'{year}Q{str(q).upper().removeprefix("Q")}')
+        report=fin.day(one(('出表日期','Date')))
+        if not re.fullmatch(r'[1-9]\d{3}',code) or period!=p or not report or report>observed.date().isoformat() or report<fin.period_end('ytd',p).isoformat():continue
+        aliases={**_columns('ytd'),'gross_profit_ytd':GROSS_PRIMARY}
+        vals={k:fin.num(one(names)) for k,names in aliases.items() if k!='code'}
+        if any(v is None for v in vals.values()) or vals['revenue_ytd']<=0:continue
+        out.append({'code':code,**vals})
+    counts=Counter(r['code'] for r in out)
+    return {r['code']:r for r in out if counts[r['code']]==1}
+
+
+def anchored_rows(market,p,html,observed,anchor):
+    """A title with only market/quarter is insufficient on its own. Bind every
+    published row to a same-market, explicitly dated official structured row.
+    No extrapolation from a sample of companies, no source-unit conversion guess.
+    """
+    if not isinstance(anchor,dict) or anchor.get('url')!=fin.URLS['ytd',market]:raise ValueError('official anchor source mismatch')
+    at=fin.moment(anchor.get('observed_at'))
+    if not at or at>observed or fin.period_end('ytd',p)>=at.date():raise ValueError('anchor observation invalid')
+    raw=anchor.get('raw')
+    if not isinstance(raw,str) or len(raw.encode('utf-8'))>MAX_RAW or hashlib.sha256(raw.encode('utf-8')).hexdigest()!=anchor.get('sha256'):raise ValueError('anchor hash invalid')
+    soup=soup_of(html);text=norm(soup.get_text(' ',strip=True));label=MARKETS[market][1];other='上櫃' if market=='TWSE' else '上市'
+    n=p%4+1;cn='一二三四'[n-1]
+    headings=' '.join(norm(t.get_text(' ',strip=True)) for t in soup.find_all(['title','h1','h2','h3','h4','caption','center','b','strong','div','p']) if 0<len(t.get_text(strip=True))<220)
+    if not re.search(rf'{label}公司(?:第)?(?:0?{n}|{cn})季資料',headings) or re.search(rf'{other}公司(?:第)?(?:[一二三四]|0?[1-4])季資料',headings):raise ValueError('quarter anchor market/title mismatch')
+    if re.search(r'單季|當季金額',headings) or re.search(r'單位[:：]?(?:新臺幣|新台幣)?(?:美元|人民幣|港幣|百萬元|萬元|元(?!/股))',text):raise ValueError('quarter explicit basis/unit conflict')
+    periods=re.findall(r'(\d{3,4})年(?:度)?第?([一二三四]|0?[1-4])季',headings)
+    if any(int(y) not in (p//4,p//4-1911) or ('一二三四'.index(q)+1 if q in '一二三四' else int(q))!=n for y,q in periods):raise ValueError('quarter explicit period conflict')
+    refs=structured_rows(market,p,json.loads(raw),at)
+    rows=_rows(soup,'ytd')
+    # Compare every admitted row. An unmatched row stays outside the verified set.
+    matches=[r for r in rows if refs.get(r['code'])==r]
+    if len(matches)<LIMITS[market] or len(matches)*100<len(rows)*95 or len(matches)*100<len(refs)*95:raise ValueError(f'quarter anchor coverage insufficient: {len(matches)}/{len(rows)} HTML, {len(refs)} official')
+    return matches
+
+
+def reparse_partition(v,kind,market,p):
+    observed=fin.moment(v['observed_at'])
+    if v.get('anchor') is not None:
+        if kind!='ytd':raise ValueError('unexpected anchor')
+        return anchored_rows(market,p,v['html'],observed,v['anchor'])
+    return parse(kind,market,p,v['html'],observed)
+
+
 def parse(kind,market,p,html,observed):
     if market not in MARKETS or kind not in ('revenue','ytd'):raise ValueError('invalid source')
     if observed.tzinfo is None or fin.period_end(kind,p)>=observed.date():raise ValueError('future/unclosed statement')
@@ -90,8 +159,8 @@ def parse(kind,market,p,html,observed):
         # Quarter historical POST response format must confirm these independently.
         # An unlabelled single-quarter table must never be treated as YTD.
         headings=' '.join(norm(t.get_text(' ',strip=True)) for t in soup.find_all(['title','h1','h2','h3','h4','caption','center','b','strong','div','p']) if len(t.get_text(strip=True))<220)
-        if not re.search(rf'{yrs}年(?:度)?第?0?{n}季',headings) or not re.search(rf'{label}公司',headings) or '綜合損益' not in headings or '累計' not in headings or not re.search(r'單位[:：]?(?:新臺幣|新台幣)?千元',text):raise ValueError('quarter market/period/YTD/units not confirmed')
-        if re.search(r'單位[:：]?(?:美元|人民幣|港幣)',text):raise ValueError('mixed currency units')
+        if not re.search(rf'{yrs}年(?:度)?第?(?:0?{n}|{"一二三四"[n-1]})季',headings) or not re.search(rf'{label}公司',headings) or '綜合損益' not in headings or '累計' not in headings or not re.search(r'單位[:：]?(?:新臺幣|新台幣)?千元',text):raise ValueError('quarter market/period/YTD/units not confirmed')
+        if re.search(r'單位[:：]?(?:美元|人民幣|港幣|百萬元|萬元)',text) or re.search(r'單季|當季金額',headings):raise ValueError('mixed currency units or statement basis')
     rows=_rows(soup,kind)
     if not rows:raise ValueError('no verified named financial rows')
     return rows
@@ -122,6 +191,7 @@ def read_partition(path,kind,market,p):
     if v.get('version')!=VERSION or v.get('kind')!=kind or v.get('market')!=market or v.get('period')!=p or v.get('url')!=source_url(kind,market,p) or not t or fin.period_end(kind,p)>=t.date():raise ValueError('partition identity mismatch')
     html=v.get('html');rows=v.get('rows')
     if not isinstance(html,str) or hashlib.sha256(html.encode('utf-8')).hexdigest()!=v.get('raw_sha256') or not isinstance(rows,list) or len(rows)<LIMITS[market] or len({r['code'] for r in rows})!=len(rows):raise ValueError('partition evidence invalid')
+    if kind=='ytd' and reparse_partition(v,kind,market,p)!=rows:raise ValueError('quarter raw/parsed rows mismatch')
     return v
 
 
@@ -160,11 +230,12 @@ def collect(root=ROOT,*,now=None,months=13,quarters=8,budget=8,http=None):
     for kind,market,p in scope:
         path=partition(root,kind,market,p);key=f'{kind}:{market}:{p}';row={'kind':kind,'market':market,'period':fin.monthstr(p) if kind=='revenue' else fin.qstr(p)};report.append(row)
         if path.exists():
-            try:v=read_partition(path,kind,market,p);row.update(status='VERIFIED',rows=len(v['rows']))
+            try:v=read_partition(path,kind,market,p);row.update(status='VERIFIED',rows=len(v['rows']),verification='DUAL_OFFICIAL_ROW_MATCH' if v.get('anchor') is not None else 'EXPLICIT_REPORT_METADATA')
             except Exception as e:row.update(status='INVALID_EXISTING',error=str(e)[:200])
             continue
         prev=fin.moment(attempts.get(key,{}).get('at'))
-        if requests_count>=budget or failures[kind,market]>=2 or (prev and now-prev<timedelta(hours=12)):
+        schema_retry=(kind=='ytd' and attempts.get(key,{}).get('error')=='quarter market/period/YTD/units not confirmed' and attempts.get(key,{}).get('schema_revision')!=SCHEMA_REVISION)
+        if requests_count>=budget or failures[kind,market]>=2 or (prev and now-prev<timedelta(hours=12) and not schema_retry):
             row['status']='PENDING';continue
         url=source_url(kind,market,p);requests_count+=1;html=None
         try:
@@ -179,16 +250,29 @@ def collect(root=ROOT,*,now=None,months=13,quarters=8,budget=8,http=None):
                 try:html=raw.decode(enc);break
                 except UnicodeDecodeError:continue
             else:raise ValueError('source encoding unknown')
-            observed=now if fixed else datetime.now(ar.TZ);rows=parse(kind,market,p,html,observed)
+            observed=now if fixed else datetime.now(ar.TZ);anchor=None
+            try:rows=parse(kind,market,p,html,observed)
+            except ValueError as strict_error:
+                # Current structured API does not provide arbitrary historical periods.
+                # Only attempt the latest expected quarter and never exceed request budget.
+                if kind!='ytd' or p!=fin.expected_periods(now)[1] or str(strict_error)!='quarter market/period/YTD/units not confirmed' or requests_count>=budget:raise
+                anchor_url=fin.URLS['ytd',market];requests_count+=1
+                if not fixed:time.sleep(1)
+                rr=http('GET',anchor_url,timeout=(5,20),allow_redirects=False,headers={'User-Agent':'StockApp-H230-public-research/1.0','Accept':'application/json'})
+                if rr.status_code!=200 or rr.url.split('?')[0]!=anchor_url or len(rr.content)>MAX_RAW:raise ValueError('official structured anchor response invalid')
+                anchor_raw=rr.content.decode('utf-8-sig');observed=now if fixed else datetime.now(ar.TZ)
+                anchor={'url':anchor_url,'observed_at':observed.isoformat(),'raw':anchor_raw,'sha256':hashlib.sha256(anchor_raw.encode('utf-8')).hexdigest()}
+                rows=anchored_rows(market,p,html,observed,anchor)
             if len(rows)<LIMITS[market]:raise ValueError(f'LOW_COVERAGE_{len(rows)}')
             body={'version':VERSION,'kind':kind,'market':market,'period':p,'url':url,'observed_at':observed.isoformat(),'raw_sha256':hashlib.sha256(html.encode('utf-8')).hexdigest(),'html':html,'rows':rows}
-            _persist(path,body);read_partition(path,kind,market,p);row.update(status='VERIFIED_SAVED',rows=len(rows))
+            if anchor is not None:body['anchor']=anchor
+            _persist(path,body);read_partition(path,kind,market,p);row.update(status='VERIFIED_SAVED',rows=len(rows),verification='DUAL_OFFICIAL_ROW_MATCH' if anchor is not None else 'EXPLICIT_REPORT_METADATA')
         except Exception as e:
             failures[kind,market]+=1;row.update(status='REJECTED',error=str(e)[:200])
             if html is not None:
                 try:row['diagnostic']=response_diagnostic(html)
                 except Exception:pass
-        attempts[key]={'at':(now if fixed else datetime.now(ar.TZ)).isoformat(),'status':row['status'],'error':row.get('error','')}
+        attempts[key]={'at':(now if fixed else datetime.now(ar.TZ)).isoformat(),'status':row['status'],'error':row.get('error',''),'schema_revision':SCHEMA_REVISION}
     result={'version':VERSION,'asof':(now if fixed else datetime.now(ar.TZ)).isoformat(),'requests':requests_count,'scope':report,'attempts':attempts,'status':'VERIFIED_SCOPE' if all(x['status'] in ('VERIFIED','VERIFIED_SAVED') for x in report) else 'EVIDENCE_PENDING','trade_authority_changed':False}
     ar._write(healthpath,ar._seal(result));return result
 

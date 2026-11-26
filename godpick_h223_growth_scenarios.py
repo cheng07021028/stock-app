@@ -63,7 +63,7 @@ def audit(root,now,months=24,quarters=8):
                 v=hist.read_partition(path,k,m,p);ts=fin.moment(v['observed_at'])
                 if ts>now:row['狀態']='NOT_YET_OBSERVED'
                 else:
-                    parsed=hist.parse(k,m,p,v['html'],ts)
+                    parsed=hist.reparse_partition(v,k,m,p)
                     if parsed!=v['rows']:raise ValueError('raw/parsed rows mismatch')
                     row.update(狀態='VERIFIED',有效筆數=len(parsed))
             except Exception as e:row.update(狀態='INVALID',原因=str(e)[:180])
