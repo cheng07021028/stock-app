@@ -405,6 +405,28 @@ st.subheader('H222｜歷史財報回補與成長證據驗收')
 def load_h222(path):
     from godpick_h222_financial_history import inspect
     return inspect(Path(path))
+with st.expander('H236｜雲端持久財報還原（選擇性、僅讀雲端）'):
+    import os as _h236_os
+    st.caption('原始ZIP由專用私有GCS保存。僅還原H235直取核實證據；手動H234不升格。正式權重與買進授權不變。')
+    st.code('python tools/h236_cloud.py collect-publish --quarter 2025Q3 --official-url "完整官方HTTPS網址"\npython tools/h236_cloud.py restore --quarter 2025Q3',language='bash')
+    if _h236_os.getenv('H236_ENABLE_UI_RESTORE')=='1' and _h236_os.getenv('H236_GCS_BUCKET'):
+        from godpick_h192_financial_growth import expected_periods as _h236_periods,qstr as _h236_qstr
+        _,_h236_last=_h236_periods(datetime.now(ar.TZ))
+        _h236_q=st.selectbox('雲端財報季度',list(range(_h236_last,_h236_last-8,-1)),format_func=_h236_qstr,key='h236_quarter')
+        _h236_a,_h236_b=st.columns(2)
+        if _h236_a.button('查詢雲端封存',key='h236_status'):
+            try:
+                from godpick_h236_cloud_financial import cloud_status as _h236_status
+                st.json(_h236_status(root,_h236_q))
+            except Exception as _h236_e:st.error('H236 雲端查詢失敗：'+type(_h236_e).__name__)
+        if _h236_b.button('還原所選季度至本機快取',key='h236_restore'):
+            try:
+                from godpick_h236_cloud_financial import restore as _h236_restore
+                with st.spinner('還原並重新核實原始財報，可能涉及大型檔案…'):_h236_result=_h236_restore(root,_h236_q)
+                st.json(_h236_result);load_h222.clear()
+                st.info('原H222已清除快取；其他研究頁依原有TTL或重新整理更新。')
+            except Exception as _h236_e:st.error('H236 還原失敗：'+type(_h236_e).__name__+'；未核實資料不會升格。')
+    else:st.info('H236雲端還原預設關閉。請由管理員配置私有儲存與唯讀憑證，再明確啟用。')
 if st.checkbox('載入 H222 歷史財報驗收（唯讀）'):
     try:
         if st.button('重新讀取 H222'):load_h222.clear()

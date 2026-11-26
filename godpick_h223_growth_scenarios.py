@@ -72,7 +72,7 @@ def audit(root,now,months=24,quarters=8):
 
 def signature(root):
     paths=[];root=Path(root)
-    for rel in ('data/h115','data/h192','data/h222','data/h220/daily','data/h223/daily'):
+    for rel in ('data/h115','data/h192','data/h222','data/h235','data/h220/daily','data/h223/daily'):
         paths.extend(x for x in (root/rel).rglob('*') if x.is_file())
     if (root/'stock_master_cache.json').is_file():paths.append(root/'stock_master_cache.json')
     return tuple((str(x),s.st_size,s.st_mtime_ns,s.st_ctime_ns,s.st_ino) for x in sorted(set(paths)) for s in [x.stat()])
