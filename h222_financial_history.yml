@@ -1,0 +1,75 @@
+name: H222 official historical financial backfill
+on:
+  workflow_dispatch:
+    inputs:
+      months:
+        description: 'Historical months (13-36)'
+        default: '24'
+      company_codes:
+        description: 'Optional company history fallback: comma-separated stock codes (1-20); blank = H233 auto or bulk-only'
+        default: ''
+      auto_company:
+        description: 'H233 bounded automatic company supplement (blank company_codes)'
+        type: boolean
+        default: true
+      quarters:
+        description: 'Historical quarters (8-12)'
+        default: '8'
+  push:
+    branches: [main]
+    paths:
+      - 'godpick_h222_financial_history.py'
+      - 'godpick_h231_company_history.py'
+      - 'godpick_h232_eps_comparability.py'
+      - 'godpick_h233_auto_history.py'
+      - 'tools/h222_history.py'
+      - '.github/workflows/h222_financial_history.yml'
+  schedule:
+    - cron: '40 2,10,14 * * *' # Taipei 10:40, 18:40, 22:40
+permissions:
+  contents: write
+concurrency:
+  group: h222-history-main
+  cancel-in-progress: false
+jobs:
+  capture:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install 'requests>=2.31,<3' 'beautifulsoup4>=4.12,<5' 'lxml>=5.4,<7' 'numpy>=1.26,<3' 'pandas>=2.2,<3'
+      - name: Collect historical periods
+        id: collect
+        env:
+          MONTHS: ${{ inputs.months || '24' }}
+          QUARTERS: ${{ inputs.quarters || '8' }}
+          COMPANY_CODES: ${{ inputs.company_codes || '' }}
+          AUTO_COMPANY: ${{ github.event_name != 'workflow_dispatch' || inputs.auto_company }}
+        run: |
+          if [[ -n "$COMPANY_CODES" ]]; then
+            python tools/h222_history.py --collect --quarters "$QUARTERS" --budget 8 --company-codes "$COMPANY_CODES"
+          elif [[ "$AUTO_COMPANY" == "true" ]]; then
+            python tools/h222_history.py --collect --months "$MONTHS" --quarters "$QUARTERS" --budget 8 --auto-company
+          else
+            python tools/h222_history.py --collect --months "$MONTHS" --quarters "$QUARTERS" --budget 8
+          fi
+      - name: Persist public historical evidence only
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if [[ -d data/h222 ]]; then git add -f -- data/h222/; fi
+          if ! git diff --cached --quiet; then
+            git commit -m 'data(H222): historical financial first-observed evidence'
+            git pull --rebase origin main
+            git push origin HEAD:main
+          fi

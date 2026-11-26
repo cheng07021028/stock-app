@@ -1,0 +1,48 @@
+name: H220 growth rotation prospective review
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '35 13 * * 1-5' # 21:35 Taipei
+    - cron: '30 14 * * 1-5' # 22:30 Taipei
+    - cron: '30 0 * * *' # 08:30 Taipei, read-only before capture window
+permissions:
+  contents: write
+concurrency:
+  group: h220-prospective-main
+  cancel-in-progress: false
+jobs:
+  review:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install 'pandas==2.3.3' 'numpy>=1.26,<3' 'requests>=2.31,<3' 'openpyxl>=3.1.2,<4'
+      - run: python tools/h220_review.py --out h220_output --capture
+      - name: Publish immutable public H220 cohorts only
+        if: always() && hashFiles('h220_output/health.json') != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -d data/h220/daily ]; then exit 0; fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -f -- data/h220/daily/
+          if ! git diff --cached --quiet; then
+            git commit -m 'data(H220): prospective growth rotation evidence'
+            git pull --rebase origin main
+            git push origin HEAD:main
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: H220-review-${{ github.run_id }}
+          path: h220_output/
+          retention-days: 90
+          if-no-files-found: error

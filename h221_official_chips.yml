@@ -1,0 +1,49 @@
+name: H221 official institutional evidence closure
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'godpick_h221_evidence_closure.py'
+      - 'tools/h221_collect.py'
+      - '.github/workflows/h221_official_chips.yml'
+  schedule:
+    - cron: '50 10 * * 1-5' # Taipei 18:50
+    - cron: '40 12 * * 1-5' # Taipei 20:40
+permissions:
+  contents: write
+concurrency:
+  group: stockapp-h221-official-chips-main
+  cancel-in-progress: false
+jobs:
+  collect:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install 'requests>=2.31,<3' 'pandas==2.3.3' 'numpy>=1.26,<3'
+      - name: Capture official missing flow evidence
+        id: collect
+        run: python tools/h221_collect.py
+      - name: Persist successful partial captures and health even if evidence incomplete
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          for dir in data/h123/twse_t86 data/h124/TPEX data/h221; do
+            if [ -d "$dir" ]; then git add -f -- "$dir/"; fi
+          done
+          if ! git diff --cached --quiet; then
+            git commit -m 'data(H221): official institutional evidence and verified health'
+            git pull --rebase origin main
+            git push origin HEAD:main
+          fi
