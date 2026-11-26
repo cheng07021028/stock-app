@@ -108,7 +108,7 @@ def settle(signals,outcomes,market,now):
         for n in HORIZONS:
             if (*k,n) in outcomes:continue
             ds=market.span(s['signal_day'],n)
-            if not ds:gaps['未成熟或交易日曆缺口']+=1;continue
+            if not ds or ds[-1]>now.date().isoformat() or (ds[-1]==now.date().isoformat() and now.time()<time(18,15)):gaps['未成熟或交易日曆缺口']+=1;continue
             prices=[market.quotes(s['market'],d).get(s['code']) for d in ds]
             if any(not num(x) for x in prices):gaps['缺官方連續行情（不跳過停牌）']+=1;continue
             if prices[0]!=s['base_close']:gaps['基準價衝突']+=1;continue

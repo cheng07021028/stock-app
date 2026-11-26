@@ -305,3 +305,29 @@ if st.checkbox('載入 H217 前瞻品質閉環（唯讀）'):
             from godpick_h217_prospective_quality import excel as excel_h217
             st.download_button('下載 H217 前瞻品質',excel_h217(h217),'H217_Quality.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     except Exception as e:st.error('H217 資料驗證失敗：'+str(e)[:180])
+
+st.divider()
+st.subheader('H218｜真實前瞻績效驗收、權息復原與策略優勢')
+st.caption('逐日重讀官方權息證據；H194原價績效與H209含成本模擬分列。來源優勢僅人工複核，不改正式權重。')
+@st.cache_data(ttl=120,show_spinner=False)
+def load_h218(path):
+    from godpick_h218_evidence import run
+    return run(Path(path))
+if st.checkbox('載入 H218 實證驗收（唯讀）'):
+    try:
+        if st.button('重新讀取 H218'):load_h218.clear()
+        with st.spinner('核對官方權息及成熟績效…'):h218=load_h218(str(root))
+        st.caption(h218['version']+'｜'+h218['asof']+'｜'+h218['day'])
+        if h218['status']=='DATA_PENDING':st.warning('績效尚待成熟或補證；不是零勝率。')
+        st.write(h218['counts']);st.write(h218['errors'])
+        st.markdown('**權息逐日獨立驗收**');st.dataframe(pd.DataFrame(h218['action_summary']),hide_index=True,use_container_width=True,column_config={'覆蓋率':st.column_config.NumberColumn('覆蓋率',format='percent')})
+        with st.expander('逐日權息缺口與原始證據'):st.dataframe(pd.DataFrame(h218['action_rows']),hide_index=True,use_container_width=True)
+        st.markdown('**成熟績效對帳**');st.dataframe(pd.DataFrame(h218['summary']),hide_index=True,use_container_width=True,column_config={k:st.column_config.NumberColumn(k,format='percent') for k in ('淨績效覆蓋率','平均淨報酬','淨勝率')})
+        with st.expander('H194／H209 同日獨有股票優勢（排除共同股票）'):
+            st.dataframe(pd.DataFrame(h218['pairs']),hide_index=True,use_container_width=True,column_config={k:st.column_config.NumberColumn(k,format='percent') for k in ('H194獨有均值','H209獨有均值','H209相對差')})
+            st.dataframe(pd.DataFrame(h218['review']),hide_index=True,use_container_width=True,column_config={k:st.column_config.NumberColumn(k,format='percent') for k in ('訓練差','留出差')})
+        with st.expander('H208／H209 封存診斷（非事後重建）'):st.json(h218['recall'])
+        if st.checkbox('產生 H218 實證驗收 Excel'):
+            from godpick_h218_evidence import excel as excel_h218
+            st.download_button('下載 H218 實證驗收',excel_h218(h218),'H218_Evidence.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    except Exception as e:st.error('H218 資料驗證失敗：'+str(e)[:180])
