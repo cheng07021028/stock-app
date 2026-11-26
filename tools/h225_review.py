@@ -22,5 +22,8 @@ def main():
     from godpick_h237_pipeline_acceptance import run as pipeline
     from h237_acceptance import write as write_acceptance
     write_acceptance(pipeline(a.root,r['asof'],base=r,acceptance=q,net=y),a.out/'h237')
+    from godpick_h238_first_attribution import run as first_attribution,excel as first_excel
+    f=first_attribution(a.root,r['asof'],base=r,acceptance=q,review=z,ranking=x,edge=y);dest=a.out/'h238';dest.mkdir(exist_ok=True)
+    (dest/'H238_FirstT1Attribution.xlsx').write_bytes(first_excel(f));(dest/'health.json').write_text(json.dumps({k:f[k] for k in ('version','asof','day','first_day','target','status','counts','weight_multiplier','trade_authority_changed')},ensure_ascii=False,allow_nan=False,indent=2),'utf-8')
     print(json.dumps(h,ensure_ascii=False));return 0 if r['status']=='DATA_GATES_PASS' and q['status']=='DATA_GATES_PASS' else 2
 if __name__=='__main__':raise SystemExit(main())

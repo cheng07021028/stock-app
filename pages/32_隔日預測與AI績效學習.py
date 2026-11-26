@@ -619,3 +619,18 @@ if st.checkbox('載入 H237 原始證據與成熟績效驗收'):
         if st.checkbox('產生 H237 正式管線 Excel'):
             st.download_button('下載 H237 正式管線驗收',pipeline_excel(h237),'H237_PipelineAcceptance.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     except Exception as ex:st.error('H237 驗收失敗：'+type(ex).__name__)
+
+
+st.subheader('H238｜首批T+1固定日期績效解剖（唯讀）')
+if st.checkbox('載入 H238 首批強勢漏選與高成長複核'):
+    try:
+        from godpick_h238_first_attribution import run as first_attribution,excel as first_attribution_excel
+        with st.spinner('重新核對固定首批研究日與下一交易日…'):h238=first_attribution(Path(root))
+        st.caption(h238['version']+'｜'+h238['asof']+'｜'+h238['status'])
+        st.info('首批研究日 '+str(h238['first_day'] or '待封存')+'；T+1 '+str(h238['target'] or '待官方盤後確認')+'。研究命中與正式H126授權不同，單批不調權。')
+        for k in ('attribution','miss_summary','growth'):st.dataframe(pd.DataFrame(h238[k]),hide_index=True,use_container_width=True)
+        with st.expander('逐股績效、漏選原因及同成本競爭'):
+            for k in ('detail','miss','precision','market_net','tasks','errors'):st.dataframe(pd.DataFrame(h238[k]),hide_index=True,use_container_width=True)
+        if st.checkbox('產生 H238 首批績效 Excel'):
+            st.download_button('下載 H238 首批績效解剖',first_attribution_excel(h238),'H238_FirstT1Attribution.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    except Exception as ex:st.error('H238 驗收失敗：'+type(ex).__name__)
