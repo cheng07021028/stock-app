@@ -283,7 +283,11 @@ def _base(kind,market,p,code,t):
 
 def historical_row(kind,market,p,row):
     """Explicit allowlist; source URL must match the exact official partition."""
-    return kind in ('revenue','margin','ytd') and row.get('historical_source')==VERSION and row.get('availability_basis')=='FIRST_OBSERVED' and row.get('source_url')==source_url(kind,market,p)
+    if row.get('availability_basis')!='FIRST_OBSERVED':return False
+    if kind in ('margin','ytd'):
+        import godpick_h231_company_history as company
+        if row.get('historical_source')==company.VERSION and row.get('source_url')==company.URL:return True
+    return kind in ('revenue','margin','ytd') and row.get('historical_source')==VERSION and row.get('source_url')==source_url(kind,market,p)
 
 
 def load_rows(root):
@@ -299,17 +303,28 @@ def load_rows(root):
                         code=r['code'];b=_base(kind,market,p,code,t)
                         if kind=='revenue':out[kind].append({**b,**r})
                         else:
-                            quarters[market,code,p]=(r,t)
-                            out[kind].append({**b,**{k:r[k] for k in fin.METRICS['ytd']},'industry_type':'GENERAL','basis':'CUMULATIVE_YTD_NOT_SINGLE_QUARTER','unit':'元／股','profit_basis':'SAME_SOURCE_DISCLOSED_UNIT','operating_profit_ytd_label':'營業利益（損失）','net_profit_ytd_label':'本期淨利（淨損）','report_date':None})
+                            quarters[market,code,p]=(r,t,QUARTER_URL)
                 except Exception as e:errors.append(f'H222 {kind}/{market}/{path.name}: {type(e).__name__}: {str(e)[:120]}')
-    for (market,code,p),(r,t) in quarters.items():
-        if p%4 and (market,code,p-1) not in quarters:continue
-        prev,pt=quarters.get((market,code,p-1),({},t)) if p%4 else ({},t)
-        d={k:r[k]-prev.get(k,0) for k in ('revenue_ytd','gross_profit_ytd','operating_profit_ytd','net_profit_ytd')}
-        if d['revenue_ytd']<=0:continue
-        vals={k:round(d[v]/d['revenue_ytd']*100,4) for k,v in zip(fin.METRICS['margin'],('gross_profit_ytd','operating_profit_ytd','net_profit_ytd'))}
-        if any(not -100<=v<=1000 for v in vals.values()):continue
-        visible=max((t,pt),key=fin.moment);out['margin'].append({**_base('margin',market,p,code,visible),**vals,'industry_type':'GENERAL','statement_basis':'SINGLE_QUARTER','derived_from':'SAME_H222_CUMULATIVE_INCOME_STATEMENTS'})
+    # Individual official reports are supplementary, not full-market completion.
+    import godpick_h231_company_history as company
+    individual,individual_errors=company.load(root);errors.extend(individual_errors)
+    # Preserve both source histories until H192 applies the research as-of cutoff.
+    # Derive margins inside each family only; do not subtract mixed sources.
+    def base(kind,market,p,code,t,source):
+        b=_base(kind,market,p,code,t)
+        if source==company.URL:b.update(source_url=source,historical_source=company.VERSION)
+        return b
+    for family in (quarters,individual):
+        for (market,code,p),(r,t,source) in family.items():
+            out['ytd'].append({**base('ytd',market,p,code,t,source),**{k:r[k] for k in fin.METRICS['ytd']},'history_financial_values':{k:r[k] for k in ('revenue_ytd','gross_profit_ytd',*fin.METRICS['ytd'])},'industry_type':'GENERAL','basis':'CUMULATIVE_YTD_NOT_SINGLE_QUARTER','unit':'元／股','profit_basis':'SAME_SOURCE_DISCLOSED_UNIT','operating_profit_ytd_label':'營業利益（損失）','net_profit_ytd_label':'本期淨利（淨損）','report_date':None})
+            if p%4 and (market,code,p-1) not in family:continue
+            prev,pt,ps=family.get((market,code,p-1),({},t,source)) if p%4 else ({},t,source)
+            if ps!=source:continue
+            d={k:r[k]-prev.get(k,0) for k in ('revenue_ytd','gross_profit_ytd','operating_profit_ytd','net_profit_ytd')}
+            if d['revenue_ytd']<=0:continue
+            vals={k:round(d[v]/d['revenue_ytd']*100,4) for k,v in zip(fin.METRICS['margin'],('gross_profit_ytd','operating_profit_ytd','net_profit_ytd'))}
+            if any(not -100<=v<=1000 for v in vals.values()):continue
+            visible=max((t,pt),key=fin.moment);out['margin'].append({**base('margin',market,p,code,visible,source),**vals,'industry_type':'GENERAL','statement_basis':'SINGLE_QUARTER','derived_from':'SAME_H222_CUMULATIVE_INCOME_STATEMENTS' if source==QUARTER_URL else 'SAME_H231_CUMULATIVE_INCOME_STATEMENTS'})
     return out,errors
 
 
@@ -327,7 +342,9 @@ def inspect(root=ROOT,now=None):
         summary.append({'市場':market,'母體':len(rs),'13月完整':sum(not r['13月缺期'] for r in rs),'三率指定四期完整':sum(not r['三率缺期'] for r in rs),'累計六季完整':sum(not r['累計財報缺期'] for r in rs),'三率三升成立':sum(r['連兩季三率年增'] is True for r in rs),'TTM可重建':sum(r['TTM EPS重建'] is not None for r in rs),'TTM>=5':sum(r['TTM EPS重建'] is not None and r['TTM EPS重建']>=5 for r in rs),'高成長財報複核':sum(r['高成長財報複核'] for r in rs)})
     try:health=ar._read(root/'data/h222/health.json')
     except (OSError,ValueError):health={}
-    return {'version':VERSION,'asof':now.isoformat(),'summary':summary,'stocks':stocks,'candidates':[r for r in stocks if r['高成長財報複核']],'health':health,'errors':errors,'rejected':rejected,'conflicts':conflicts,'trade_authority_changed':False}
+    try:company_health=ar._read(root/'data/h222/h231/health.json')
+    except (OSError,ValueError):company_health={}
+    return {'version':VERSION,'asof':now.isoformat(),'company_health':company_health,'summary':summary,'stocks':stocks,'candidates':[r for r in stocks if r['高成長財報複核']],'health':health,'errors':errors,'rejected':rejected,'conflicts':conflicts,'trade_authority_changed':False}
 
 
 def excel(r):
@@ -337,4 +354,5 @@ def excel(r):
     w=Workbook();w.remove(w.active)
     for name,rows in [('01_母體驗收',r['summary']),('02_高成長財報複核',r['candidates']),('03_逐股缺期',r['stocks']),('04_回補日誌',r['health'].get('scope',[])),('05_異常',[{'來源異常':x} for x in r['errors']]+[{'證據衝突種類':k,'衝突數':v} for k,v in r['conflicts'].items()])]:
         table(w,name,rows)
+    if r.get('company_health'):table(w,'06_個股歷史補證',r['company_health'].get('scope',[]))
     out=io.BytesIO();w.save(out);return out.getvalue()

@@ -282,6 +282,17 @@ def build_ledgers(data,now):
             except (ValueError,TypeError,OverflowError):r=None
             if r is None:rejected[kind]+=1;continue
             groups[kind,r['source'],r['code'],r['_period']].append(r)
+    # H231: choose source family only AFTER filtering actual observation times.
+    # A future supplement cannot erase previously visible bulk evidence.
+    import godpick_h231_company_history as company
+    individual=defaultdict(set); cross_conflicts=set()
+    for (kind,market,code,p),rs in groups.items():
+        if kind!='ytd':continue
+        h=[r for r in rs if r.get('historical_source') and r.get('history_financial_values')]
+        if len({r['source_url'] for r in h})>1 and any(r['history_financial_values']!=h[0]['history_financial_values'] for r in h):cross_conflicts.add((market,code,p))
+        if any(r.get('historical_source')==company.VERSION for r in h):individual[market,code].add(p)
+    for market,code,p in cross_conflicts:individual[market,code].discard(p)
+    coherent={k for k,ps in individual.items() if any(set(range(end-7,end+1))<=ps for end in ps)}
     ledgers=defaultdict(dict);conflicts=Counter()
     for (kind,market,code,p),rs in groups.items():
         # Resolve each field only from actual same-period observations. Missing
@@ -289,6 +300,18 @@ def build_ledgers(data,now):
         # base revision differs, old comparative fields are not reused.
         # Historical conflicting EPS/profit revisions are not silently differenced.
         keys=METRICS[kind]
+        if kind in ('ytd','margin') and ((market,code,p) in cross_conflicts or (kind=='margin' and p%4 and (market,code,p-1) in cross_conflicts)):
+            conflicts[kind]+=1;continue
+        if kind in ('ytd','margin'):
+            company_rows=[r for r in rs if r.get('historical_source')==company.VERSION]
+            bulk_rows=[r for r in rs if r.get('historical_source') and r.get('historical_source')!=company.VERSION]
+            if company_rows and bulk_rows:
+                # Reject inconsistent sources rather than picking by observation time.
+                tol=.011 if kind=='margin' else 1e-8
+                if any(abs(a[k]-b[k])>tol for a in company_rows for b in bulk_rows for k in keys if a.get(k) is not None and b.get(k) is not None):
+                    conflicts[kind]+=1;continue
+                preferred=company_rows if (market,code) in coherent else bulk_rows
+                rs=[r for r in rs if not r.get('historical_source')]+preferred
         # Backfill cannot silently replace a conflicting previously observed fact.
         hist=[r for r in rs if r.get('historical_source')]; live=[r for r in rs if not r.get('historical_source')]
         if hist and live:
