@@ -7533,35 +7533,8 @@ def _godpick_records_config() -> dict[str, str]:
 
 
 def _read_godpick_records_from_github() -> tuple[list[dict[str, Any]], str]:
-    cfg = _godpick_records_config()
-    token = cfg["token"]
-    if not token:
-        return [], "未設定 GITHUB_TOKEN"
-
-    try:
-        resp = requests.get(
-            _github_contents_url(cfg["owner"], cfg["repo"], cfg["path"]),
-            headers=_github_headers(token),
-            params={"ref": cfg["branch"]},
-            timeout=20,
-        )
-        if resp.status_code == 404:
-            return [], ""
-        if resp.status_code != 200:
-            return [], f"讀取推薦紀錄失敗：{resp.status_code} / {resp.text[:300]}"
-
-        data = resp.json()
-        content = data.get("content", "")
-        if not content:
-            return [], ""
-
-        decoded = base64.b64decode(content).decode("utf-8")
-        payload = json.loads(decoded)
-        if isinstance(payload, list):
-            return payload, ""
-        return [], ""
-    except Exception as e:
-        return [], f"讀取推薦紀錄例外：{e}"
+    from godpick_persistence_service import load_records_permanent
+    return (lambda x:(x[0], "｜".join(x[1])))(load_records_permanent())
 
 
 def _get_godpick_records_sha() -> tuple[str, str]:
@@ -7587,79 +7560,13 @@ def _get_godpick_records_sha() -> tuple[str, str]:
 
 
 def _write_godpick_records_to_github(records: list[dict[str, Any]]) -> tuple[bool, str]:
-    cfg = _godpick_records_config()
-    token = cfg["token"]
-    if not token:
-        return False, "未設定 GITHUB_TOKEN"
-
-    sha, err = _get_godpick_records_sha()
-    if err:
-        return False, err
-
-    content_text = json.dumps(records, ensure_ascii=False, indent=2)
-    encoded_content = base64.b64encode(content_text.encode("utf-8")).decode("utf-8")
-
-    body: dict[str, Any] = {
-        "message": f"update godpick records at {_now_text()}",
-        "content": encoded_content,
-        "branch": cfg["branch"],
-    }
-    if sha:
-        body["sha"] = sha
-
-    try:
-        resp = requests.put(
-            _github_contents_url(cfg["owner"], cfg["repo"], cfg["path"]),
-            headers=_github_headers(token),
-            json=body,
-            timeout=30,
-        )
-        if resp.status_code in (200, 201):
-            return True, f"已回寫 GitHub：{cfg['path']}"
-        return False, f"推薦紀錄 GitHub 寫入失敗：{resp.status_code} / {resp.text[:500]}"
-    except Exception as e:
-        return False, f"推薦紀錄 GitHub 寫入例外：{e}"
+    from godpick_persistence_service import upsert_records_authority_fast
+    report, _ = upsert_records_authority_fast(records, reason="Page7 compatibility upsert", require_remote_confirm=True)
+    return report.permanent_ok, "｜".join(report.messages())
 
 
 def _write_godpick_records_to_firestore(records: list[dict[str, Any]]) -> tuple[bool, str]:
-    try:
-        _init_firebase_app()
-        db = firestore.client()
-        batch = db.batch()
-        now = firestore.SERVER_TIMESTAMP
-
-        summary_ref = db.collection("system").document("godpick_records_summary")
-        batch.set(summary_ref, {"count": len(records), "updated_at": now, "source": "streamlit_godpick_records"}, merge=True)
-
-        records_ref = db.collection("godpick_records")
-        existing_docs = list(records_ref.stream())
-        existing_ids = {doc.id for doc in existing_docs}
-        new_ids = set()
-
-        for row in records:
-            rec_id = _safe_str(row.get("record_id"))
-            if not rec_id:
-                rec_id = _create_record_id(
-                    _normalize_code(row.get("股票代號")),
-                    _safe_str(row.get("推薦日期")) or _now_date_text(),
-                    _safe_str(row.get("推薦時間")) or _now_time_text(),
-                    _safe_str(row.get("推薦模式")),
-                )
-                row["record_id"] = rec_id
-
-            new_ids.add(rec_id)
-            doc_ref = records_ref.document(rec_id)
-            doc_data = dict(row)
-            doc_data["updated_at"] = now
-            batch.set(doc_ref, doc_data, merge=True)
-
-        for old_id in existing_ids - new_ids:
-            batch.delete(records_ref.document(old_id))
-
-        batch.commit()
-        return True, "已同步寫入 Firestore"
-    except Exception as e:
-        return False, f"推薦紀錄 Firestore 寫入失敗：{e}"
+    return False, "H241 推薦紀錄 Firestore 已停用"
 
 
 
@@ -9240,6 +9147,8 @@ def _append_godpick_records(record_rows: list[dict[str, Any]], force_duplicate: 
             if not isinstance(old_records, list):
                 old_records = []
             load_details = ["永久保存服務未載入，使用本機相容模式。"]
+        from godpick_persistence_service import records_authority_signature
+        _h241_base_sig = records_authority_signature()
         old_df = _ensure_godpick_record_columns(pd.DataFrame(old_records))
         duplicated = new_df.copy()
         now_tag = str(int(time.time() * 1000))
@@ -9256,7 +9165,8 @@ def _append_godpick_records(record_rows: list[dict[str, Any]], force_duplicate: 
             duplicated.at[idx, "更新時間"] = _now_text()
         merged_df = _ensure_godpick_record_columns(pd.concat([old_df, duplicated], ignore_index=True))
         if callable(save_records_sync_fast):
-            report = save_records_sync_fast(merged_df.to_dict(orient="records"), reason="07 使用者確認重複紀錄")
+            from godpick_persistence_service import save_records_mutation_fast
+            report = save_records_mutation_fast(merged_df.to_dict(orient="records"), expected_authority_signature=_h241_base_sig, upsert_rows=duplicated.to_dict(orient="records"), previous_count=len(old_df), reason="07 使用者確認重複紀錄", require_remote_confirm=True)
             details = list(load_details) + report.messages()
             st.session_state[_k("last_record_write_detail")] = details
             if report.permanent_ok:

@@ -2137,32 +2137,9 @@ def _clear_filtered_records(df: pd.DataFrame, filtered_df: pd.DataFrame) -> pd.D
 
 
 def _read_records_from_github() -> tuple[pd.DataFrame, str]:
-    cfg = _github_config()
-    token = cfg["token"]
-    if not token:
-        return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS), "未設定 GITHUB_TOKEN"
-    try:
-        resp = requests.get(
-            _github_contents_url(cfg["owner"], cfg["repo"], cfg["path"]),
-            headers=_github_headers(token),
-            params={"ref": cfg["branch"]},
-            timeout=20,
-        )
-        if resp.status_code == 404:
-            return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS), ""
-        if resp.status_code != 200:
-            return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS), f"GitHub 讀取失敗：{resp.status_code} / {resp.text[:300]}"
-        data = resp.json()
-        content = data.get("content", "")
-        if not content:
-            return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS), ""
-        decoded = base64.b64decode(content).decode("utf-8")
-        payload = json.loads(decoded)
-        if isinstance(payload, list):
-            return _ensure_godpick_record_columns(pd.DataFrame(payload)), ""
-        return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS), ""
-    except Exception as e:
-        return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS), f"GitHub 讀取例外：{e}"
+    from godpick_persistence_service import load_records_permanent
+    rows, details=load_records_permanent()
+    return _ensure_godpick_record_columns(pd.DataFrame(rows)), "｜".join(details)
 
 
 LOCAL_RECORD_SOURCE_FILES = ["godpick_records.json"]
@@ -2301,16 +2278,10 @@ def _read_records_from_local_files() -> tuple[pd.DataFrame, str]:
 
 
 def _write_records_to_local_file(df: pd.DataFrame) -> tuple[bool, str]:
-    """V150：儲存同步時也寫回本機 JSON，讓頁面下次進入可直接讀最新資料。"""
-    try:
-        path = _github_config().get("path", "godpick_records.json") or "godpick_records.json"
-        clean_df = _ensure_godpick_record_columns(df)
-        ok, msg = _safe_json_write_local(path, clean_df.to_dict(orient="records"))
-        if ok:
-            _save_normalized_record_cache_v165(clean_df, _records_local_signature())
-        return ok, msg.replace("UI 設定", "推薦紀錄")
-    except Exception as e:
-        return False, f"本機推薦紀錄寫入失敗：{e}"
+    # Legacy direct local writer may not bypass the GitHub commit.
+    from godpick_persistence_service import save_records_sync_fast
+    report=save_records_sync_fast(df, reason="Page8 compatibility sync", expected_authority_signature=_safe_str(st.session_state.get(_k("records_source_sig"), "")), require_remote_confirm=True)
+    return bool(report.local_ok and report.github_ok), "｜".join(report.messages())
 
 
 def _get_records_sha() -> tuple[str, str]:
@@ -2335,82 +2306,17 @@ def _get_records_sha() -> tuple[str, str]:
 
 
 def _write_records_to_github(df: pd.DataFrame) -> tuple[bool, str]:
-    cfg = _github_config()
-    token = cfg["token"]
-    if not token:
-        return False, "未設定 GITHUB_TOKEN"
-    sha, err = _get_records_sha()
-    if err:
-        return False, err
-
-    content_text = json.dumps(_ensure_godpick_record_columns(df).to_dict(orient="records"), ensure_ascii=False, indent=2)
-    encoded = base64.b64encode(content_text.encode("utf-8")).decode("utf-8")
-    body: dict[str, Any] = {
-        "message": f"update godpick records at {_now_text()}",
-        "content": encoded,
-        "branch": cfg["branch"],
-    }
-    if sha:
-        body["sha"] = sha
-
-    try:
-        resp = requests.put(
-            _github_contents_url(cfg["owner"], cfg["repo"], cfg["path"]),
-            headers=_github_headers(token),
-            json=body,
-            timeout=30,
-        )
-        if resp.status_code in (200, 201):
-            return True, f"已回寫 GitHub：{cfg['path']}"
-        return False, f"GitHub 寫入失敗：{resp.status_code} / {resp.text[:500]}"
-    except Exception as e:
-        return False, f"GitHub 寫入例外：{e}"
+    from godpick_persistence_service import save_records_sync_fast
+    report=save_records_sync_fast(df, reason="Page8 compatibility sync", expected_authority_signature=_records_local_signature(), require_remote_confirm=True)
+    return report.permanent_ok, "｜".join(report.messages())
 
 
 def _read_records_from_firestore() -> tuple[pd.DataFrame, str]:
-    try:
-        _init_firebase_app()
-        db = firestore.client()
-        docs = list(db.collection("godpick_records").stream())
-        rows = []
-        for doc in docs:
-            data = doc.to_dict() or {}
-            data.setdefault("record_id", doc.id)
-            rows.append(data)
-        return _ensure_godpick_record_columns(pd.DataFrame(rows)), ""
-    except Exception as e:
-        return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS), f"Firestore 讀取失敗：{e}"
+    return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS), "H241 推薦紀錄 Firestore 已停用"
 
 
 def _write_records_to_firestore(df: pd.DataFrame) -> tuple[bool, str]:
-    try:
-        _init_firebase_app()
-        db = firestore.client()
-        batch = db.batch()
-        now = firestore.SERVER_TIMESTAMP
-        records_ref = db.collection("godpick_records")
-        summary_ref = db.collection("system").document("godpick_records_summary")
-
-        clean_df = _ensure_godpick_record_columns(df)
-        batch.set(summary_ref, {"count": len(clean_df), "updated_at": now, "source": "streamlit_record_page"}, merge=True)
-
-        existing_docs = list(records_ref.stream())
-        existing_ids = {doc.id for doc in existing_docs}
-        new_ids = set()
-        for row in clean_df.to_dict(orient="records"):
-            rec_id = _safe_str(row.get("record_id"))
-            if not rec_id:
-                continue
-            new_ids.add(rec_id)
-            payload = dict(row)
-            payload["updated_at"] = now
-            batch.set(records_ref.document(rec_id), payload, merge=True)
-        for old_id in existing_ids - new_ids:
-            batch.delete(records_ref.document(old_id))
-        batch.commit()
-        return True, "已同步寫入 Firestore"
-    except Exception as e:
-        return False, f"Firestore 寫入失敗：{e}"
+    return False, "H241 推薦紀錄 Firestore 已停用"
 
 
 def _save_records_dual(df: pd.DataFrame, *, require_remote_confirm: bool = False) -> bool:
@@ -2431,8 +2337,8 @@ def _save_records_dual(df: pd.DataFrame, *, require_remote_confirm: bool = False
         current_sig_v165 = _records_local_signature()
         if bool(getattr(report, "local_ok", False)):
             st.session_state[_k("records_source_sig")] = current_sig_v165
-            _save_normalized_record_cache_v165(clean_df, current_sig_v165)
-        elif "權威檔已被" in _safe_str(getattr(report, "local_message", "")):
+            _remove_normalized_record_cache_v165()
+        else:
             fresh_df_v174 = _load_records(force_remote=False)
             _save_state_df(fresh_df_v174)
             st.session_state[_k("records_source_sig")] = current_sig_v165
@@ -2441,13 +2347,16 @@ def _save_records_dual(df: pd.DataFrame, *, require_remote_confirm: bool = False
     details = report.messages()
     st.session_state[_k("last_sync_detail")] = details
     st.session_state[_k("last_sync_report")] = report.to_dict()
-    st.session_state[_k("last_sync_failed")] = not bool(report.permanent_ok)
+    st.session_state[_k("last_sync_failed")] = not bool(report.permanent_ok and report.local_ok)
 
     source_state = (
         f"本機{'成功' if report.local_ok else '失敗'}、"
         f"GitHub{'成功' if report.github_ok else ('背景同步中' if getattr(report, 'github_pending', False) else '失敗')}、"
-        f"Firestore{'成功' if report.firestore_ok else '失敗'}"
+        "Firestore：已停用"
     )
+    if report.permanent_ok and not report.local_ok:
+        _set_status("GitHub已確認，本機待重新載入。", "warning")
+        return False
     if report.permanent_ok:
         if report.github_ok and report.firestore_ok:
             msg = f"推薦紀錄已完成三層永久保存（{source_state}），前台耗時 {elapsed:.2f} 秒。"
@@ -2486,17 +2395,20 @@ def _apply_persistence_report(report: Any, *, action_name: str, github_deferred_
 
     st.session_state[_k("last_sync_detail")] = details
     st.session_state[_k("last_sync_report")] = report_dict
-    st.session_state[_k("last_sync_failed")] = not permanent_ok
+    st.session_state[_k("last_sync_failed")] = not (permanent_ok and local_ok)
     try:
         if local_ok:
             st.session_state[_k("records_source_sig")] = _records_local_signature()
-        elif "權威檔已被" in _safe_str(getattr(report, "local_message", "")):
+        else:
             fresh_df_v174 = _load_records(force_remote=False)
             _save_state_df(fresh_df_v174)
             st.session_state[_k("records_source_sig")] = _records_local_signature()
     except Exception:
         pass
 
+    if permanent_ok and not local_ok:
+        _set_status(f"{action_name}已確認GitHub，但本機尚待還原；請重新載入。", "warning")
+        return False
     if permanent_ok:
         if github_pending:
             remote_text = "Firestore已驗證＋GitHub背景同步中" if firestore_ok else "GitHub背景同步中"
@@ -2511,13 +2423,13 @@ def _apply_persistence_report(report: Any, *, action_name: str, github_deferred_
             )
         else:
             _set_status(
-                f"{action_name}已保存｜本機{'✓' if local_ok else '✗'}／GitHub{'✓' if github_ok else '✗'}／Firestore{'✓' if firestore_ok else '✗'}。",
+                f"{action_name}已保存｜本機{'✓' if local_ok else '✗'}／GitHub{'✓' if github_ok else '✗'}／Firestore已停用。",
                 "success" if (github_ok or firestore_ok) else "warning",
             )
         return True
 
     _set_status(
-        f"{action_name}未完成永久保存｜本機{'✓' if local_ok else '✗'}／GitHub{'✓' if github_ok else '✗'}／Firestore{'✓' if firestore_ok else '✗'}；請查看同步明細。",
+        f"{action_name}未完成永久保存｜本機{'✓' if local_ok else '✗'}／GitHub{'✓' if github_ok else '✗'}／Firestore已停用；請查看同步明細。",
         "error",
     )
     return False
@@ -2564,7 +2476,7 @@ def _save_records_mutation_fast_ui(
             local_ok = bool(local_ok and getattr(report, "permanent_ok", False))
         if local_ok:
             try:
-                _save_normalized_record_cache_v165(clean_df, _records_local_signature())
+                _remove_normalized_record_cache_v165()
             except Exception:
                 pass
         st.session_state[_k("last_mutation_local_ok")] = local_ok
@@ -6247,8 +6159,8 @@ def _run_one_click_sync_05_09_10(records_df: pd.DataFrame, settings: dict[str, A
     result["source_details"] = source_details
     target_group = _safe_str(settings.get("target_group")) or "股神推薦"
 
-    if callable(save_records_permanent):
-        rec_report = save_records_permanent(records_df)
+    if callable(save_records_sync_fast):
+        rec_report = save_records_sync_fast(records_df, reason="Page8 one click sync", expected_authority_signature=_safe_str(st.session_state.get(_k("records_source_sig"), "")), require_remote_confirm=True)
         result["modules"]["08推薦紀錄"] = {"ok": rec_report.permanent_ok, "details": rec_report.messages(), "count": len(records_df)}
     else:
         result["modules"]["08推薦紀錄"] = {"ok": False, "details": ["永久紀錄服務未載入"]}
@@ -6373,12 +6285,12 @@ def main():
 
     render_pro_hero(
         title="股神推薦紀錄",
-        subtitle="追蹤 7_股神推薦 推薦股票，支援 GitHub + Firestore 雙寫、每日更新、實際交易分析、績效統計、Excel 匯出，並可匯入 4_自選股中心。",
+        subtitle="追蹤 7_股神推薦 推薦股票，支援 GitHub 單一遠端永久保存、每日更新、實際交易分析、績效統計、Excel 匯出，並可匯入 4_自選股中心。",
     )
     st.caption(f"目前8頁修正版：{RECORD_FIX_VERSION}")
     st.caption(f"刪除修正版：{DELETE_FIX_VERSION}｜H161精確record_id核驗＋先遠端確認再刪本機；未授權/版本不一致不變動歷史")
-    st.caption("H177｜刪除修正版已載入：本機／GitHub／Firestore 必須完成安全對帳，確認遠端保存後才更新畫面。")
-    st.caption("H176｜本機/GitHub與Firestore差異自動驗證：僅完整權威同Hash時補齊缺失ID，衝突/較新遠端仍禁止刪除；不修改其他紀錄")
+    st.caption("H241｜刪除修正版：GitHub 單一權威，精確ID刪除並確認遠端後才更新本機。")
+    st.caption("H241｜推薦紀錄已停用 Firestore 讀寫與對帳；原Firestore資料保留，不影響自選股及其他設定。")
     st.caption(f"運算加速修正版：{RECORD_SPEED_FIX_VERSION}")
     st.caption(f"最新價／損益修正版：{LATEST_PRICE_PNL_FIX_VERSION}｜V179 交易所整體盤後快照＋實際成交雙軌｜保存行情日期／來源／計算狀態")
     st.caption(f"7/8/9 起漲欄位版：{PRELAUNCH_789_VERSION}")
@@ -6401,8 +6313,8 @@ def main():
     # H141: an old repository snapshot is never represented as verified remote data.
     try:
         from godpick_persistence_service import github_config, firebase_configured
-        if not github_config().get("token") and not firebase_configured():
-            st.error("H141 重大資料保護：目前未連上 GitHub／Firestore 權威。畫面可能是 2026/07/09 舊紀錄，禁止把它保存、批次刪除或當成最新績效。請先在 Streamlit Secrets 設定 GITHUB_TOKEN，指定 runtime-data，然後重新載入。")
+        if not github_config().get("token"):
+            st.error("H141 重大資料保護：目前未連上 GitHub 權威。畫面可能是 2026/07/09 舊紀錄，禁止把它保存、批次刪除或當成最新績效。請先在 Streamlit Secrets 設定 GITHUB_TOKEN，指定 runtime-data，然後重新載入。")
     except Exception:
         st.error("H141 重大資料保護：未能確認推薦紀錄的遠端來源，請勿儲存或刪除。")
 
@@ -6436,7 +6348,7 @@ def main():
                    f"｜本機 {len(_authority_df_v174)} 筆｜遠端摘要 {_h240_verify.get('remote_count', '未取得')} 筆／{_h240_verify.get('remote_latest') or '未取得'}。"
                    " 請按重新載入；不允許以舊紀錄覆寫遠端。" + str(_h240_verify.get('reason') or ''))
     else:
-        st.caption(f"H240｜實際驗證來源：{_h240_verify.get('source')}｜{_h240_verify.get('checked_at')}")
+        st.caption(f"H241｜實際驗證來源：{_h240_verify.get('source')}｜{_h240_verify.get('checked_at')}")
     if _authority_details_v174:
         st.session_state[_k("authority_auto_sync_details_v174")] = _authority_details_v174
 
@@ -6449,7 +6361,7 @@ def main():
         _authority_path_v174 = project_path("godpick_records.json") if callable(project_path) else "godpick_records.json"
         _h240_caption = "唯一權威檔" if _h240_verify.get("status") == "VERIFIED" else "本機參考檔（遠端待驗收）"
         st.caption(f"{_h240_caption}：{_authority_path_v174}｜{len(_authority_df_v174)} 筆｜最新推薦日期：{_authority_latest_date_v174 or '未取得'}")
-        if len(_authority_df_v174) == 0:
+        if len(_authority_df_v174) == 0 and _h240_verify.get("status") != "VERIFIED":
             st.error(
                 "V191-H3重大資料完整性保護：目前推薦歷史權威為0筆。系統已禁止任何0筆/子集合整檔回寫，"
                 "並已嘗試由GitHub runtime-data歷史版本救援；在成功找回歷史前，AI學習也會暫停，避免用空資料覆蓋模型。"
@@ -6516,6 +6428,7 @@ def main():
                 _set_status(msg, "success" if verified else "warning")
                 _add_action_result("重新載入", bool(verified), msg)
                 st.session_state[_k("authority_remote_check_ts_v174")] = 0.0
+                st.session_state[_k("records_source_sig")] = _records_local_signature()
             except Exception as e:
                 msg = f"重新載入失敗：{e}"
                 _set_status(msg, "error")
@@ -6540,7 +6453,7 @@ def main():
                 if int(summary.get("success", 0) or 0) > 0:
                     try:
                         auto_save_ok = bool(_save_records_dual(df))
-                        auto_save_note = "已自動保存權威紀錄" if auto_save_ok else "自動保存未完成，畫面資料仍保留於本次 session"
+                        auto_save_note = "已自動保存權威紀錄" if auto_save_ok else "自動保存未完成，保留原權威紀錄"
                     except Exception as _auto_save_exc:
                         auto_save_note = f"自動保存失敗：{_auto_save_exc}"
                 official_diag = summary.get("official_snapshot", {}) if isinstance(summary.get("official_snapshot"), dict) else {}
@@ -6556,7 +6469,7 @@ def main():
                     f"已算出損益 {summary.get('pnl_calculated', 0)} 筆，缺少推薦基準價 {summary.get('missing_basis', 0)} 筆。"
                     f"{official_note}{auto_save_note}。"
                 )
-                ok = int(summary.get('success', 0) or 0) > 0 or int(summary.get('target', 0) or 0) == 0
+                ok = (int(summary.get('success', 0) or 0) > 0 and auto_save_ok) or int(summary.get('target', 0) or 0) == 0
                 issue_lines = []
                 for item in (summary.get('issue_samples') or [])[:15]:
                     issue_lines.append(
@@ -6585,7 +6498,7 @@ def main():
                 source_summary = (
                     f"本機{'✓' if report.get('local_ok') else '✗'} / "
                     f"GitHub{'✓' if report.get('github_ok') else ('背景中' if report.get('github_pending') else '✗')} / "
-                    f"Firestore{'✓' if report.get('firestore_ok') else '✗'}"
+                    "Firestore已停用"
                 )
                 msg = (
                     f"儲存同步{'成功' if ok else '未完成'}：目前資料 "
@@ -6669,16 +6582,8 @@ def main():
                             reload_msg = f"重新載入 {len(refreshed)} 筆。"
                             # V178：績效更新器會先原子回寫 JSON；此處立即補齊 authority state /
                             # manifest / Firestore / GitHub 背景同步，避免重啟時被舊權威狀態覆蓋。
-                            if callable(save_records_sync_fast):
-                                try:
-                                    _perf_report = save_records_sync_fast(refreshed, reason="Page8 V178 performance update")
-                                    perf_persist_msg = (
-                                        f" 績效永久化：本機{'✓' if getattr(_perf_report, 'local_ok', False) else '✗'} / "
-                                        f"Firestore{'✓' if getattr(_perf_report, 'firestore_ok', False) else '✗'} / "
-                                        f"GitHub{'✓' if getattr(_perf_report, 'github_ok', False) else ('背景中' if getattr(_perf_report, 'github_pending', False) else '✗')}。"
-                                    )
-                                except Exception as _perf_persist_e:
-                                    perf_persist_msg = f" 績效永久化失敗：{_perf_persist_e}"
+                            perf_persist_msg = " H241 績效已由原始權威提交流程處理。" if summary.get("ok", True) else " H241 績效保存未確認，請重新載入。"
+                            st.session_state[_k("records_source_sig")] = _records_local_signature()
                     except Exception as _v77_reload_e:
                         reload_msg = f"已更新 JSON，但重新載入畫面資料失敗：{_v77_reload_e}"
                     learning_refresh_msg = ""
@@ -6695,7 +6600,7 @@ def main():
                     f"更新檔案：{', '.join(summary.get('updated_files', [])) or '無'}。{reload_msg}{perf_persist_msg}{calibration_sync_msg}{learning_refresh_msg}"
                 )
                 detail = "；".join(summary.get("messages", [])) if summary.get("messages") else str(summary)
-                ok = int(summary.get('success', 0) or 0) > 0 or int(summary.get('fail', 0) or 0) == 0
+                ok = bool(summary.get("ok", True)) and (int(summary.get('success', 0) or 0) > 0 or int(summary.get('fail', 0) or 0) == 0)
                 _set_status(msg, "success" if ok else "warning")
                 _add_action_result("更新推薦後績效", ok, msg, detail)
             except Exception as e:
@@ -6716,7 +6621,7 @@ def main():
         st.caption("以下圖示僅表示服務已設定，非同步驗收成功。")
         st.caption(
             f"GitHub紀錄：{'✅' if _safe_str(_github_config().get('token')) else '❌'} ｜ "
-            f"Firestore：{'✅' if _safe_str(_firebase_config().get('project_id')) else '❌'} ｜ "
+            "Firestore紀錄：已停用 ｜ "
             f"自選股：{'✅' if _safe_str(_watchlist_github_config().get('token')) else '❌'} ｜ "
             f"UI設定：{'✅' if _safe_str(_ui_config_github_config().get('token')) else '❌'}"
         )
@@ -6725,7 +6630,7 @@ def main():
 
     # H163: quota monitor is local-only and never triggers a Firestore call.
     # Do not claim that a cached summary is new remote verification.
-    if callable(get_firestore_read_guard_status):
+    if False and callable(get_firestore_read_guard_status):
         try:
             _h163_budget = get_firestore_read_guard_status() or {}
             if _h163_budget.get("quota_blocked"):
@@ -6779,31 +6684,9 @@ def main():
         pass
 
     # H182: explicit, read-only discrepancy audit. No remote full read on reruns.
-    with st.expander("H182｜本機／Firestore 差異稽核（唯讀，不刪除）", expanded=False):
-        st.caption("手動啟動才讀取 Firestore 全部推薦紀錄（有文件讀取配額成本）。僅顯示欄位名稱／差異筆數，不會覆蓋、補寫、刪除或修改任何正式紀錄。")
-        if st.button("檢查 2,617／2,560 權威差異（只讀）", key=_k("h182_audit_remote_btn")):
-            try:
-                from godpick_persistence_service import h182_readonly_recommendation_replica_audit
-                _h182_report, _h182_message = h182_readonly_recommendation_replica_audit(
-                    selected_ids=list(_selection_ids("刪除")))
-                st.session_state[_k("h182_last_report")] = _h182_report
-                st.session_state[_k("h182_last_message")] = _h182_message
-            except Exception as _h182_exc:
-                st.session_state[_k("h182_last_report")] = {"valid": False, "reason": type(_h182_exc).__name__}
-                st.session_state[_k("h182_last_message")] = f"H182 診斷程式未載入：{_h182_exc}"
-        _h182_existing = st.session_state.get(_k("h182_last_report"), {})
-        if _h182_existing:
-            st.info(str(st.session_state.get(_k("h182_last_message"), "")))
-            if _h182_existing.get("valid"):
-                _h182_classes = _h182_existing.get("classifications", {}) or {}
-                st.caption(
-                    f"實際重疊 {_h182_existing.get('shared_count',0)} 筆｜"
-                    f"同名欄位值不同 {_h182_classes.get('VALUE_CONFLICT',0)} 筆｜"
-                    f"只有本機新增欄位 {_h182_classes.get('LOCAL_EXTRA_FIELDS_ONLY',0)} 筆｜"
-                    f"雙向欄位差異 {_h182_classes.get('BIDIRECTIONAL_SCHEMA_DRIFT',0)} 筆。"
-                    "所有結果均非刪除授權。"
-                )
-            st.json(_h182_existing, expanded=False)
+    with st.expander("H241｜GitHub單一權威狀態（唯讀）", expanded=False):
+        st.caption("推薦紀錄 Firestore 已停用；不再掃描舊副本，也不會刪除舊Firestore資料。")
+        st.write(_h240_verify)
 
     # V179：不依賴使用者自訂欄位設定，固定提供最近行情稽核表，讓「推薦價＝最新價」
     # 到底是價格真的沒變、尚未取得新交易日，或更新失敗一眼可辨。
@@ -6839,10 +6722,10 @@ def main():
     sync_detail = st.session_state.get(_k("last_sync_detail"), [])
     if sync_detail:
         sync_failed = bool(st.session_state.get(_k("last_sync_failed"), False))
-        with st.expander("同步明細｜本機 / GitHub / Firestore", expanded=sync_failed):
+        with st.expander("同步明細｜本機 / GitHub（Firestore紀錄已停用）", expanded=sync_failed):
             for line in sync_detail:
                 st.write(f"- {line}")
-            st.caption("刪除／編輯採本機＋Firestore增量保存；『儲存同步』也已改為內容比對＋差異同步，未變更時不再重寫 1,800 多筆，GitHub 大型備份在背景合併上傳。")
+            st.caption("H241 刪除／編輯先驗證GitHub現行版本、提交分片及權威指標，回讀成功才更新本機；同Hash不重傳。")
 
     if callable(load_records_github_sync_status):
         try:
@@ -7220,7 +7103,7 @@ def main():
             with action_cols[6]:
                 clear_filter_clicked = st.form_submit_button("🧼 清空目前篩選", use_container_width=True)
             with action_cols[7]:
-                st.caption("勾選/編輯不會重跑；按按鈕後才送出。刪除先本機生效，遠端同步狀態會分開顯示。")
+                st.caption("勾選/編輯不會重跑；按按鈕後才送出。GitHub回讀確認後才更新本機。")
 
         any_form_action = any([
             import_clicked,
@@ -7330,7 +7213,7 @@ def main():
                 previous_count=before_n,
             )
             if local_ok:
-                _save_state_df(new_df)
+                _save_state_df(_load_records(force_remote=False))
                 _reset_record_editor_for_bulk_delete(
                     show_cols_mode,
                     delete_ids=[],
@@ -7343,11 +7226,11 @@ def main():
                 )
             else:
                 _detail = st.session_state.get(_k("last_sync_detail"), []) or []
-                _reason = next((str(x) for x in _detail if any(k in str(x) for k in ("H177", "H176", "H161", "H141", "403", "權限", "版本"))), "")
+                _reason = next((str(x) for x in _detail if any(k in str(x) for k in ("H241", "H161", "H141", "403", "權限", "版本"))), "")
                 st.session_state[_k("last_mutation_local_ok")] = False
                 st.session_state[_k("last_mutation_permanent_ok")] = False
                 st.session_state[_k("last_delete_msg")] = (
-                    "H161刪除未執行（H176差異核對）：本機及遠端既有紀錄均未刪除；若已通過差異對帳補入缺漏，補入紀錄仍保留。" + _reason[:450]
+                    "H241 本次刪除尚未確認本機與GitHub一致；請依同步明細重新載入，勿重複送出。" + _reason[:450]
                     + "｜若 GitHub 403，請確認 Streamlit GITHUB_TOKEN 對 stock-app 有 Contents: Read and write，"
                     "再按『重新載入』取得完整遠端權威後重新勾選。"
                 )
@@ -7371,7 +7254,7 @@ def main():
                 previous_count=before_n,
             )
             if local_ok:
-                _save_state_df(new_df)
+                _save_state_df(_load_records(force_remote=False))
                 _reset_record_editor_for_bulk_delete(show_cols_mode, delete_ids=[], import_ids=[])
                 st.session_state[_k("last_delete_msg")] = (
                     f"已清空 {deleted_n} 筆；" + ("遠端確認通過。" if st.session_state.get(_k("last_mutation_permanent_ok"), False)
@@ -7604,7 +7487,7 @@ def main():
         render_pro_info_card(
             "同步 / 欄位完整性",
             [
-                ("主要來源", "godpick_records.json + Firestore", "雙寫"),
+                ("主要來源", "GitHub runtime-data H127", "單一遠端權威"),
                 ("自選股匯入", "可將勾選紀錄匯入 watchlist.json", "已整合"),
                 ("匯入位置", _watchlist_github_config()["path"], "沿用4_自選股中心"),
                 ("UI 設定", _ui_config_github_config()["path"], "永久記錄"),

@@ -254,6 +254,8 @@ def task_record_latest_price(cfg: dict[str, Any] | None = None) -> dict[str, Any
         if callable(ensure): df = ensure(df)
         st = ns["__headless_st__"]
         st.session_state[ns.get("_k", lambda x:x)("latest_price_batch_size")] = int(cfg.get("batch_size", 100) or 100)
+        from godpick_persistence_service import records_authority_signature
+        st.session_state[ns.get("_k", lambda x:x)("records_source_sig")] = records_authority_signature()
         updated = ns["_refresh_latest_prices"](df, only_active=bool(cfg.get("only_active", False)))
         summary = dict(getattr(updated, "attrs", {}).get("latest_refresh_summary", {}) or {})
         try:
@@ -294,6 +296,9 @@ def task_record_performance(cfg: dict[str, Any] | None = None) -> dict[str, Any]
             process_all=bool(cfg.get("process_all", True)),
         )
         rows, load_msgs, _ = _ensure_records_authority_safe()
+        from godpick_persistence_service import records_authority_verification_h240
+        if records_authority_verification_h240().get("status") != "VERIFIED" or not (result or {}).get("ok", True):
+            return _report(False, "H241 績效權威未確認；不重寫舊紀錄", details={"performance":result,"load_messages":load_msgs[-10:]}, started=t0)
         # H158: background GitHub "queued" is NOT a verified permanent write.
         # Under Actions, request synchronous remote confirmation when Firestore
         # did not confirm, instead of re-running all historical calculations

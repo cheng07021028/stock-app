@@ -652,6 +652,10 @@ def _row_dedupe_key(row: dict[str, Any]) -> str:
 
 def _read_rows_from_github_or_local(path_name: str) -> tuple[list[dict[str, Any]], str]:
     """同時讀 GitHub 與本機，避免 GitHub 有舊資料時遮住本機最新推薦清單。"""
+    if Path(path_name).name == "godpick_records.json":
+        from godpick_persistence_service import load_records_permanent
+        rows, details = load_records_permanent()
+        return [dict(r, 資料來源="股神推薦紀錄") for r in rows], "｜".join(details)
     all_rows: list[dict[str, Any]] = []
     msgs: list[str] = []
 
@@ -1761,31 +1765,9 @@ def _ensure_record_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _read_records_from_github() -> tuple[pd.DataFrame, str]:
-    cfg = _github_config()
-    token = cfg["token"]
-    if not token:
-        return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS), "未設定 GITHUB_TOKEN"
-    try:
-        resp = requests.get(
-            _github_contents_url(cfg["owner"], cfg["repo"], cfg["path"]),
-            headers=_github_headers(token),
-            params={"ref": cfg["branch"]},
-            timeout=25,
-        )
-        if resp.status_code == 404:
-            return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS), "尚未建立 godpick_records.json"
-        if resp.status_code != 200:
-            return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS), f"讀取推薦清單失敗：{resp.status_code} / {resp.text[:300]}"
-        data = resp.json()
-        content = data.get("content", "")
-        if not content:
-            return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS), "推薦清單為空"
-        payload = json.loads(base64.b64decode(content).decode("utf-8"))
-        if not isinstance(payload, list):
-            return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS), "推薦清單格式不是 list"
-        return _ensure_record_columns(pd.DataFrame(payload)), ""
-    except Exception as e:
-        return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS), f"讀取推薦清單例外：{e}"
+    from godpick_persistence_service import load_records_permanent
+    rows, details=load_records_permanent()
+    return _ensure_record_columns(pd.DataFrame(rows)), "｜".join(details)
 
 
 def _get_records_sha() -> tuple[str, str]:
@@ -1846,64 +1828,13 @@ def _init_firebase_app():
 
 
 def _write_records_to_firestore(records: list[dict[str, Any]]) -> tuple[bool, str]:
-    try:
-        _init_firebase_app()
-        db = firestore.client()
-        batch = db.batch()
-        now = firestore.SERVER_TIMESTAMP
-        summary_ref = db.collection("system").document("godpick_records_summary")
-        batch.set(summary_ref, {"count": len(records), "updated_at": now, "source": "streamlit_godpick_list"}, merge=True)
-        records_ref = db.collection("godpick_records")
-        existing = list(records_ref.stream())
-        existing_ids = {doc.id for doc in existing}
-        new_ids = set()
-        for row in records:
-            rec_id = _safe_str(row.get("record_id"))
-            if not rec_id:
-                continue
-            new_ids.add(rec_id)
-            doc_ref = records_ref.document(rec_id)
-            payload = dict(row)
-            payload["updated_at"] = now
-            batch.set(doc_ref, payload, merge=True)
-        for old_id in existing_ids - new_ids:
-            batch.delete(records_ref.document(old_id))
-        batch.commit()
-        return True, "已同步寫入 Firestore"
-    except Exception as e:
-        return False, f"Firestore 同步失敗：{e}"
+    return False, "H241 推薦紀錄 Firestore 已停用"
 
 
 def _write_records_to_github(df: pd.DataFrame) -> tuple[bool, str]:
-    cfg = _github_config()
-    token = cfg["token"]
-    if not token:
-        return False, "未設定 GITHUB_TOKEN"
-    sha, err = _get_records_sha()
-    if err:
-        return False, err
-    work = _ensure_record_columns(df)
-    content_text = json.dumps(work.to_dict(orient="records"), ensure_ascii=False, indent=2)
-    encoded = base64.b64encode(content_text.encode("utf-8")).decode("utf-8")
-    body: dict[str, Any] = {
-        "message": f"update godpick records from 推薦清單 at {_now_text()}",
-        "content": encoded,
-        "branch": cfg["branch"],
-    }
-    if sha:
-        body["sha"] = sha
-    try:
-        resp = requests.put(
-            _github_contents_url(cfg["owner"], cfg["repo"], cfg["path"]),
-            headers=_github_headers(token),
-            json=body,
-            timeout=30,
-        )
-        if resp.status_code in (200, 201):
-            return True, f"已回寫 GitHub：{cfg['path']}"
-        return False, f"GitHub 寫入失敗：{resp.status_code} / {resp.text[:500]}"
-    except Exception as e:
-        return False, f"GitHub 寫入例外：{e}"
+    from godpick_persistence_service import upsert_records_authority_fast
+    report, _ = upsert_records_authority_fast(df.to_dict(orient="records"), reason="Page10 compatibility upsert", require_remote_confirm=True)
+    return report.permanent_ok, "｜".join(report.messages())
 
 
 def _sync_records(df: pd.DataFrame) -> tuple[bool, list[str]]:

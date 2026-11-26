@@ -882,11 +882,23 @@ def update_recommendation_perf_fast_v77(
     }
 
     root = Path(".")
+    h241_base = None
+    h241_sig = ""
+    h241_authority = None
+    # In production the main record file is never directly edited on disk.
+    if any(Path(fn).name == "godpick_records.json" for fn in json_files):
+        import godpick_persistence_service as h241_authority
+        h241_base, h241_messages, _ = h241_authority.ensure_records_local_authority_current()
+        if h241_authority.records_authority_verification_h240().get("status") != "VERIFIED":
+            summary["ok"] = False
+            summary["messages"].extend(h241_messages)
+            return summary
+        h241_sig = h241_authority.records_authority_signature()
     work_by_file: Dict[str, List[Tuple[str, int, str]]] = {}
 
     for fn in json_files:
         path = root / fn
-        records = _read_json_records(path)
+        records = h241_base if Path(fn).name == "godpick_records.json" else _read_json_records(path)
         if not records:
             continue
 
@@ -949,7 +961,7 @@ def update_recommendation_perf_fast_v77(
 
     for fn, items in by_file.items():
         path = root / fn
-        records = _read_json_records(path)
+        records = [dict(r) for r in h241_base] if Path(fn).name == "godpick_records.json" else _read_json_records(path)
         changed = False
 
         for idx, code in items:
@@ -966,7 +978,14 @@ def update_recommendation_perf_fast_v77(
                 summary["fail"] += 1
 
         if changed:
-            _write_json_records(path, records)
+            if Path(fn).name == "godpick_records.json":
+                report = h241_authority.save_records_sync_fast(records, reason="H241 performance update", expected_authority_signature=h241_sig, require_remote_confirm=True)
+                summary["messages"].extend(report.messages())
+                if not (report.github_ok and report.local_ok):
+                    summary["ok"] = False
+                    continue
+            else:
+                _write_json_records(path, records)
             summary["updated_files"].append(fn)
 
     if summary["candidates"] == 0:
