@@ -602,3 +602,20 @@ if st.checkbox('載入 H229 同成本報酬驗收（唯讀）'):
         if st.checkbox('產生 H229 同成本報酬 Excel'):
             st.download_button('下載 H229 報酬驗收',net_excel(h229),'H229_NetEdge.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     except Exception as ex:st.error('H229 驗收失敗：'+str(ex)[:180])
+
+
+st.subheader('H237｜正式資料管線驗收（唯讀）')
+if st.checkbox('載入 H237 原始證據與成熟績效驗收'):
+    try:
+        from godpick_h237_pipeline_acceptance import run as pipeline_acceptance,excel as pipeline_excel
+        h237_full=st.checkbox('一併重新核對 H225～H229 完整成熟績效（較耗時）',key='h237_full')
+        with st.spinner('核對原始財報、封存及實機資料缺口…'):h237=pipeline_acceptance(Path(root),full=h237_full)
+        st.caption(h237['version']+'｜'+h237['asof']+'｜'+h237['status'])
+        st.info('收集器健康不等於原始重驗；無雲端下載、無買進授權或權重變更。')
+        st.dataframe(pd.DataFrame(h237['checks']),hide_index=True,use_container_width=True)
+        for k in ('summary','candidates','shortlist','first'):st.dataframe(pd.DataFrame(h237[k]),hide_index=True,use_container_width=True)
+        with st.expander('分期對帳、原始批次證據、品質閘門及異常'):
+            for k in ('periods','local_batch','gates','errors'):st.dataframe(pd.DataFrame(h237[k]),hide_index=True,use_container_width=True)
+        if st.checkbox('產生 H237 正式管線 Excel'):
+            st.download_button('下載 H237 正式管線驗收',pipeline_excel(h237),'H237_PipelineAcceptance.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    except Exception as ex:st.error('H237 驗收失敗：'+type(ex).__name__)

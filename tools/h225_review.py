@@ -19,5 +19,8 @@ def main():
     from godpick_h229_net_edge import run as net_edge,excel as net_excel
     y=net_edge(a.root,r['asof'],base=r,acceptance=q,review=z,ranking=x);dddd=a.out/'h229';dddd.mkdir(exist_ok=True)
     (dddd/'H229_NetEdge.xlsx').write_bytes(net_excel(y));(dddd/'health.json').write_text(json.dumps({k:v for k,v in y.items() if k not in ('batch','net','detail','causes','validation','benchmark_gaps','shortlist','competition','tasks')},ensure_ascii=False,allow_nan=False,indent=2),'utf-8')
+    from godpick_h237_pipeline_acceptance import run as pipeline
+    from h237_acceptance import write as write_acceptance
+    write_acceptance(pipeline(a.root,r['asof'],base=r,acceptance=q,net=y),a.out/'h237')
     print(json.dumps(h,ensure_ascii=False));return 0 if r['status']=='DATA_GATES_PASS' and q['status']=='DATA_GATES_PASS' else 2
 if __name__=='__main__':raise SystemExit(main())
