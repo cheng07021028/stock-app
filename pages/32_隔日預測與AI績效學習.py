@@ -440,6 +440,11 @@ if st.checkbox('載入 H222 歷史財報驗收（唯讀）'):
             st.markdown('[官方 XBRL 案例文件整批下載](https://mopsov.twse.com.tw/mops/web/t203sb02)')
             st.code('python tools/h222_history.py --batch-dir "D:/MOPS_XBRL" --out "D:/MOPS_Review"',language='bash')
             st.caption('匯出 H234_BatchFinancialReview.xlsx，檢查逐股科目、季度覆蓋與官方重疊衝突。大型ZIP請在本機執行，避免阻塞Streamlit。')
+            st.markdown('**H235 官方網址直取入庫（本機／持久磁碟）**')
+            st.caption('僅接受官方原始HTTPS下載網址；本機ZIP仍只供H234研究。直取後原始ZIP及封存憑據保存在 data/h235，不可上傳大型ZIP到GitHub。')
+            st.code('python tools/h222_history.py --official-quarter 2025Q3 --official-batch-url "從官方下載頁複製的完整HTTPS網址" --out "D:/MOPS_Review"',language='bash')
+            if h222.get('batch_scope'):st.dataframe(pd.DataFrame(h222['batch_scope']),hide_index=True,use_container_width=True)
+            else:st.info('尚無H235官方直取封存。')
             st.write(h222['errors'],h222['rejected'],h222['conflicts'])
     except Exception as ex:st.error('H222 歷史財報驗收失敗：'+str(ex)[:180])
 

@@ -6,7 +6,17 @@ ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT))
 from godpick_h222_financial_history import collect,inspect,excel
 
 def main():
-    p=argparse.ArgumentParser(description='H222 historical financial evidence');p.add_argument('--root',type=Path,default=ROOT);p.add_argument('--collect',action='store_true');p.add_argument('--months',type=int,default=13);p.add_argument('--quarters',type=int,default=8);p.add_argument('--budget',type=int,default=8);p.add_argument('--out',type=Path);p.add_argument('--company-codes',help='Optional individually verified historical supplement, comma-separated current stock codes (1..20)');p.add_argument('--auto-company',action='store_true',help='H233 bounded bulk + fair/growth individual supplement');p.add_argument('--batch-archive',type=Path,action='append',help='H234 local operator-downloaded MOPS ZIP (repeat up to 12)');p.add_argument('--batch-dir',type=Path,help='Directory of original operator-downloaded MOPS ZIPs (max 12)');a=p.parse_args()
+    p=argparse.ArgumentParser(description='H222 historical financial evidence');p.add_argument('--root',type=Path,default=ROOT);p.add_argument('--collect',action='store_true');p.add_argument('--months',type=int,default=13);p.add_argument('--quarters',type=int,default=8);p.add_argument('--budget',type=int,default=8);p.add_argument('--out',type=Path);p.add_argument('--company-codes',help='Optional individually verified historical supplement, comma-separated current stock codes (1..20)');p.add_argument('--auto-company',action='store_true',help='H233 bounded bulk + fair/growth individual supplement');p.add_argument('--batch-archive',type=Path,action='append',help='H234 local operator-downloaded MOPS ZIP (repeat up to 12)');p.add_argument('--batch-dir',type=Path,help='Directory of original operator-downloaded MOPS ZIPs (max 12)');p.add_argument('--official-batch-url',help='Exact official HTTPS quarterly ZIP URL copied from MOPS');p.add_argument('--official-quarter',help='Explicit YYYYQn for direct official ZIP retrieval');a=p.parse_args()
+    if a.official_batch_url or a.official_quarter:
+        if not a.official_batch_url or not a.official_quarter or a.collect or a.company_codes or a.auto_company or a.batch_archive or a.batch_dir:p.error('official direct batch requires both URL and quarter; excludes other modes')
+        from godpick_h235_official_batch import collect as direct
+        from godpick_h192_financial_growth import quarter
+        period=quarter(a.official_quarter)
+        if period is None:p.error('invalid official quarter')
+        r=direct(a.root,period,a.official_batch_url)
+        if a.out:
+            a.out.mkdir(parents=True,exist_ok=True);(a.out/'H222_FinancialHistory.xlsx').write_bytes(excel(inspect(a.root)))
+        print(json.dumps(r,ensure_ascii=False,indent=2));return 0
     if a.batch_dir:
         if not a.batch_dir.is_dir():p.error('--batch-dir must exist')
         a.batch_archive=(a.batch_archive or [])+sorted(a.batch_dir.glob('*.zip'))

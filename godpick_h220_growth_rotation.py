@@ -75,7 +75,7 @@ def rotation(current,history,previous_day):
 def source_fingerprint(root):
     """Guard mutable source archives and master as well as the market/return ledgers."""
     paths=[];root=Path(root)
-    for rel in ('data/h115','data/h192','data/h222','data/h123','data/h124','data/h211/daily','data/h117/daily/TAIEX','data/h220/daily','data/cache/tdcc_holder_truth'):
+    for rel in ('data/h115','data/h192','data/h222','data/h235','data/h123','data/h124','data/h211/daily','data/h117/daily/TAIEX','data/h220/daily','data/cache/tdcc_holder_truth'):
         paths.extend(x for x in (root/rel).rglob('*') if x.is_file())
     for rel in ('stock_master_cache.json','official_factors_cache.json','godpick_tdcc_holder_snapshots.json','data/h190/health.json'):
         if (root/rel).is_file():paths.append(root/rel)

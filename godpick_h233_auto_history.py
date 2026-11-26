@@ -31,6 +31,9 @@ def bulk_periods(root,now,quarters):
                 v=history.read_partition(path,'ytd',market,p)
                 if fin.moment(v['observed_at'])<=now:found.update((market,r['code'],p) for r in v['rows'])
             except (ValueError,OSError,TypeError,KeyError):continue
+    from godpick_h235_official_batch import load as batch_load
+    batch,_,_=batch_load(root)
+    found.update(k for k,v in batch.items() if q-quarters<k[2]<=q and fin.moment(v[1])<=now)
     return found
 
 

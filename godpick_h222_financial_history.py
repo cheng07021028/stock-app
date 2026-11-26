@@ -285,6 +285,8 @@ def historical_row(kind,market,p,row):
     """Explicit allowlist; source URL must match the exact official partition."""
     if row.get('availability_basis')!='FIRST_OBSERVED':return False
     if kind in ('margin','ytd'):
+        from godpick_h235_official_batch import historical_row as batch_row
+        if batch_row(kind,p,row):return True
         import godpick_h231_company_history as company
         if row.get('historical_source')==company.VERSION and row.get('source_url')==company.URL:return True
     return kind in ('revenue','margin','ytd') and row.get('historical_source')==VERSION and row.get('source_url')==source_url(kind,market,p)
@@ -308,15 +310,18 @@ def load_rows(root):
     # Individual official reports are supplementary, not full-market completion.
     import godpick_h231_company_history as company
     individual,individual_errors=company.load(root);errors.extend(individual_errors)
+    import godpick_h235_official_batch as batch
+    batch_rows,batch_errors,_=batch.load(root);errors.extend(batch_errors)
     # Preserve both source histories until H192 applies the research as-of cutoff.
     # Derive margins inside each family only; do not subtract mixed sources.
-    def base(kind,market,p,code,t,source):
+    def base(kind,market,p,code,t,source,r):
         b=_base(kind,market,p,code,t)
         if source==company.URL:b.update(source_url=source,historical_source=company.VERSION)
+        if source==batch.PORTAL:b.update(source_url=source,historical_source=batch.VERSION,h235_archive_sha256=r['h235_archive_sha256'],h235_download_url=r['h235_download_url'])
         return b
-    for family in (quarters,individual):
+    for family in (quarters,individual,batch_rows):
         for (market,code,p),(r,t,source) in family.items():
-            out['ytd'].append({**base('ytd',market,p,code,t,source),**{k:r[k] for k in fin.METRICS['ytd']},'h232_eps_basis':r.get('h232_eps_basis'),'history_financial_values':{k:r[k] for k in ('revenue_ytd','gross_profit_ytd',*fin.METRICS['ytd'])},'industry_type':'GENERAL','basis':'CUMULATIVE_YTD_NOT_SINGLE_QUARTER','unit':'元／股','profit_basis':'SAME_SOURCE_DISCLOSED_UNIT','operating_profit_ytd_label':'營業利益（損失）','net_profit_ytd_label':'本期淨利（淨損）','report_date':None})
+            out['ytd'].append({**base('ytd',market,p,code,t,source,r),**{k:r[k] for k in fin.METRICS['ytd']},'h232_eps_basis':r.get('h232_eps_basis'),'history_financial_values':{k:r[k] for k in ('revenue_ytd','gross_profit_ytd',*fin.METRICS['ytd'])},'industry_type':'GENERAL','basis':'CUMULATIVE_YTD_NOT_SINGLE_QUARTER','unit':'元／股','profit_basis':'SAME_SOURCE_DISCLOSED_UNIT','operating_profit_ytd_label':'營業利益（損失）','net_profit_ytd_label':'本期淨利（淨損）','report_date':None})
             if p%4 and (market,code,p-1) not in family:continue
             prev,pt,ps=family.get((market,code,p-1),({},t,source)) if p%4 else ({},t,source)
             if ps!=source:continue
@@ -324,7 +329,7 @@ def load_rows(root):
             if d['revenue_ytd']<=0:continue
             vals={k:round(d[v]/d['revenue_ytd']*100,4) for k,v in zip(fin.METRICS['margin'],('gross_profit_ytd','operating_profit_ytd','net_profit_ytd'))}
             if any(not -100<=v<=1000 for v in vals.values()):continue
-            visible=max((t,pt),key=fin.moment);out['margin'].append({**base('margin',market,p,code,visible,source),**vals,'industry_type':'GENERAL','statement_basis':'SINGLE_QUARTER','derived_from':'SAME_H222_CUMULATIVE_INCOME_STATEMENTS' if source==QUARTER_URL else 'SAME_H231_CUMULATIVE_INCOME_STATEMENTS'})
+            visible=max((t,pt),key=fin.moment);out['margin'].append({**base('margin',market,p,code,visible,source,r),**vals,'industry_type':'GENERAL','statement_basis':'SINGLE_QUARTER','derived_from':'SAME_H222_CUMULATIVE_INCOME_STATEMENTS' if source==QUARTER_URL else 'SAME_H235_CUMULATIVE_INCOME_STATEMENTS' if source==batch.PORTAL else 'SAME_H231_CUMULATIVE_INCOME_STATEMENTS'})
     return out,errors
 
 
@@ -347,7 +352,10 @@ def inspect(root=ROOT,now=None):
     except (OSError,ValueError):company_health={}
     try:auto_health=ar._read(root/'data/h222/h233/health.json')
     except (OSError,ValueError):auto_health={}
-    return {'version':VERSION,'asof':now.isoformat(),'auto_health':auto_health,'company_health':company_health,'h232_candidates':[r for r in stocks if r['H232同分母成長複核']],'summary':summary,'stocks':stocks,'candidates':[r for r in stocks if r['高成長財報複核']],'health':health,'errors':errors,'rejected':rejected,'conflicts':conflicts,'trade_authority_changed':False}
+    from godpick_h235_official_batch import load as batch_load
+    _,_,batch_scope=batch_load(root)
+    batch_scope=[r for r in batch_scope if fin.moment(r['首次核實'])<=now]
+    return {'version':VERSION,'asof':now.isoformat(),'batch_scope':batch_scope,'auto_health':auto_health,'company_health':company_health,'h232_candidates':[r for r in stocks if r['H232同分母成長複核']],'summary':summary,'stocks':stocks,'candidates':[r for r in stocks if r['高成長財報複核']],'health':health,'errors':errors,'rejected':rejected,'conflicts':conflicts,'trade_authority_changed':False}
 
 
 def excel(r):
@@ -362,4 +370,5 @@ def excel(r):
     if r.get('auto_health'):
         table(w,'08_H233自動補證',r['auto_health'].get('queue',[]))
         table(w,'09_H233佇列摘要',[{**r['auto_health'].get('counts',{}),'資料時間':r['auto_health'].get('asof'),'狀態':r['auto_health'].get('status'),'彙總請求':r['auto_health'].get('bulk_requests'),'個股請求':r['auto_health'].get('company_requests')}])
+    if r.get('batch_scope'):table(w,'10_H235官方批次',r['batch_scope'])
     out=io.BytesIO();w.save(out);return out.getvalue()

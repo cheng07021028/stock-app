@@ -285,14 +285,18 @@ def build_ledgers(data,now):
     # H231: choose source family only AFTER filtering actual observation times.
     # A future supplement cannot erase previously visible bulk evidence.
     import godpick_h231_company_history as company
-    individual=defaultdict(set); cross_conflicts=set()
+    from godpick_h235_official_batch import VERSION as batch_version
+    individual=defaultdict(set); batch_periods=defaultdict(set); cross_conflicts=set()
     for (kind,market,code,p),rs in groups.items():
         if kind!='ytd':continue
         h=[r for r in rs if r.get('historical_source') and r.get('history_financial_values')]
         if len({r['source_url'] for r in h})>1 and any(r['history_financial_values']!=h[0]['history_financial_values'] for r in h):cross_conflicts.add((market,code,p))
         if any(r.get('historical_source')==company.VERSION for r in h):individual[market,code].add(p)
-    for market,code,p in cross_conflicts:individual[market,code].discard(p)
+        if any(r.get('historical_source')==batch_version for r in h):batch_periods[market,code].add(p)
+    for market,code,p in cross_conflicts:
+        individual[market,code].discard(p);batch_periods[market,code].discard(p)
     coherent={k for k,ps in individual.items() if any(set(range(end-7,end+1))<=ps for end in ps)}
+    batch_coherent={k for k,ps in batch_periods.items() if any(set(range(end-7,end+1))<=ps for end in ps)}
     ledgers=defaultdict(dict);conflicts=Counter()
     for (kind,market,code,p),rs in groups.items():
         # Resolve each field only from actual same-period observations. Missing
@@ -303,15 +307,18 @@ def build_ledgers(data,now):
         if kind in ('ytd','margin') and ((market,code,p) in cross_conflicts or (kind=='margin' and p%4 and (market,code,p-1) in cross_conflicts)):
             conflicts[kind]+=1;continue
         if kind in ('ytd','margin'):
-            company_rows=[r for r in rs if r.get('historical_source')==company.VERSION]
-            bulk_rows=[r for r in rs if r.get('historical_source') and r.get('historical_source')!=company.VERSION]
-            if company_rows and bulk_rows:
-                # Reject inconsistent sources rather than picking by observation time.
+            families=defaultdict(list)
+            for r in rs:
+                if r.get('historical_source'):families[r['historical_source']].append(r)
+            if len(families)>1:
+                # Check every historical family; never merge financial lines across sources.
                 tol=.011 if kind=='margin' else 1e-8
-                if any(abs(a[k]-b[k])>tol for a in company_rows for b in bulk_rows for k in keys if a.get(k) is not None and b.get(k) is not None):
+                vals=list(families.values())
+                if any(abs(a[k]-b[k])>tol for i,aa in enumerate(vals) for bb in vals[i+1:] for a in aa for b in bb for k in keys if a.get(k) is not None and b.get(k) is not None):
                     conflicts[kind]+=1;continue
-                preferred=company_rows if (market,code) in coherent else bulk_rows
-                rs=[r for r in rs if not r.get('historical_source')]+preferred
+                bulk=[k for k in families if k not in (company.VERSION,batch_version)]
+                preferred=company.VERSION if (market,code) in coherent and company.VERSION in families else batch_version if (market,code) in batch_coherent and batch_version in families else bulk[0] if bulk else batch_version if batch_version in families else company.VERSION
+                rs=[r for r in rs if not r.get('historical_source')]+families[preferred]
         # Backfill cannot silently replace a conflicting previously observed fact.
         hist=[r for r in rs if r.get('historical_source')]; live=[r for r in rs if not r.get('historical_source')]
         if hist and live:
