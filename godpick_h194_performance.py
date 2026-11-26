@@ -186,7 +186,7 @@ def freeze(result,market,model,now):
         m,c=x.get('市場'),x.get('股票代號')
         if m not in ar.URLS or not isinstance(c,str) or not re.fullmatch('[1-9][0-9]{3}',c):continue
         context=x.get('H211技術證據') or {}
-        audit.append({'market':m,'code':c,'tier':str(x.get('研究分級') or ''),'tech_gap':str(x.get('技術缺口') or ''),'financial_gap':str(x.get('財報缺口') or ''),'liquid':context.get('流動性通過') if isinstance(context,dict) else None,'tech_pools':str(x.get('技術研究池') or ''),'financial_pools':str(x.get('財報研究池') or '')})
+        audit.append({'market':m,'code':c,'tier':str(x.get('研究分級') or ''),'tech_gap':str(x.get('技術缺口') or ''),'financial_gap':str(x.get('財報缺口') or ''),'liquid':context.get('流動性通過') if isinstance(context,dict) else None,'tech_pools':str(x.get('技術研究池') or ''),'financial_pools':str(x.get('財報研究池') or ''),'industry':str(x.get('產業') or ''),'stage':str(x.get('H198階段') or '') if x.get('H198資料日期')==day else '', 'stage_day':day if x.get('H198資料日期')==day else '', 'stage_counterevidence':str(x.get('H198反證') or '') if x.get('H198資料日期')==day else ''})
     body={'version':VERSION,'kind':'signals','day':day,'created_at':ts,'h193_hash':digest(result),'models':model,'gaps':dict(gaps),'rows':rows}
     if audit and len({(x['market'],x['code']) for x in audit})==len(audit):
         body['h217_audit']={'decision_day':day,'market_day':result.get('market_day'),'same_session':result.get('same_session') is True,'rows':audit}

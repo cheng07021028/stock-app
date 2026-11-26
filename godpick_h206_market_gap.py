@@ -71,7 +71,7 @@ def build(root=ROOT,now=None):
     root=Path(root);now=perf.stamp(now or datetime.now(ar.TZ)); body={'version':VERSION,'asof':now.isoformat(),'day':'','previous_day':'','status':'DATA_PENDING','rows':[],'coverage':{},'errors':[],'prior_research':{},'trade_authority_changed':False,'basis':'原始收盤價變動；非除權息報酬。當前股票主檔；非歷史成分重建。'}
     market=perf.Market(root,now)
     if market.errors:body['errors'].extend(market.errors[:10]);return body
-    cutoff=now.date().isoformat() if now.time()>=time(18,15) else (now.date()-timedelta(days=1)).isoformat()
+    cutoff=now.date().isoformat() if now.time()>=time(18,15) and market.today_confirmed(now.date().isoformat()) else (now.date()-timedelta(days=1)).isoformat()
     ds=[d for d in market.days if d<=cutoff]
     if len(ds)<2:body['errors'].append('缺官方連續交易日曆');return body
     prev,d=ds[-2:];body.update(day=d,previous_day=prev)

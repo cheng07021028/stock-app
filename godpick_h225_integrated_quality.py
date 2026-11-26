@@ -124,7 +124,7 @@ def fingerprint(root):
 
 def run(root=ROOT,now=None,*,include_detail=False):
     root=Path(root);now=p.stamp(now or datetime.now(ar.TZ));sig=fingerprint(root);m=p.Market(root,now);day,items,source,history,errors=snapshots(root,m,now)
-    allrows,short,counts=consolidate(items,m,day);review=first.run(root,now);c=closure.inspect(root,now);scope=scenarios.audit(root,now);
+    allrows,short,counts=consolidate(items,m,day);review=first.run(root,now,include_detail=include_detail);c=closure.inspect(root,now);scope=scenarios.audit(root,now);
     from godpick_h191_opportunity_engine import run as technical
     tech=technical(root,now=now,top=100);
     ss,oo=p.read_ledger(root);signals=[{**s,'source':'H194'} for s in ss.values() if p.stamp(s['created_at'])<=now]+[s for s in back.read_signals(root,now,ledger=(ss,oo)) if s['source']=='H209']
@@ -153,7 +153,7 @@ def run(root=ROOT,now=None,*,include_detail=False):
     if include_detail:
         from godpick_h212_data_recovery import gaps
         recovery=gaps(root,now,technical=tech)
-        extra={'first_errors':list(m.errors),'first_detail':review['first_detail'],'first':review['first'],'miss':review['miss'],'flows':c['flows'],'action_rows':action_rows,'recovery':recovery,'financial_health':health,'first_signals':[s for s in signals if s['source']=='H194' and s['signal_day']==review['counts']['首批研究日']]}
+        extra={'review_detail':review['review_detail'],'review_signals':review['review_signals'],'review_board':review['review_board'],'first_errors':list(m.errors),'first_detail':review['first_detail'],'first':review['first'],'miss':review['miss'],'flows':c['flows'],'action_rows':action_rows,'recovery':recovery,'financial_health':health,'first_signals':[s for s in signals if s['source']=='H194' and s['signal_day']==review['counts']['首批研究日']]}
     if sig!=fingerprint(root):raise RuntimeError('H225 source changed during review; retry')
     return {**extra,'version':VERSION,'asof':now.isoformat(),'day':day,'status':'DATA_GATES_PASS' if gates and all(r['狀態']=='PASS' for r in gates) and not errors else 'EVIDENCE_PENDING','gates':gates,'sources':source,'rows':allrows,'shortlist':short,'counts':counts,'first_counts':review['counts'],'recall':review['recall'],'recall_gaps':review['recall_gaps'],'financial_periods':c['financial'],'scope':scope,'actions':actions,'maturity':maturity,'detail':detail,'errors':errors,'trade_authority_changed':False,'weight_multiplier':1.0}
 

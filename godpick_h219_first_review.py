@@ -87,7 +87,7 @@ def recall_gaps(h):
         out.append({'市場':market,'主檔':n,'有效60日':v,'覆蓋率':v/n if need is not None and isinstance(v,int) else None,'95%所需':need,'距門檻有效股數':max(0,need-v) if need is not None and isinstance(v,int) else None,'召回候選':c.get('召回'),'缺口原因':h.get('reasons',{}).get(market,{}),'狀態':c.get('狀態','待核'),'全市場狀態':h.get('status'),'權限':'研究診斷／不降低門檻'})
     return out
 
-def run(root=ROOT,now=None):
+def run(root=ROOT,now=None,*,include_detail=False):
     root=Path(root);now=p.stamp(now or datetime.now(ar.TZ));fp=e.fingerprint(root);mf=ar._archive_manifest(root/'data/h190')[1];m=p.Market(root,now);ss,oo=p.read_ledger(root)
     signals=[{**s,'source':'H194'} for s in ss.values() if p.stamp(s['created_at'])<=now]+[s for s in b.read_signals(root,now,ledger=(ss,oo)) if s['source']=='H209']
     detail,_=e.reconcile(signals,oo,m,b.Evidence(root,m,now),now);co,bm=cohorts(detail,m,signals)
@@ -100,7 +100,7 @@ def run(root=ROOT,now=None):
     body,s,_=load(root,now);short,reason=manager_rows(body,current.get('day')) if s=='CURRENT' else ([], 'H195 '+s)
     if fp!=e.fingerprint(root) or mf!=ar._archive_manifest(root/'data/h190')[1]:raise RuntimeError('H219 evidence changed; retry')
     counts={'首批研究日':first,'首批訊號':sum(x['訊號來源']=='H194' and x['研究日']==first and x['期間']==1 for x in first_detail),'首批T+1到期':sum(x['期間']==1 and bool(x['出場日']) for x in first_detail),'首批T+1原價有效':sum(x['期間']==1 and x['原始績效狀態']=='VERIFIED_RAW' for x in first_detail),'首批T+1淨績效有效':sum(x['期間']==1 and x['淨績效狀態']=='VALID_CASH_MODEL' and finite(x['淨報酬']) for x in first_detail),'H209訊號':sum(s['source']=='H209' for s in signals),'精簡研究數':len(short)}
-    return {'version':VERSION,'asof':now.isoformat(),'day':current.get('day'),'counts':counts,'first':first_rows,'first_detail':first_detail,'cohorts':co,'breadth':bm,'recall':rec,'miss':miss,'recall_gaps':recall_gaps(h),'shortlist':short,'shortlist_note':reason,'errors':list(m.errors)+list(current.get('errors',[]))+list(h.get('errors',[])),'status':'DESCRIPTIVE_ONLY' if counts['首批T+1原價有效'] and not m.errors else 'DATA_PENDING','weight_multiplier':1.0,'trade_authority_changed':False}
+    return {**({'review_detail':detail,'review_signals':signals,'review_board':current} if include_detail else {}),'version':VERSION,'asof':now.isoformat(),'day':current.get('day'),'counts':counts,'first':first_rows,'first_detail':first_detail,'cohorts':co,'breadth':bm,'recall':rec,'miss':miss,'recall_gaps':recall_gaps(h),'shortlist':short,'shortlist_note':reason,'errors':list(m.errors)+list(current.get('errors',[]))+list(h.get('errors',[])),'status':'DESCRIPTIVE_ONLY' if counts['首批T+1原價有效'] and not m.errors else 'DATA_PENDING','weight_multiplier':1.0,'trade_authority_changed':False}
 
 def table(w,name,rows):
     from openpyxl.styles import Font,PatternFill

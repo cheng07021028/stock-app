@@ -101,8 +101,8 @@ def outcomes(signals,ix,market,e,now):
     for s in signals:
         fresh=freshness(s,ix,market)
         for n in HORIZONS:
-            ds=market.span(s['signal_day'],n)
-            if not ds or (ds[-1]==now.date().isoformat() and now.time()<time(18,15)):
+            ds=perf.confirmed_span(market,s['signal_day'],n,now)
+            if not ds:
                 pending['未成熟或日曆不足']+=1;continue
             t=back.trade(s,ds,e)
             r={'研究日':s['signal_day'],'市場':s['market'],'股票代號':s['code'],'股票名稱':s['name'],'訊號來源':s['source'],'期間':n,'出場日':ds[-1],'研究新鮮度':fresh,'決策時間':s['created_at'],**t}

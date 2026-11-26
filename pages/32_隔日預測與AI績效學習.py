@@ -506,3 +506,20 @@ if st.checkbox('載入 H226 實戰驗收（唯讀）'):
         if st.checkbox('產生 H226 實戰驗收 Excel'):
             st.download_button('下載 H226 實戰驗收',live_excel(h226),'H226_LiveAcceptance.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     except Exception as ex:st.error('H226 驗收失敗：'+str(ex)[:180])
+
+
+st.subheader('H227｜強勢命中精度、績效反證與策略校正')
+if st.checkbox('載入 H227 真實績效反證（唯讀）'):
+    try:
+        from godpick_h227_strategy_validation import run as strategy_review,excel as strategy_excel
+        with st.spinner('核對前瞻命中、原始決策與完整策略日窗…'):h227=strategy_review(Path(root))
+        st.caption(h227['version']+'｜'+h227['asof']+'｜'+h227['day'])
+        st.warning('強勢榜為當前主檔回顧；非正式買進命中。缺前瞻證據或成熟績效不算零；不自動調權。')
+        st.write(h227['status'],h227['batch_status'],h227['counts'])
+        st.dataframe(pd.DataFrame(h227['precision']),hide_index=True,use_container_width=True)
+        st.dataframe(pd.DataFrame(h227['validation']),hide_index=True,use_container_width=True)
+        with st.expander('產業與逐股漏選、當時初期型態'):
+            for k in ('sectors','miss','stages','pairs'):st.dataframe(pd.DataFrame(h227[k]),hide_index=True,use_container_width=True)
+        if st.checkbox('產生 H227 策略驗收 Excel'):
+            st.download_button('下載 H227 策略驗收',strategy_excel(h227),'H227_StrategyValidation.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    except Exception as ex:st.error('H227 驗收失敗：'+str(ex)[:180])
