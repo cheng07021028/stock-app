@@ -8,6 +8,12 @@ on:
       quarters:
         description: 'Historical quarters (8-12)'
         default: '8'
+  push:
+    branches: [main]
+    paths:
+      - 'godpick_h222_financial_history.py'
+      - 'tools/h222_history.py'
+      - '.github/workflows/h222_financial_history.yml'
   schedule:
     - cron: '40 2,10,14 * * *' # Taipei 10:40, 18:40, 22:40
 permissions:

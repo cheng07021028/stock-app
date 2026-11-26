@@ -1,6 +1,12 @@
 name: H221 official institutional evidence closure
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'godpick_h221_evidence_closure.py'
+      - 'tools/h221_collect.py'
+      - '.github/workflows/h221_official_chips.yml'
   schedule:
     - cron: '50 10 * * 1-5' # Taipei 18:50
     - cron: '40 12 * * 1-5' # Taipei 20:40
