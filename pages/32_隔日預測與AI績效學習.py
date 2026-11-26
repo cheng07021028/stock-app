@@ -422,3 +422,26 @@ if st.checkbox('載入 H222 歷史財報驗收（唯讀）'):
             st.dataframe(pd.DataFrame(h222['health'].get('scope',[])),hide_index=True,use_container_width=True)
             st.write(h222['errors'],h222['rejected'],h222['conflicts'])
     except Exception as ex:st.error('H222 歷史財報驗收失敗：'+str(ex)[:180])
+
+st.subheader('H223｜歷史財報實證與營收成長情境')
+@st.cache_data(ttl=300,show_spinner=False)
+def load_h223(path):
+    from godpick_h223_growth_scenarios import run
+    return run(Path(path))
+if st.checkbox('載入 H223 財報、情境與優勢研究（唯讀）'):
+    try:
+        if st.button('重新讀取 H223'):load_h223.clear()
+        with st.spinner('重驗歷史財報並核對營收情境及實際結果…'):h223=load_h223(str(root))
+        st.caption(h223['version']+'｜'+h223['asof']+'｜資料日 '+h223['day'])
+        st.warning('營收情境不是公告財報或機率區間；EPS股本變動尚待核實；所有順位均為獨立研究，未修改H126。')
+        st.write(h223['status'],h223['counts'])
+        st.markdown('**高成長財報優勢順位**');st.dataframe(pd.DataFrame(h223['ranked']),hide_index=True,use_container_width=True)
+        st.markdown('**保守／基準／樂觀營收情境**');st.dataframe(pd.DataFrame(h223['forecast']),hide_index=True,use_container_width=True)
+        with st.expander('歷史回補獨立重驗及逐股缺口'):
+            st.dataframe(pd.DataFrame(h223['scope']),hide_index=True,use_container_width=True);st.dataframe(pd.DataFrame(h223['audit']),hide_index=True,use_container_width=True);st.write(h223['errors'],h223['rejected'],h223['conflicts'])
+        with st.expander('前瞻營收誤差與去年同期基準（第一筆封存、最新可見公告）'):
+            st.dataframe(pd.DataFrame(h223['feedback']),hide_index=True,use_container_width=True);st.dataframe(pd.DataFrame(h223['outcomes']),hide_index=True,use_container_width=True)
+        if st.checkbox('產生 H223 情境研究 Excel'):
+            from godpick_h223_growth_scenarios import excel as excel_h223
+            st.download_button('下載 H223 成長情境',excel_h223(h223),'H223_GrowthScenarios.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    except Exception as ex:st.error('H223 成長情境驗收失敗：'+str(ex)[:180])

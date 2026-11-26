@@ -17893,6 +17893,14 @@ def _build_excel_bytes_fast_h85(
         if 'H220_成長起漲研究' not in wb.sheetnames:
             wb.create_sheet('H220_成長起漲研究').append(['H220 研究證據待核；原報表不受影響',type(_h220_exc).__name__])
 
+    # H223 only same-session immutable research, not a new trading authority.
+    try:
+        from godpick_h223_growth_scenarios import append_manager as _h223_append
+        _h223_append(wb, Path(__file__).resolve().parents[1], locals().get('_h148_research_day'))
+    except Exception as _h223_exc:
+        if 'H223_成長優勢研究' not in wb.sheetnames:
+            wb.create_sheet('H223_成長優勢研究').append(['H223 研究證據待核；原報表不受影響',type(_h223_exc).__name__])
+
     # H206 same-export reconciliation, independent public market snapshot.
     try:
         from godpick_h206_market_gap import load as _h206_load, compare_export as _h206_compare, append_sheet as _h206_append

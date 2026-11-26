@@ -135,6 +135,18 @@ def targets(now,months=13,quarters=8):
                 for market in MARKETS:yield kind,market,end-i
 
 
+def response_diagnostic(html):
+    """Bounded header-only evidence for official schema failures; never publish rejected rows."""
+    soup=soup_of(html)
+    titles=[norm(t.get_text(' ',strip=True))[:200] for t in soup.find_all(['title','h1','h2','h3','h4','caption','center','b','strong']) if 0<len(t.get_text(strip=True))<220][:12]
+    headers=[]
+    for table in soup.find_all('table')[:12]:
+        for tr in table.find_all('tr')[:3]:
+            cells=tr.find_all('th',recursive=False)
+            if cells:headers.append([norm(c.get_text(' ',strip=True))[:80] for c in cells[:30]])
+    return {'titles':titles,'headers':headers[:16],'table_count':len(soup.find_all('table')),'raw_sha256':hashlib.sha256(html.encode('utf-8')).hexdigest()}
+
+
 def collect(root=ROOT,*,now=None,months=13,quarters=8,budget=8,http=None):
     import time
     fixed=now is not None;now=now or datetime.now(ar.TZ)
@@ -154,7 +166,7 @@ def collect(root=ROOT,*,now=None,months=13,quarters=8,budget=8,http=None):
         prev=fin.moment(attempts.get(key,{}).get('at'))
         if requests_count>=budget or failures[kind,market]>=2 or (prev and now-prev<timedelta(hours=12)):
             row['status']='PENDING';continue
-        url=source_url(kind,market,p);requests_count+=1
+        url=source_url(kind,market,p);requests_count+=1;html=None
         try:
             if requests_count>1 and not fixed:time.sleep(1)
             kwargs={'timeout':(5,20),'allow_redirects':False,'headers':{'User-Agent':'StockApp-H222-public-research/1.0','Accept':'text/html'}}
@@ -171,7 +183,11 @@ def collect(root=ROOT,*,now=None,months=13,quarters=8,budget=8,http=None):
             if len(rows)<LIMITS[market]:raise ValueError(f'LOW_COVERAGE_{len(rows)}')
             body={'version':VERSION,'kind':kind,'market':market,'period':p,'url':url,'observed_at':observed.isoformat(),'raw_sha256':hashlib.sha256(html.encode('utf-8')).hexdigest(),'html':html,'rows':rows}
             _persist(path,body);read_partition(path,kind,market,p);row.update(status='VERIFIED_SAVED',rows=len(rows))
-        except Exception as e:failures[kind,market]+=1;row.update(status='REJECTED',error=str(e)[:200])
+        except Exception as e:
+            failures[kind,market]+=1;row.update(status='REJECTED',error=str(e)[:200])
+            if html is not None:
+                try:row['diagnostic']=response_diagnostic(html)
+                except Exception:pass
         attempts[key]={'at':(now if fixed else datetime.now(ar.TZ)).isoformat(),'status':row['status'],'error':row.get('error','')}
     result={'version':VERSION,'asof':(now if fixed else datetime.now(ar.TZ)).isoformat(),'requests':requests_count,'scope':report,'attempts':attempts,'status':'VERIFIED_SCOPE' if all(x['status'] in ('VERIFIED','VERIFIED_SAVED') for x in report) else 'EVIDENCE_PENDING','trade_authority_changed':False}
     ar._write(healthpath,ar._seal(result));return result
