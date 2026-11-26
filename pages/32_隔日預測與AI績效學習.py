@@ -539,3 +539,19 @@ if st.checkbox('載入 H228 全市場競爭（唯讀）'):
         if st.checkbox('產生 H228 全市場競爭 Excel'):
             st.download_button('下載 H228 全市場競爭',competition_excel(h228),'H228_MarketCompetition.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     except Exception as ex:st.error('H228 驗收失敗：'+str(ex)[:180])
+
+
+st.subheader('H229｜同成本實戰報酬優勢與首批深層歸因')
+if st.checkbox('載入 H229 同成本報酬驗收（唯讀）'):
+    try:
+        from godpick_h229_net_edge import run as net_edge,excel as net_excel
+        with st.spinner('核對首批隔夜、日內、成本及市場同模型比較…'):h229=net_edge(Path(root))
+        st.caption(h229['version']+'｜'+h229['asof']+'｜'+h229['day'])
+        st.warning('當前主檔回顧，固定千股同成本模擬，非券商成交。跳空為未還原價格，可能受權息影響；歸因為算術分類，不是因果證明。樣本外僅時序複核，不自動調權。')
+        st.write(h229['status'],h229['batch_status'],h229['counts'])
+        for k in ('batch','net','causes','validation'):st.dataframe(pd.DataFrame(h229[k]),hide_index=True,use_container_width=True)
+        with st.expander('首批逐股歸因、基準缺口及優先複核'):
+            for k in ('detail','benchmark_gaps','shortlist'):st.dataframe(pd.DataFrame(h229[k]),hide_index=True,use_container_width=True)
+        if st.checkbox('產生 H229 同成本報酬 Excel'):
+            st.download_button('下載 H229 報酬驗收',net_excel(h229),'H229_NetEdge.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    except Exception as ex:st.error('H229 驗收失敗：'+str(ex)[:180])
