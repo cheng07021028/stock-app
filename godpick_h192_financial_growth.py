@@ -4,7 +4,7 @@ All web access is in collect(), never in evaluate()/run(). Observed time is not
 publication time. Latest official statements are NOT a historical backfill.
 """
 from __future__ import annotations
-import calendar, json, math, re, statistics
+import calendar, json, math, re, statistics, unicodedata
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, time
 from pathlib import Path
@@ -55,7 +55,7 @@ def month(v):
 def monthstr(n):return f'{n//12:04d}{n%12+1:02d}'
 
 def quarter(v):
-    m=re.fullmatch(r'(\d{3,4})Q([1-4])',str(v or '').strip().upper())
+    m=re.fullmatch(r'(\d{3,4})Q0?([1-4])',str(v or '').strip().upper())
     if not m:return None
     y=int(m[1]);y=y+1911 if y<1911 else y
     return y*4+int(m[2])-1 if 2000<=y<=2100 else None
@@ -86,6 +86,11 @@ def parse(kind,market,raw,observed_at):
     out=[]
     for r in raw:
         if not isinstance(r,dict):continue
+        # Only remove presentation noise; do not resolve collided field names.
+        names=[unicodedata.normalize('NFKC',str(k)).strip().lstrip('\ufeff').strip() for k in r]
+        if len(set(names))!=len(names):continue
+        # Preserve raw exact labels for YTD comparison with existing archives.
+        if kind in ('margin','pe'):r=dict(zip(names,r.values()))
         c=str(value(r,'公司代號','CompanyCode','Code','SecuritiesCompanyCode','StockId','stock_id','股票代號','證券代號','代號') or '').strip()
         if not re.fullmatch(r'[1-9]\d{3}',c):continue
         item={'code':c,'source':market,'source_url':URLS[kind,market],'availability_basis':'FIRST_OBSERVED','available_at':t.isoformat(timespec='seconds')}
@@ -96,7 +101,7 @@ def parse(kind,market,raw,observed_at):
             if p is None or item['revenue_twd'] is None:continue
             item['year_month']=monthstr(p)
         elif kind=='pe':
-            p=day(value(r,'Date','date','TradeDate','資料日期','日期'));pe=num(value(r,'PEratio','PERatio','PER','PE','P/E','本益比'))
+            p=day(value(r,'Date','date','TradeDate','資料日期','日期'));pe=num(value(r,'PEratio','PERatio','PER','PE','P/E','本益比','本益比(倍)','PriceEarningRatio'))
             if not p or pe is None or pe<=0:continue
             item.update(asof_date=p,pe=pe)
         else:
@@ -171,13 +176,19 @@ def collect(root=ROOT,*,get=None,now=None,min_rows=None):
     now=now.astimezone(TZ);limits=min_rows or MIN_ROWS; health={}
     for (kind,market),url in URLS.items():
         key=f'{kind}_{market}'
+        diagnostic={}
         try:
             old=read_feed(root,kind,market)
             response=get(url,timeout=(4,15),headers={'Accept':'application/json','User-Agent':'StockApp-H192-public-financial/1.0'})
             if response.status_code!=200:raise ValueError(f'HTTP_{response.status_code}')
             observed=now if fixed_now else datetime.now(TZ)
             # Use actual completion timestamp in production (explicit fixed now for fixtures).
-            rows=parse(kind,market,response.json(),observed.isoformat())
+            raw=response.json()
+            diagnostic={'raw_rows':len(raw) if isinstance(raw,list) else None,'root_type':type(raw).__name__,
+                        'fields':list(raw[0])[:40] if isinstance(raw,list) and raw and isinstance(raw[0],dict) else [],
+                        'http_status':response.status_code}
+            rows=parse(kind,market,raw,observed.isoformat())
+            diagnostic['parsed_rows']=len(rows)
             unique=len({r['code'] for r in rows});latest=max((period_key(kind,r) for r in rows),default=None)
             expected=expected_periods(now)[0 if kind=='revenue' else 1] if kind!='pe' else None
             if unique<limits[market]:raise ValueError(f'LOW_COVERAGE_{unique}')
@@ -207,7 +218,7 @@ def collect(root=ROOT,*,get=None,now=None,min_rows=None):
             fresh_count=len({r['code'] for r in rows if (period_key(kind,r)>=expected if expected is not None else period_key(kind,r)==latest)})
             stale=(fresh_count<limits[market] or (now.date()-date.fromisoformat(latest)).days>7) if kind=='pe' else fresh_count<limits[market]
             health[key]={'status':'STALE' if stale else 'OK','rows':len(rows),'fresh_count':fresh_count,'stored':len(merged),'latest':str(latest),'saved':merged!=old,'url':url}
-        except Exception as e:health[key]={'status':'ERROR','error':str(e)[:180],'url':url,'retained_previous':True}
+        except Exception as e:health[key]={'status':'ERROR','error':str(e)[:180],'url':url,'retained_previous':True,'diagnostic':diagnostic}
     result={'version':VERSION,'checked_at':now.isoformat(),'sources':health,'status':'ALL_OK' if all(v['status']=='OK' for v in health.values()) else 'PARTIAL_OR_STALE'}
     archive._write(Path(root)/'data/h192/health.json',archive._seal(result));return result
 
@@ -309,6 +320,17 @@ def same_profit_label(l,periods,k):
     labels={l.get(p,{}).get(k+'_label') for p in need}
     return len(labels)==1 and None not in labels
 
+def three_month_values(rev,r):
+    # Use explicitly reported previous-month values only from already-visible
+    # actual release records. Never insert synthetic rows into historical ledger.
+    seq=[]
+    for i in range(r-2,r+1):
+        actual=rev.get(i,{}).get('revenue_twd')
+        comparison=rev.get(i+1,{}).get('previous_month_twd') if i<r else None
+        if actual is not None and comparison is not None and actual!=comparison:seq.append(None)
+        else:seq.append(actual if actual is not None else comparison)
+    return seq
+
 def financial_profile(rev,mar,ytd,pe,expected_m,expected_q,market_day):
     r=max(rev,default=None); q=max(mar,default=None); y=max(ytd,default=None); d=max(pe,default=None)
     # The current month may already have a release during the standard grace window.
@@ -321,7 +343,7 @@ def financial_profile(rev,mar,ytd,pe,expected_m,expected_q,market_day):
     ym=yoy(cv,py if py is not None else ly);mm=yoy(cv,pm if pm is not None else prev)
     growth=None;high=None;three=None;profit=None;ttm=None;eps_yoy=None;high_edge=None;three_edge=None;profit_edge=None
     if fresh_r:
-        seq=[rev.get(i,{}).get('revenue_twd') for i in range(r-2,r+1)]
+        seq=three_month_values(rev,r)
         if all(v is not None for v in seq) and ym is not None:growth=seq[0]<seq[1]<seq[2] and ym>=10
         history=[rev.get(i,{}).get('revenue_twd') for i in range(r-12,r+1)]
         if all(v is not None for v in history):
@@ -339,7 +361,7 @@ def financial_profile(rev,mar,ytd,pe,expected_m,expected_q,market_day):
             profit=max(ops[:-1])>0 and ops[-1]>max(0,*ops[:-1]) and nets[-1]>max(0,nets[0])
             profit_edge=yoy(ops[-1],max(ops[:-1]))
     positive=bool(fresh_q and margins[1] is not None and margins[1]>0 and margins[2]>0)
-    return {'營收年月':monthstr(r) if r is not None else '', '營收新鮮':fresh_r,'月營收元':cv,'比較上月營收元':pm if pm is not None else prev,'營收年增%':ym,'營收月增%':mm,'營收比較口徑':'本次公告比較欄優先，否則歷史實際觀測','營收來源':R.get('source_url',''),'營收可得時間':R.get('available_at',''), '營收歷史月數':len(rev),'連3月成長':growth,'近13月新高':high,'營收超前12月高點%':high_edge,'三率季度':qstr(q) if q is not None else '', '三率新鮮':fresh_q,'毛利率%':margins[0],'營益率%':margins[1],'淨利率%':margins[2],'三率來源':M.get('source_url',''),'三率可得時間':M.get('available_at',''),'三率季度數':len(mar),'連兩季三率年增':three,'兩季三率改善合計pp':three_edge,'EPS季度':qstr(y) if y is not None else '', 'EPS新鮮':fresh_y and Y.get('eps_ytd') is not None,'累計EPS':Y.get('eps_ytd'),'累計EPS年增%':eps_yoy,'TTM EPS重建':ttm,'TTM狀態':'累計差分重建／未獨立核實股本變動' if ttm is not None else '缺同口徑歷史累計EPS','EPS來源':Y.get('source_url',''),'EPS可得時間':Y.get('available_at',''),'YTD季度數':len(ytd),'獲利突破':profit,'營業利益超前4季高點%':profit_edge,'PE日期':d or '', '官方PE':P.get('pe'),'PE同交易日':bool(market_day and d==market_day),'PE來源':P.get('source_url',''),'PE可得時間':P.get('available_at',''),'獲利率為正':positive,'現金流負債':'未取得獨立財報證據','交易狀態':'僅研究／未授權'}
+    return {'營收年月':monthstr(r) if r is not None else '', '營收新鮮':fresh_r,'月營收元':cv,'比較上月營收元':pm if pm is not None else prev,'營收年增%':ym,'營收月增%':mm,'營收比較口徑':'本次公告比較欄優先，否則歷史實際觀測','營收來源':R.get('source_url',''),'營收可得時間':R.get('available_at',''), '營收歷史月數':len(rev),'連3月比較口徑':'同時點實際月報及明示上月比較值；衝突待核','連3月成長':growth,'近13月新高':high,'營收超前12月高點%':high_edge,'三率季度':qstr(q) if q is not None else '', '三率新鮮':fresh_q,'毛利率%':margins[0],'營益率%':margins[1],'淨利率%':margins[2],'三率來源':M.get('source_url',''),'三率可得時間':M.get('available_at',''),'三率季度數':len(mar),'連兩季三率年增':three,'兩季三率改善合計pp':three_edge,'EPS季度':qstr(y) if y is not None else '', 'EPS新鮮':fresh_y and Y.get('eps_ytd') is not None,'累計EPS':Y.get('eps_ytd'),'累計EPS年增%':eps_yoy,'TTM EPS重建':ttm,'TTM狀態':'累計差分重建／未獨立核實股本變動' if ttm is not None else '缺同口徑歷史累計EPS','EPS來源':Y.get('source_url',''),'EPS可得時間':Y.get('available_at',''),'YTD季度數':len(ytd),'獲利突破':profit,'營業利益超前4季高點%':profit_edge,'PE日期':d or '', '官方PE':P.get('pe'),'PE同交易日':bool(market_day and d==market_day),'PE來源':P.get('source_url',''),'PE可得時間':P.get('available_at',''),'獲利率為正':positive,'現金流負債':'未取得獨立財報證據','交易狀態':'僅研究／未授權'}
 
 def evaluate(*,master,data,now,market_day='',opportunities=None,top=30,errors=()):
     from godpick_h191_opportunity_engine import master_map

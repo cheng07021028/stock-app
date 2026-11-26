@@ -372,6 +372,9 @@ if st.checkbox('載入 H220 成長起漲與績效反饋（唯讀）'):
         if not h220['rows']:st.warning('沒有通過本版研究條件，或資料待補；不等同沒有市場機會。')
         st.markdown('**高成長起漲研究（不等同正式買進）**');st.dataframe(pd.DataFrame(h220['rows']),hide_index=True,use_container_width=True)
         st.markdown('**分市場產業成交活躍度**');st.dataframe(pd.DataFrame(h220['sectors']),hide_index=True,use_container_width=True,column_config={k:st.column_config.NumberColumn(k,format='percent') for k in ('覆蓋率','上漲比例')})
+        with st.expander('H221 主升段初期補證清單（不是推薦）'):
+            from godpick_h198_stage_review import POOLS as h221_stage_pools
+            st.dataframe(pd.DataFrame([r for r in h220['audit'] if r.get('H198階段') in h221_stage_pools[:3] and r.get('狀態')!='成長起漲複核']),hide_index=True,use_container_width=True)
         with st.expander('完整逐股缺口及籌碼來源'):st.write(h220['coverage'],h220['source_errors'],h220['financial_errors'],h220['errors']);st.dataframe(pd.DataFrame(h220['source_summary']),hide_index=True,use_container_width=True);st.dataframe(pd.DataFrame(h220['audit']),hide_index=True,use_container_width=True)
         with st.expander('真實首批績效與強勢召回'):st.dataframe(pd.DataFrame(h220['first']),hide_index=True,use_container_width=True);st.dataframe(pd.DataFrame(h220['recall']),hide_index=True,use_container_width=True)
         with st.expander('H220封存籌碼績效與樣本外複核'):st.dataframe(pd.DataFrame(h220['pairs']),hide_index=True,use_container_width=True);st.dataframe(pd.DataFrame(h220['review']),hide_index=True,use_container_width=True)
@@ -379,3 +382,20 @@ if st.checkbox('載入 H220 成長起漲與績效反饋（唯讀）'):
             from godpick_h220_growth_rotation import excel as excel_h220
             st.download_button('下載 H220 研究驗收',excel_h220(h220),'H220_Review.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     except Exception as ex:st.error('H220 資料驗證失敗：'+str(ex)[:180])
+
+
+st.subheader('H221｜官方法人與高成長證據閉環')
+@st.cache_data(ttl=300,show_spinner=False)
+def load_h221(path):
+    from godpick_h221_evidence_closure import inspect
+    return inspect(Path(path))
+if st.checkbox('載入 H221 法人與財報證據驗收（唯讀）'):
+    try:
+        if st.button('重新讀取 H221'):load_h221.clear()
+        h221=load_h221(str(root))
+        st.caption(h221['version']+'｜'+h221['asof'])
+        st.warning('期數或來源不足只列為補證，不等同買進或負面訊號。')
+        st.markdown('**最近五個官方交易日法人逐日證據**');st.dataframe(pd.DataFrame(h221['flows']),hide_index=True,use_container_width=True)
+        st.markdown('**財報必要歷史期數**');st.dataframe(pd.DataFrame(h221['financial']),hide_index=True,use_container_width=True)
+        with st.expander('官方來源診斷'):st.write(h221['financial_health'],h221['chip_health'],h221['errors'],h221['rejected'],h221['conflicts'])
+    except Exception as ex:st.error('H221 證據驗收失敗：'+str(ex)[:180])

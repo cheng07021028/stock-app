@@ -89,6 +89,8 @@ def chip_evidence(root):
     for name,fn in [('TWSE',lambda:flow.evidence_by_day(root)),('TPEX',lambda:own.load_captures(root,'TPEX',max_periods=10)),('TDCC',lambda:own.load_captures(root,'TDCC',max_periods=4))]:
         try:sources[name]=fn()
         except (OSError,ValueError,KeyError,TypeError) as exc:sources[name]={};errors.append(name+': '+str(exc)[:120])
+    # Never promote a legacy TPEx subtotal that includes foreign dealers.
+    sources['TPEX']={d:v for d,v in sources.get('TPEX',{}).items() if v.get('schema_map',{}).get('foreign') in own.TPEX_FIELDS['foreign'][:-1]}
     return sources,errors
 
 def chips(m,c,sources,sessions,now):
@@ -128,7 +130,7 @@ def screen(t,f,mkt,root,now):
         if not profit:reason.append('三率或獲利突破未成立／待核')
         px=mkt.quotes(m,day).get(c) if not reason else None
         if not reason and (not p.num(px) or not math.isclose(px,ctx['收盤'],rel_tol=1e-8)):reason.append('原始收盤衝突')
-        audit.append({'市場':m,'股票代號':c,'股票名稱':a.get('股票名稱'),'產業':a.get('產業'),'H198階段':a.get('H198階段'),'營收成長成立':revenue,'三率或獲利成立':profit,'低PE高EPS成立':valuation,'產業狀態':sector.get('狀態'),'狀態':'成長起漲複核' if not reason else '未通過／待證','原因':'；'.join(reason)})
+        audit.append({'市場':m,'股票代號':c,'股票名稱':a.get('股票名稱'),'產業':a.get('產業'),'H198階段':a.get('H198階段'),'營收成長成立':revenue,'三率或獲利成立':profit,'低PE高EPS成立':valuation,'營收年月':v.get('營收年月'),'營收年增%':v.get('營收年增%'),'營收歷史月數':v.get('營收歷史月數'),'三率季度數':v.get('三率季度數'),'YTD季度數':v.get('YTD季度數'),'財報缺口':v.get('缺口'),'產業狀態':sector.get('狀態'),'狀態':'成長起漲複核' if not reason else '未通過／待證','原因':'；'.join(reason)})
         if reason:continue
         rows.append({'市場':m,'股票代號':c,'股票名稱':a.get('股票名稱') or c,'產業':a.get('產業'),'資料日':day,'原始收盤':px,'H198階段':a['H198階段'],'H198失效參考':a.get('H198失效參考'),'H198確認條件':a.get('H198確認條件'),'H211狀態':ce['H211狀態'],'H211新證據':ce['H211新證據'],'營收年月':v.get('營收年月'),'營收年增%':v.get('營收年增%'),'連兩季三率三升':'連兩季三率三升' in tags,'獲利突破':'獲利突破' in tags,'低PE高EPS成立':valuation,'官方PE':v.get('官方PE') if v.get('PE同交易日') else None,'TTM EPS重建':v.get('TTM EPS重建'),'產業成交額活躍比':sector['成交額活躍比'],'產業上漲比例':sector['上漲比例'],**chips(m,c,sources,sessions,now),'用途':'獨立研究／未授權'})
     order={FULL:0,CONTROL:1,UNKNOWN:2};rows.sort(key=lambda r:(r['市場'],order[r['籌碼分組']],not r['低PE高EPS成立'],stage.POOLS.index(r['H198階段']),counter.ORDER.get(r['H211狀態'],99),r['股票代號']))

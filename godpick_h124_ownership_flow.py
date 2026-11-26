@@ -17,8 +17,8 @@ VERSION='V191-H124.1-TPEx-TDCC-EVIDENCE'
 TDCC_URL='https://openapi.tdcc.com.tw/v1/opendata/1-5'
 # A report with only a requested date is NOT a dated exchange report.
 TPEX_FIELDS={
- 'code':('證券代號','股票代號','SecuritiesCode'),
- 'foreign':('外資及陸資買賣超股數(不含外資自營商)','外資及陸資淨買賣超股數(不含自營商)','外資及陸資淨買股數(不含自營商)','外資及陸資買賣超股數'),
+ 'code':('證券代號','股票代號','SecuritiesCode','代號'),
+ 'foreign':('外資及陸資買賣超股數(不含外資自營商)','外資及陸資淨買賣超股數(不含自營商)','外資及陸資淨買股數(不含自營商)','外資及陸資不含外資自營商買賣超股數','外資及陸資買賣超股數'),
  'trust':('投信買賣超股數','投信淨買賣超股數','投信淨買股數'),
  'total':('三大法人買賣超股數合計','三大法人買賣超股數'),
  'day':('資料日期','交易日期','報表日期','Date'),
@@ -122,7 +122,11 @@ def build_tpex(raw:Sequence[Mapping[str,Any]], *, trade_day:str, collected_at:st
     if stamp.date()<date.fromisoformat(day):raise ValueError('觀察時間早於交易日')
     if not isinstance(raw,list) or not raw or not all(isinstance(r,dict) for r in raw):
         raise ValueError('TPEx報表列缺失')
-    cols=list(raw[0]);mapping={k:_field(cols,names) for k,names in TPEX_FIELDS.items() if k!='day'}
+    cols=list(raw[0]);mapping={k:_field(cols,names) for k,names in TPEX_FIELDS.items() if k not in ('day','foreign')}
+    # Official dataset may expose both foreign subtotal and exclusive-of-dealer.
+    # Choose the explicit exclusive column; legacy single-column captures retain their schema.
+    exclusive=[x for x in TPEX_FIELDS['foreign'][:-1] if x in cols]
+    mapping['foreign']=_field(cols,exclusive or TPEX_FIELDS['foreign'])
     try:day_col=_field(cols,TPEX_FIELDS['day'])
     except ValueError:
         # Explicitly require row date; no silent trust in a command-line flag.
@@ -131,7 +135,8 @@ def build_tpex(raw:Sequence[Mapping[str,Any]], *, trade_day:str, collected_at:st
     records={}
     for row in raw:
         if set(row)!=set(cols):raise ValueError('TPEx報表不同列欄位不一致')
-        if _day(row[day_col])!=day:raise ValueError('官方行日期與交易日不符')
+        from godpick_h190_market_archive import _day as official_day
+        if official_day(row[day_col])!=day:raise ValueError('官方行日期與交易日不符')
         try:code=_stock(row[mapping['code']])
         except ValueError:continue
         if code in records:raise ValueError('TPEx證券代號重複')
