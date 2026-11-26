@@ -1,0 +1,4 @@
+H190-H222 & H124 selected pytest: 571 passed, including 17 H222 tests. H123 standalone 12 passed; H124 standalone 12 passed.
+Actual original input as-of 2026-11-25T15:34+08:00: TWSE 1083, TPEX 883; all 13-month, 4 designated margin and 6 YTD period-complete counts 0; TTM 0; candidate 0. 0.336 s core inspect.
+Live monthly GET and quarterly POST: DNS failure, no added financial records.
+H209 and H221 exact-hash install/repeat/unknown rejection: PASS. YAML syntax: PASS.

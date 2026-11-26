@@ -237,13 +237,20 @@ def load_inputs(root):
     for kind,market in URLS:
         try:data[kind].extend(read_feed(root,kind,market))
         except (OSError,ValueError,KeyError,TypeError) as e:errors.append(f'{kind}_{market}: {type(e).__name__}')
+    # H222 independently sealed historical periods, with actual first observation.
+    from godpick_h222_financial_history import load_rows
+    historical,history_errors=load_rows(root)
+    for kind,rows in historical.items():data[kind].extend(rows)
+    errors.extend(history_errors)
     return data,errors
 
 def canonical(kind,row,now):
     if not isinstance(row,dict):return None
     market=MARKETS.get(str(row.get('source','')));code=str(row.get('code',''));t=moment(row.get('available_at'));p=period_key(kind,row)
     if not market or not re.fullmatch(r'[1-9]\d{3}',code) or not t or t>now or p is None or p=='':return None
-    if row.get('availability_basis') not in ('FIRST_OBSERVED','PUBLISHED_VERIFIED','PUBLICATION_VERIFIED') or row.get('source_url')!=URLS[kind,market]:return None
+    from godpick_h222_financial_history import historical_row
+    history=historical_row(kind,market,p,row)
+    if row.get('availability_basis') not in ('FIRST_OBSERVED','PUBLISHED_VERIFIED','PUBLICATION_VERIFIED') or (row.get('source_url')!=URLS[kind,market] and not history):return None
     if row.get('market') and MARKETS.get(str(row['market']))!=market:return None
     if period_end(kind,p)>t.date() or (kind!='pe' and period_end(kind,p)==t.date()):return None
     r={**row,'source':market,'code':code,'_time':t,'_period':p}
@@ -255,7 +262,7 @@ def canonical(kind,row,now):
     elif kind=='margin':
         if r.get('statement_basis')!='SINGLE_QUARTER' or r.get('industry_type')!='GENERAL' or any(r[k] is None or not -100<=r[k]<=1000 for k in METRICS[kind]):return None
     elif kind=='ytd':
-        if r.get('basis')!='CUMULATIVE_YTD_NOT_SINGLE_QUARTER' or r.get('unit')!='元／股' or not day(r.get('report_date')) or day(r.get('report_date'))>t.date().isoformat():return None
+        if r.get('basis')!='CUMULATIVE_YTD_NOT_SINGLE_QUARTER' or r.get('unit')!='元／股' or (not history and not day(r.get('report_date'))) or day(r.get('report_date'))>t.date().isoformat():return None
         if r.get('profit_basis')!='SAME_SOURCE_DISCLOSED_UNIT':
             for k in METRICS[kind][1:]:r[k]=None
         if all(r[k] is None for k in METRICS[kind]):return None
@@ -277,7 +284,20 @@ def build_ledgers(data,now):
         # supplementary fields do not erase a prior observation. If a later
         # base revision differs, old comparative fields are not reused.
         # Historical conflicting EPS/profit revisions are not silently differenced.
-        keys=METRICS[kind]; latest=max(r['_time'] for r in rs); picked=[r for r in rs if r['_time']==latest]
+        keys=METRICS[kind]
+        # Backfill cannot silently replace a conflicting previously observed fact.
+        hist=[r for r in rs if r.get('historical_source')]; live=[r for r in rs if not r.get('historical_source')]
+        if hist and live:
+            h=max(hist,key=lambda r:r['_time']); l=max(live,key=lambda r:r['_time'])
+            # Ratios may be rounded to two decimals by official current feed.
+            tol=.011 if kind=='margin' else 1e-8
+            if any(abs(h[k]-l[k])>tol for k in keys if h.get(k) is not None and l.get(k) is not None):
+                conflicts[kind]+=1;continue
+            # Prefer coherent quarterly history only when observed overlap agrees;
+            # do not merge independent source values inside one cumulative statement.
+            if kind in ('margin','ytd') and all(h.get(k) is not None for k in keys):rs=hist
+            else:rs=live
+        latest=max(r['_time'] for r in rs); picked=[r for r in rs if r['_time']==latest]
         primary=keys[0]; candidates={r[primary] for r in picked if r[primary] is not None}
         if len(candidates)>1:conflicts[kind]+=1;continue
         base=dict(max(picked,key=lambda r:sum(r.get(k) is not None for k in keys)))
@@ -306,19 +326,24 @@ def build_ledgers(data,now):
 
 def yoy(v,prev):return round((v/prev-1)*100,4) if v is not None and prev is not None and prev>0 else None
 
+def comparable_series(rows):
+    # No cross-source cumulative difference or ratio comparison unless the whole
+    # requested window comes from one source family (legacy direct fixtures allowed).
+    return len({r.get('source_url') for r in rows})<=1
+
 def single_q(l,p,k):
     r=l.get(p,{});v=r.get(k)
     if v is None:return None
     if p%4==0:return v
     prev=l.get(p-1,{});prior=prev.get(k)
-    if prior is None:return None
+    if prior is None or not comparable_series((r,prev)):return None
     if k!='eps_ytd' and (not r.get(k+'_label') or r.get(k+'_label')!=prev.get(k+'_label')):return None
     return v-prior
 
 def same_profit_label(l,periods,k):
     need={p for p in periods}|{p-1 for p in periods if p%4!=0}
     labels={l.get(p,{}).get(k+'_label') for p in need}
-    return len(labels)==1 and None not in labels
+    return len(labels)==1 and None not in labels and comparable_series([l.get(p,{}) for p in need])
 
 def three_month_values(rev,r):
     # Use explicitly reported previous-month values only from already-visible
@@ -349,12 +374,12 @@ def financial_profile(rev,mar,ytd,pe,expected_m,expected_q,market_day):
         if all(v is not None for v in history):
             high=history[-1]>max(history[:-1]);high_edge=yoy(history[-1],max(history[:-1]))
     margins=[M.get(k) for k in METRICS['margin']]
-    if fresh_q and all(i in mar for i in (q,q-1,q-4,q-5)):
+    if fresh_q and all(i in mar for i in (q,q-1,q-4,q-5)) and comparable_series([mar[i] for i in (q,q-1,q-4,q-5)]):
         three=all(mar[i][k]>mar[i-4][k] for i in (q,q-1) for k in METRICS['margin']) and margins[1]>0 and margins[2]>0
         three_edge=sum(mar[i][k]-mar[i-4][k] for i in (q,q-1) for k in METRICS['margin'])
     if fresh_y:
         a=[single_q(ytd,i,'eps_ytd') for i in range(y-3,y+1)]
-        if all(v is not None for v in a):ttm=round(sum(a),4)
+        if all(v is not None for v in a) and comparable_series([ytd[i] for i in range(y-3,y+1)]):ttm=round(sum(a),4)
         eps_yoy=yoy(Y.get('eps_ytd'),ytd.get(y-4,{}).get('eps_ytd'))
         periods=list(range(y-4,y+1));ops=[single_q(ytd,i,'operating_profit_ytd') for i in periods];nets=[single_q(ytd,i,'net_profit_ytd') for i in periods]
         if all(v is not None for v in ops+nets) and all(same_profit_label(ytd,periods,k) for k in ('operating_profit_ytd','net_profit_ytd')):

@@ -399,3 +399,26 @@ if st.checkbox('載入 H221 法人與財報證據驗收（唯讀）'):
         st.markdown('**財報必要歷史期數**');st.dataframe(pd.DataFrame(h221['financial']),hide_index=True,use_container_width=True)
         with st.expander('官方來源診斷'):st.write(h221['financial_health'],h221['chip_health'],h221['errors'],h221['rejected'],h221['conflicts'])
     except Exception as ex:st.error('H221 證據驗收失敗：'+str(ex)[:180])
+
+st.subheader('H222｜歷史財報回補與成長證據驗收')
+@st.cache_data(ttl=300,show_spinner=False)
+def load_h222(path):
+    from godpick_h222_financial_history import inspect
+    return inspect(Path(path))
+if st.checkbox('載入 H222 歷史財報驗收（唯讀）'):
+    try:
+        if st.button('重新讀取 H222'):load_h222.clear()
+        h222=load_h222(str(root))
+        st.caption(h222['version']+'｜'+h222['asof'])
+        st.warning('回補資料自實際首次取得後才可使用。TTM為累計EPS差分研究，不代表已核實股本變動。')
+        st.dataframe(pd.DataFrame(h222['summary']),hide_index=True,use_container_width=True)
+        st.markdown('**高成長財報複核（非正式推薦）**');st.dataframe(pd.DataFrame(h222['candidates']),hide_index=True,use_container_width=True)
+        if st.checkbox('產生 H222 歷史財報驗收 Excel'):
+            from godpick_h222_financial_history import excel as excel_h222
+            st.download_button('下載 H222 財報驗收',excel_h222(h222),'H222_FinancialHistory.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        with st.expander('逐股歷史缺期與成長證據'):
+            st.dataframe(pd.DataFrame(h222['stocks']),hide_index=True,use_container_width=True)
+        with st.expander('官方回補來源驗收'):
+            st.dataframe(pd.DataFrame(h222['health'].get('scope',[])),hide_index=True,use_container_width=True)
+            st.write(h222['errors'],h222['rejected'],h222['conflicts'])
+    except Exception as ex:st.error('H222 歷史財報驗收失敗：'+str(ex)[:180])
