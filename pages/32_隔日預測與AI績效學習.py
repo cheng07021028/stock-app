@@ -355,3 +355,27 @@ if st.checkbox('載入 H219 首批績效與精簡研究（唯讀）'):
             from godpick_h219_first_review import excel as excel_h219
             st.download_button('下載 H219 首批績效',excel_h219(h219),'H219_Review.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     except Exception as ex:st.error('H219 資料驗證失敗：'+str(ex)[:180])
+
+st.divider()
+st.subheader('H220｜主流成交活躍、高成長起漲與實戰績效反饋')
+st.caption('分市場同成分成交額非資金淨流入；H123/H124官方籌碼與H192/H198證據分列。新研究只供複核，權重不變。')
+@st.cache_data(ttl=120,show_spinner=False)
+def load_h220(path):
+    from godpick_h220_growth_rotation import run
+    return run(Path(path))
+if st.checkbox('載入 H220 成長起漲與績效反饋（唯讀）'):
+    try:
+        if st.button('重新讀取 H220'):load_h220.clear()
+        with st.spinner('核對同市場主流、財技證據、官方籌碼與成熟績效…'):h220=load_h220(str(root))
+        st.caption(h220['version']+'｜'+h220['asof']+'｜資料日 '+str(h220['day']))
+        st.write(h220['status'],h220['counts'],h220['first_counts'])
+        if not h220['rows']:st.warning('沒有通過本版研究條件，或資料待補；不等同沒有市場機會。')
+        st.markdown('**高成長起漲研究（不等同正式買進）**');st.dataframe(pd.DataFrame(h220['rows']),hide_index=True,use_container_width=True)
+        st.markdown('**分市場產業成交活躍度**');st.dataframe(pd.DataFrame(h220['sectors']),hide_index=True,use_container_width=True,column_config={k:st.column_config.NumberColumn(k,format='percent') for k in ('覆蓋率','上漲比例')})
+        with st.expander('完整逐股缺口及籌碼來源'):st.write(h220['coverage'],h220['source_errors'],h220['financial_errors'],h220['errors']);st.dataframe(pd.DataFrame(h220['source_summary']),hide_index=True,use_container_width=True);st.dataframe(pd.DataFrame(h220['audit']),hide_index=True,use_container_width=True)
+        with st.expander('真實首批績效與強勢召回'):st.dataframe(pd.DataFrame(h220['first']),hide_index=True,use_container_width=True);st.dataframe(pd.DataFrame(h220['recall']),hide_index=True,use_container_width=True)
+        with st.expander('H220封存籌碼績效與樣本外複核'):st.dataframe(pd.DataFrame(h220['pairs']),hide_index=True,use_container_width=True);st.dataframe(pd.DataFrame(h220['review']),hide_index=True,use_container_width=True)
+        if st.checkbox('產生 H220 研究驗收 Excel'):
+            from godpick_h220_growth_rotation import excel as excel_h220
+            st.download_button('下載 H220 研究驗收',excel_h220(h220),'H220_Review.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    except Exception as ex:st.error('H220 資料驗證失敗：'+str(ex)[:180])

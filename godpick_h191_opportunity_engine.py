@@ -180,7 +180,7 @@ def evaluate(*, master, calendars, markets, rows, asof, factors=None, latest_tdc
         sector=h211_sectors.get(f['產業'],{})
         h211={k:f.get(k) for k in ('收盤','MA20','MA20前5日','5日漲跌%','20日漲跌%','60日區間位置%','量比')}
         h211.update({'全市場技術覆蓋':full,'流動性通過':liquid,**{'產業'+k:sector.get(k) for k in ('覆蓋率%','有效檔數','成交額活躍比','上漲家數比%','主流成立')}})
-        out['diagnostic'].append({**h198,'H211技術證據':h211,'股票代號':f['股票代號'],'股票名稱':f['股票名稱'],'市場':f['市場'],'產業':f['產業'],'流動性通過':liquid,'研究池':'、'.join(signal),'資料日期':asof,'法人資料可用':net is not None,'TDCC資料可用':delta is not None})
+        out['diagnostic'].append({**h198,'H211技術證據':h211,'股票代號':f['股票代號'],'股票名稱':f['股票名稱'],'市場':f['市場'],'產業':f['產業'],'流動性通過':liquid,'研究池':'、'.join(signal),'資料日期':asof,'法人資料可用':net is not None,'TDCC資料可用':delta is not None,'H220產業量價':{k:f[k] for k in ('當日成交額','前20日均成交額','5日漲跌%')}})
     out['h198']=stage198.summarize(stage_rows,top,len(universe))
     out['pool_counts']={p:len(g) for p,g in out['pools'].items()}
     for p,g in out['pools'].items():

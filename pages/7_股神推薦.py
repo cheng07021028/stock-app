@@ -17885,6 +17885,14 @@ def _build_excel_bytes_fast_h85(
         if 'H219_精簡研究' not in wb.sheetnames:
             wb.create_sheet('H219_精簡研究').append(['H219 研究摘要待核；原報表不受影響',type(_h219_exc).__name__])
 
+    # H220 immutable same-session research appendix; original recommendation intact.
+    try:
+        from godpick_h220_growth_rotation import append_manager as _h220_append
+        _h220_append(wb, Path(__file__).resolve().parents[1], locals().get('_h148_research_day'))
+    except Exception as _h220_exc:
+        if 'H220_成長起漲研究' not in wb.sheetnames:
+            wb.create_sheet('H220_成長起漲研究').append(['H220 研究證據待核；原報表不受影響',type(_h220_exc).__name__])
+
     # H206 same-export reconciliation, independent public market snapshot.
     try:
         from godpick_h206_market_gap import load as _h206_load, compare_export as _h206_compare, append_sheet as _h206_append
