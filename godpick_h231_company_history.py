@@ -114,7 +114,7 @@ def unique_name(master,code):
     fold=lambda x:str(x).strip().replace('臺','台')
     return name if name and name!=code and sum(fold(r.get('股票名稱'))==fold(name) for r in master.values())==1 else None
 
-def collect(root=ROOT,*,codes,quarters=8,budget=8,now=None,http=None):
+def collect(root=ROOT,*,codes,quarters=8,budget=8,now=None,http=None,target_period=None):
     from godpick_h222_financial_history import _persist
     fixed=now is not None;now=now or datetime.now(ar.TZ)
     if not 8<=quarters<=12 or not 1<=budget<=8 or now.tzinfo is None:raise ValueError('invalid company collection limits')
@@ -125,9 +125,11 @@ def collect(root=ROOT,*,codes,quarters=8,budget=8,now=None,http=None):
         http=requests.request
     hp=Path(root)/'data/h222/h231/health.json';attempts=ar._read(hp).get('attempts',{}) if hp.exists() else {};result=[];count=0;fails=0
     _,q=fin.expected_periods(now)
+    if target_period is not None and (len(codes)!=1 or not isinstance(target_period,int) or not q-quarters<target_period<=q):raise ValueError('invalid explicit company target period')
+    periods=(target_period,) if target_period is not None else range(q,q-quarters,-1)
     for code in codes:
         market=master[code]['市場'];name=unique_name(master,code)
-        for p in range(q,q-quarters,-1):
+        for p in periods:
             key=f'{market}:{code}:{p}';path=path_for(root,market,code,p);r={'市場':market,'股票代號':code,'期間':fin.qstr(p),'狀態':'PENDING'};result.append(r)
             if path.exists():
                 try:read(root,market,code,p);r['狀態']='VERIFIED'
@@ -148,4 +150,4 @@ def collect(root=ROOT,*,codes,quarters=8,budget=8,now=None,http=None):
                 _persist(path,{'version':VERSION,'url':URL,'market':market,'code':code,'period':p,'company_name':name,'observed_at':t.isoformat(),'html':html,'raw_sha256':hashlib.sha256(html.encode()).hexdigest(),'row':row});read(root,market,code,p);r['狀態']='VERIFIED_SAVED'
             except Exception as e:fails+=1;r.update(狀態='REJECTED',原因=str(e)[:150])
             attempts[key]={'at':(now if fixed else datetime.now(ar.TZ)).isoformat(),'status':r['狀態'],'error':r.get('原因','')}
-    body={'version':VERSION,'asof':(now if fixed else datetime.now(ar.TZ)).isoformat(),'requests':count,'scope':result,'attempts':attempts,'status':'COMPANY_SCOPE_VERIFIED' if all(r['狀態'] in ('VERIFIED','VERIFIED_SAVED') for r in result) else 'EVIDENCE_PENDING','market_scope_verified':False,'trade_authority_changed':False};ar._write(hp,ar._seal(body));return body
+    body={'version':VERSION,'asof':(now if fixed else datetime.now(ar.TZ)).isoformat(),'requests':count,'scope':result,'attempts':attempts,'status':('COMPANY_TARGET_VERIFIED' if target_period is not None else 'COMPANY_SCOPE_VERIFIED') if all(r['狀態'] in ('VERIFIED','VERIFIED_SAVED') for r in result) else 'EVIDENCE_PENDING','market_scope_verified':False,'trade_authority_changed':False};ar._write(hp,ar._seal(body));return body

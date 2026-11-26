@@ -435,6 +435,11 @@ if st.checkbox('載入 H222 歷史財報驗收（唯讀）'):
                 st.write(auto.get('counts',{}),{'彙總請求':auto.get('bulk_requests'),'個股請求':auto.get('company_requests'),'錯誤':auto.get('errors',[])})
                 st.dataframe(pd.DataFrame(auto.get('queue',[])),hide_index=True,use_container_width=True)
             else:st.info('尚無H233自動補證紀錄；原H222工作流保留手動及全市場模式。')
+            st.markdown('**H234 官方XBRL批次文件研究（本機匯入，非正式財報或買進授權）**')
+            st.caption('由官方案例文件整批下載頁取得各季度原始ZIP，保留原檔；以本機CLI批次解析一般業合併報表。原H222及H126資料不變。')
+            st.markdown('[官方 XBRL 案例文件整批下載](https://mopsov.twse.com.tw/mops/web/t203sb02)')
+            st.code('python tools/h222_history.py --batch-dir "D:/MOPS_XBRL" --out "D:/MOPS_Review"',language='bash')
+            st.caption('匯出 H234_BatchFinancialReview.xlsx，檢查逐股科目、季度覆蓋與官方重疊衝突。大型ZIP請在本機執行，避免阻塞Streamlit。')
             st.write(h222['errors'],h222['rejected'],h222['conflicts'])
     except Exception as ex:st.error('H222 歷史財報驗收失敗：'+str(ex)[:180])
 

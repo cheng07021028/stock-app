@@ -6,7 +6,17 @@ ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT))
 from godpick_h222_financial_history import collect,inspect,excel
 
 def main():
-    p=argparse.ArgumentParser(description='H222 historical financial evidence');p.add_argument('--root',type=Path,default=ROOT);p.add_argument('--collect',action='store_true');p.add_argument('--months',type=int,default=13);p.add_argument('--quarters',type=int,default=8);p.add_argument('--budget',type=int,default=8);p.add_argument('--out',type=Path);p.add_argument('--company-codes',help='Optional individually verified historical supplement, comma-separated current stock codes (1..20)');p.add_argument('--auto-company',action='store_true',help='H233 bounded bulk + fair/growth individual supplement');a=p.parse_args()
+    p=argparse.ArgumentParser(description='H222 historical financial evidence');p.add_argument('--root',type=Path,default=ROOT);p.add_argument('--collect',action='store_true');p.add_argument('--months',type=int,default=13);p.add_argument('--quarters',type=int,default=8);p.add_argument('--budget',type=int,default=8);p.add_argument('--out',type=Path);p.add_argument('--company-codes',help='Optional individually verified historical supplement, comma-separated current stock codes (1..20)');p.add_argument('--auto-company',action='store_true',help='H233 bounded bulk + fair/growth individual supplement');p.add_argument('--batch-archive',type=Path,action='append',help='H234 local operator-downloaded MOPS ZIP (repeat up to 12)');p.add_argument('--batch-dir',type=Path,help='Directory of original operator-downloaded MOPS ZIPs (max 12)');a=p.parse_args()
+    if a.batch_dir:
+        if not a.batch_dir.is_dir():p.error('--batch-dir must exist')
+        a.batch_archive=(a.batch_archive or [])+sorted(a.batch_dir.glob('*.zip'))
+        if not a.batch_archive:p.error('no ZIP files found in --batch-dir')
+    if a.batch_archive:
+        if a.collect or a.company_codes or a.auto_company or not a.out:p.error('--batch-archive requires --out and excludes collection modes')
+        from godpick_h234_batch_financial import review,excel as batch_excel
+        r=review(a.root,a.batch_archive);a.out.mkdir(parents=True,exist_ok=True)
+        (a.out/'H234_BatchFinancialReview.xlsx').write_bytes(batch_excel(r))
+        print(json.dumps({k:v for k,v in r.items() if k not in ('rows','profiles','candidates')},ensure_ascii=False,indent=2));return 0 if r['rows'] and not any(x.get('狀態')=='ARCHIVE_REJECTED' for x in r['log']) else 2
     if a.auto_company:
         if not a.collect or a.company_codes:p.error('--auto-company requires --collect and excludes --company-codes')
         from godpick_h233_auto_history import run

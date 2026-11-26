@@ -1,0 +1,5 @@
+V191-H234 official XBRL batch research import / targeted backfill
+接續H233，累積H209.1-H234。請先執行 python tools/h234_preflight.py --root "實際專案目錄"，確認相容再加 --apply。只包含累積必要程式、測試及版本工具，不含任何原始行情、私人紀錄、Secrets 或憑證。
+正式H222 2026-11-26 15:39健康紀錄：12/64成功（8 VERIFIED+4 VERIFIED_SAVED），10份月營收9313筆，2份2026Q3季度1944筆（上市1053、上櫃891），4拒絕、48待補。H194 07:50 sealed health: 623 signals, 0 mature, 3115 pending; 未有11/26盤後資料，不改策略權重。
+H234確認官方整批下載入口 https://mopsov.twse.com.tw/mops/web/t203sb02 。手動下載原始季度ZIP至 D:/MOPS_XBRL，再於專案根目錄執行 python tools/h222_history.py --batch-dir "D:/MOPS_XBRL" --out "D:/MOPS_Review" 。也可重複 --batch-archive 指定原始ZIP，最多12份。產出 H234_BatchFinancialReview.xlsx。解析 tifrs-fr1-m1-ci-cr-股票代號-YYYYQn.html 一般業合併報表，核對內文、累計日期、明示單位與4000/5900/6900/8200/9750，排除5950混用。原ZIP及成員SHA256留於報表，保留原始ZIP以利重驗。ZIP不解壓至磁碟，大小/路徑/巢狀限制；最多8GB累計讀取，超限請縮小批次。地方檔案來源未經網路驗證，研究結果單獨輸出，不注入H192/H222及正式推薦。實際官方ZIP格式尚未取得；不支援XML、其他業別及不同檔名格式。測試以公開台積電2026Q2報表副本實際數值重建合成HTML及其他合成數據驗證，非正式ZIP實測。
+H233個股補證現在以實際重驗的彙總季度檔辨識缺期，先補沒有彙總核實的期別，再補同來源/EPS證據。H231新增精確期別單次請求模式，原手動及定時功能不變。原始實檔本機1966檔、16個市場季度覆蓋項、0份本機ZIP/0真實高成長候選，H234空批次報表6表產生正常，0.327秒僅空批次不含完整ZIP解析及Excel。完整官方ZIP下載、本機DNS、正式Streamlit/Actions及首批成熟績效仍待實測，不宣稱正式資料全面回補。

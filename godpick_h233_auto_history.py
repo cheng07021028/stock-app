@@ -20,6 +20,20 @@ def health(root,rel=REL):
     p=Path(root)/rel
     return ar._read(p) if p.exists() else {}
 
+def bulk_periods(root,now,quarters):
+    """Read actual sealed market partitions; health counts or mere existence are not proof."""
+    _,q=fin.expected_periods(now);found=set()
+    for market in history.MARKETS:
+        for p in range(q,q-quarters,-1):
+            path=history.partition(root,'ytd',market,p)
+            if not path.exists():continue
+            try:
+                v=history.read_partition(path,'ytd',market,p)
+                if fin.moment(v['observed_at'])<=now:found.update((market,r['code'],p) for r in v['rows'])
+            except (ValueError,OSError,TypeError,KeyError):continue
+    return found
+
+
 def plan(root,now,*,quarters=8,stocks=None,previous=None,attempts=None):
     """At most one fair slot + one growth slot. Fair slot alternates markets.
     Current-master backfill only; skipped/cooldown/invalid files never overwritten.
@@ -34,19 +48,24 @@ def plan(root,now,*,quarters=8,stocks=None,previous=None,attempts=None):
     if not isinstance(attempts,dict):raise ValueError('invalid company attempts')
     if stocks is None:stocks=history.inspect(root,now)['stocks']
     profiles={r['股票代號']:r for r in stocks if r.get('股票代號') in master and r.get('市場')==master[r['股票代號']]['市場']}
-    _,q=fin.expected_periods(now); stats=Counter(); eligible=[]
+    _,q=fin.expected_periods(now); stats=Counter(); eligible=[];bulk=bulk_periods(root,now,quarters)
     for code,identity in sorted(master.items()):
         market=identity['市場'];r=profiles.get(code,{})
         if market not in ('TWSE','TPEX'):continue
-        seen=[];ready=[];present=0;blocked=0
+        seen=[];ready=[];covered=[];present=0;blocked=0;bulk_count=0
         for p in range(q,q-quarters,-1):
             key=f'{market}:{code}:{p}'; prior=attempts.get(key)
             at=fin.moment(prior.get('at')) if isinstance(prior,dict) else None
             if prior is not None and (at is None or at>now):raise ValueError('invalid/future company attempt: '+key)
             if at:seen.append(at)
+            is_bulk=(market,code,p) in bulk
+            if is_bulk:bulk_count+=1
             if company.path_for(root,market,code,p).exists():present+=1;continue
             if at and now-at<timedelta(hours=12):blocked+=1;continue
-            ready.append(p)
+            (covered if is_bulk else ready).append(p)
+        # Missing bulk periods first; then collect overlapping periods for full same-source/EPS evidence.
+        gap=bool(ready);ready+=covered
+        stats['全市場已核實期數']+=bulk_count
         stats['母體']+=1;stats['封存檔案存在期數']+=present;stats['冷卻期數']+=blocked;stats['可請求期數']+=len(ready)
         if not ready:
             stats['無可請求股票']+=1;continue
@@ -55,7 +74,7 @@ def plan(root,now,*,quarters=8,stocks=None,previous=None,attempts=None):
         fresh=r.get('營收新鮮') is True
         multi=fresh and (r.get('連3月成長') is True or r.get('近13月新高') is True)
         growth=multi or (fresh and yoy is not None and yoy>=10)
-        eligible.append({'市場':market,'股票代號':code,'股票名稱':identity.get('股票名稱',code),'下個可補期間':fin.qstr(ready[0]),'可請求期數':len(ready),'已有封存檔案期數':present,'最近嘗試':max(seen).isoformat() if seen else '', '成長線索':growth,'多月成長線索':multi,'營收年增%':yoy if fresh else None})
+        eligible.append({'市場':market,'股票代號':code,'股票名稱':identity.get('股票名稱',code),'下個可補期間':fin.qstr(ready[0]),'可請求期數':len(ready),'已有封存檔案期數':present,'全市場已核實期數':bulk_count,'補證目的':'缺期優先' if gap else '同來源及EPS附註補證','最近嘗試':max(seen).isoformat() if seen else '', '成長線索':growth,'多月成長線索':multi,'營收年增%':yoy if fresh else None})
     stats['可請求股票']=len(eligible);stats['具成長線索股票']=sum(r['成長線索'] for r in eligible)
     # Fairness independent of growth: oldest attempt first, never rank by future returns.
     target='TPEX' if previous.get('fair_market')=='TWSE' else 'TWSE'
@@ -90,7 +109,7 @@ def run(root,*,months=24,quarters=8,budget=8,now=None,http=None):
     for row in selection['queue']:
         if not fixed:time.sleep(2)
         try:
-            r=company.collect(root,codes=[row['股票代號']],quarters=quarters,budget=1,now=now,http=http)
+            r=company.collect(root,codes=[row['股票代號']],quarters=quarters,budget=1,now=now,http=http,target_period=fin.quarter(row['下個可補期間']))
             individual+=r['requests']
             outcome=next((x for x in r['scope'] if x['期間']==row['下個可補期間']),{})
             results.append({**row,'狀態':outcome.get('狀態','PENDING'),'原因':outcome.get('原因',''),'請求數':r['requests']})
