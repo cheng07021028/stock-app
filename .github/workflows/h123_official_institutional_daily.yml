@@ -6,7 +6,7 @@ on:
 permissions:
   contents: write
 concurrency:
-  group: stockapp-h123-official-flow-main
+  group: stockapp-h221-official-chips-main
   cancel-in-progress: false
 jobs:
   institution-evidence:
