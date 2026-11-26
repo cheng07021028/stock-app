@@ -331,3 +331,27 @@ if st.checkbox('載入 H218 實證驗收（唯讀）'):
             from godpick_h218_evidence import excel as excel_h218
             st.download_button('下載 H218 實證驗收',excel_h218(h218),'H218_Evidence.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     except Exception as e:st.error('H218 資料驗證失敗：'+str(e)[:180])
+
+st.divider()
+st.subheader('H219｜首批前瞻績效檢討、強勢命中與精簡研究')
+st.caption('原價與模擬淨報酬分離；弱市比較採起始四碼有價證券廣度（非指數）；所有研究均不等同正式買進。')
+@st.cache_data(ttl=120,show_spinner=False)
+def load_h219(path):
+    from godpick_h219_first_review import run
+    return run(Path(path))
+if st.checkbox('載入 H219 首批績效與精簡研究（唯讀）'):
+    try:
+        if st.button('重新讀取 H219'):load_h219.clear()
+        with st.spinner('核對首批研究、正式行情、成熟績效及漏選證據…'):h219=load_h219(str(root))
+        st.caption(h219['version']+'｜'+h219['asof'])
+        st.write(h219['status'],h219['counts'],h219['errors'])
+        st.markdown('**首批績效（按市場、期間、研究分級）**')
+        st.dataframe(pd.DataFrame(h219['first']),hide_index=True,use_container_width=True,column_config={k:st.column_config.NumberColumn(k,format='percent') for k in ('原價平均','原價上漲比例','淨報酬平均','淨勝率','原價相對差','弱市不跌比例','弱市跑贏比例')})
+        st.markdown('**強勢股命中及召回缺口**');st.dataframe(pd.DataFrame(h219['recall']),hide_index=True,use_container_width=True,column_config={k:st.column_config.NumberColumn(k,format='percent') for k in ('雙日覆蓋率','研究召回率')});st.dataframe(pd.DataFrame(h219['recall_gaps']),hide_index=True,use_container_width=True,column_config={'覆蓋率':st.column_config.NumberColumn('覆蓋率',format='percent')})
+        st.caption(h219['shortlist_note']);st.dataframe(pd.DataFrame(h219['shortlist']),hide_index=True,use_container_width=True)
+        with st.expander('漏選原始證據'):st.dataframe(pd.DataFrame(h219['miss']),hide_index=True,use_container_width=True)
+        with st.expander('弱市廣度與原價相對績效'):st.dataframe(pd.DataFrame(h219['breadth']),hide_index=True,use_container_width=True,column_config={k:st.column_config.NumberColumn(k,format='percent') for k in ('覆蓋率','市場原價中位數','下跌比例')})
+        if st.checkbox('產生 H219 績效 Excel'):
+            from godpick_h219_first_review import excel as excel_h219
+            st.download_button('下載 H219 首批績效',excel_h219(h219),'H219_Review.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    except Exception as ex:st.error('H219 資料驗證失敗：'+str(ex)[:180])

@@ -82,7 +82,9 @@ def build(root,market_report,now):
     allowed=set()
     for m in ar.URLS:
         try:
-            if (market_report['coverage'].get(m,{}).get('雙日覆蓋率%') or 0)<95:raise ValueError('雙日覆蓋不足95%')
+            cv2=market_report['coverage'].get(m,{})
+            denom=cv2.get('主檔一般股',0);paired=cv2.get('雙日有價',0)
+            if not denom or not 0<=paired<=denom or paired*100<denom*95:raise ValueError('雙日覆蓋不足95%')
             for d in expected:
                 if d not in markets.get(m,{}):raise ValueError('缺市場交易日 '+d)
                 v=ar._read(p/'daily'/m/(d+'.json.gz'))
@@ -91,7 +93,7 @@ def build(root,market_report,now):
         except (OSError,ValueError,KeyError,TypeError) as e:b['errors'].append(m+': '+str(e)[:150])
     master=tech.master_map(tech.read_json(root/'stock_master_cache.json',[]))
     rr,cv,why=evaluate(master,expected,markets,rows,day,allowed);b.update(rows=rr,coverage=cv,reasons=why)
-    full=len(allowed)==2 and all((cv[m].get('覆蓋率%') or 0)>=95 for m in ar.URLS)
+    full=len(allowed)==2 and all(cv[m].get('主檔',0)>0 and cv[m].get('有效60日',0)*100>=cv[m]['主檔']*95 for m in ar.URLS)
     b['status']='RESEARCH_READY' if full else ('PARTIAL_RESEARCH' if any(x['有效60日'] for x in cv.values()) else 'DATA_PENDING')
     # H195 membership is a separate, same-day source; absence never means formal exclusion.
     joint={};verified=False

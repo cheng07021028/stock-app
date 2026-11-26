@@ -194,15 +194,19 @@ def collect_actions(root,market,now,required,*,budget=24,http=None):
     ar._write(hp,ar._seal(health));return health
 
 
-def capture_recall(root,market,now):
+def capture_recall(root,market,now,*,diagnostics=None):
     """Freeze H208/H198 memberships only on the actual decision evening."""
     day=now.date().isoformat();p=Path(root)/'data/h209/signals'/(day+'.json.gz')
-    if p.exists():return '當日已封存'
+    if diagnostics is not None:diagnostics.update(day=day,calendar_confirmed=market.today_confirmed(day),status='PENDING')
+    if p.exists():
+        if diagnostics is not None:diagnostics['status']='ALREADY_CAPTURED'
+        return '當日已封存'
     if now.time()<time(18,15) or not market.today_confirmed(day):return '等待當日官方盤後證據'
     from godpick_h206_market_gap import build
     from godpick_h208_recall_review import build as recall
     from godpick_h198_stage_review import POOLS as stages
     b=build(root,now);h=recall(root,b,now)
+    if diagnostics is not None:diagnostics.update(status=h.get('status'),research_day=h.get('day'),coverage=h.get('coverage',{}),reasons=h.get('reasons',{}),errors=h.get('errors',[]))
     if b.get('day')!=day or h.get('day')!=day or h.get('status')!='RESEARCH_READY':return 'H208完整研究待補證'
     rows=[]
     for r in h['rows']:
@@ -212,6 +216,7 @@ def capture_recall(root,market,now):
         if r.get('H198階段') in stages[:3]:pools.append('H198｜'+r['H198階段'])
         rows.append({'signal_day':day,'created_at':now.isoformat(),'market':m,'code':c,'name':r['股票名稱'],'base_close':price,'strategies':pools,'authority':'RESEARCH_ONLY'})
     perf.immutable(p,{'version':VERSION,'day':day,'created_at':now.isoformat(),'rows':rows,'source_hash':perf.digest(h)})
+    if diagnostics is not None:diagnostics.update(status='CAPTURED',rows=len(rows))
     return f'H208封存 {len(rows)} 檔'
 
 
@@ -341,9 +346,9 @@ def evaluate(signals,market,e,now):
 
 
 def run(root=ROOT,now=None,*,update=False,budget=24,http=None):
-    now=perf.stamp(now or datetime.now(ar.TZ));root=Path(root);m=perf.Market(root,now);capture='唯讀';health={}
+    now=perf.stamp(now or datetime.now(ar.TZ));root=Path(root);m=perf.Market(root,now);capture='唯讀';health={};capture_diagnostics={}
     if update and not m.errors:
-        try:capture=capture_recall(root,m,now)
+        try:capture=capture_recall(root,m,now,diagnostics=capture_diagnostics)
         except (OSError,ValueError,TypeError,KeyError) as ex:capture='H208封存待查：'+str(ex)[:180]
     ss=read_signals(root,now);required={(s['market'],d) for s in ss for n in HORIZONS for d in m.span(s['signal_day'],n)[1:]}
     if update:
@@ -377,7 +382,7 @@ def run(root=ROOT,now=None,*,update=False,budget=24,http=None):
             v=ar._read(root/'data'/name);when=v.get('asof',v.get('observed_at'))
             if when and perf.stamp(when)<=now:upstream[name]={k:v[k] for k in ('asof','observed_at','status','capture_status','signals','latest_calendar_session','day','errors') if k in v}
         except (OSError,ValueError,TypeError,KeyError):pass
-    out={'version':VERSION,'revision':REVISION,'pending':dict(pending),'upstream':upstream,'source_counts':dict(Counter(s['source'] for s in ss)),'asof':now.isoformat(),'basis':BASIS,'cost':COST,'capture':capture,'signal_count':len(ss),'mature_strategy_rows':len(rows),'valid_rows':valid,'status':'DATA_PENDING' if not valid else 'RESEARCH_ONLY','trade_authority_changed':False,'archive_errors':m.errors,'collector':health,'reasons':dict(Counter(r['status'] for r in rows)),'summary':summary,'folds':folds,'cohorts':cohorts,'detail':rows}
+    out={'version':VERSION,'revision':REVISION,'pending':dict(pending),'upstream':upstream,'source_counts':dict(Counter(s['source'] for s in ss)),'asof':now.isoformat(),'basis':BASIS,'cost':COST,'capture':capture,'capture_diagnostics':capture_diagnostics,'signal_count':len(ss),'mature_strategy_rows':len(rows),'valid_rows':valid,'status':'DATA_PENDING' if not valid else 'RESEARCH_ONLY','trade_authority_changed':False,'archive_errors':m.errors,'collector':health,'reasons':dict(Counter(r['status'] for r in rows)),'summary':summary,'folds':folds,'cohorts':cohorts,'detail':rows}
     if update:ar._write(root/REL,ar._seal({k:v for k,v in out.items() if k not in ('detail','cohorts')}))
     return out
 
