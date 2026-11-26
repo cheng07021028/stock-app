@@ -337,7 +337,7 @@ def inspect(root=ROOT,now=None):
         market=identity['市場'];rev,mar,ytd,pe=(ledger[k,market,c] for k in ('revenue','margin','ytd','pe'))
         p=fin.financial_profile(rev,mar,ytd,pe,m,q,'')
         from godpick_h232_eps_comparability import high_growth
-        stocks.append({**identity,'13月缺期':'、'.join(fin.monthstr(i) for i in range(m-12,m+1) if i not in rev),'三率缺期':'、'.join(fin.qstr(i) for i in (q,q-1,q-4,q-5) if i not in mar),'累計財報缺期':'、'.join(fin.qstr(i) for i in range(q-5,q+1) if i not in ytd),**{k:p[k] for k in ('營收年增%','連3月成長','近13月新高','連兩季三率年增','獲利突破','TTM EPS重建','TTM狀態','EPS可比性','EPS分母核實期數','EPS分母變動%','EPS同分母TTM','EPS權益事件','EPS證據期間')},'H232同分母成長複核':high_growth(p),'高成長財報複核':bool((p['連3月成長'] is True or p['近13月新高'] is True) and (p['連兩季三率年增'] is True or p['獲利突破'] is True) and p['TTM EPS重建'] is not None and p['TTM EPS重建']>=5 and p['獲利率為正'])})
+        stocks.append({**identity,'13月缺期':'、'.join(fin.monthstr(i) for i in range(m-12,m+1) if i not in rev),'三率缺期':'、'.join(fin.qstr(i) for i in (q,q-1,q-4,q-5) if i not in mar),'累計財報缺期':'、'.join(fin.qstr(i) for i in range(q-5,q+1) if i not in ytd),**{k:p[k] for k in ('營收年月','營收新鮮','營收年增%','連3月成長','近13月新高','連兩季三率年增','獲利突破','TTM EPS重建','TTM狀態','EPS可比性','EPS分母核實期數','EPS分母變動%','EPS同分母TTM','EPS權益事件','EPS證據期間')},'H232同分母成長複核':high_growth(p),'高成長財報複核':bool((p['連3月成長'] is True or p['近13月新高'] is True) and (p['連兩季三率年增'] is True or p['獲利突破'] is True) and p['TTM EPS重建'] is not None and p['TTM EPS重建']>=5 and p['獲利率為正'])})
     for market in MARKETS:
         rs=[r for r in stocks if r['市場']==market]
         summary.append({'市場':market,'母體':len(rs),'13月完整':sum(not r['13月缺期'] for r in rs),'三率指定四期完整':sum(not r['三率缺期'] for r in rs),'累計六季完整':sum(not r['累計財報缺期'] for r in rs),'三率三升成立':sum(r['連兩季三率年增'] is True for r in rs),'TTM可重建':sum(r['TTM EPS重建'] is not None for r in rs),'TTM>=5':sum(r['TTM EPS重建'] is not None and r['TTM EPS重建']>=5 for r in rs),'高成長財報複核':sum(r['高成長財報複核'] for r in rs),'H232同分母成長複核':sum(r['H232同分母成長複核'] for r in rs)})
@@ -345,7 +345,9 @@ def inspect(root=ROOT,now=None):
     except (OSError,ValueError):health={}
     try:company_health=ar._read(root/'data/h222/h231/health.json')
     except (OSError,ValueError):company_health={}
-    return {'version':VERSION,'asof':now.isoformat(),'company_health':company_health,'h232_candidates':[r for r in stocks if r['H232同分母成長複核']],'summary':summary,'stocks':stocks,'candidates':[r for r in stocks if r['高成長財報複核']],'health':health,'errors':errors,'rejected':rejected,'conflicts':conflicts,'trade_authority_changed':False}
+    try:auto_health=ar._read(root/'data/h222/h233/health.json')
+    except (OSError,ValueError):auto_health={}
+    return {'version':VERSION,'asof':now.isoformat(),'auto_health':auto_health,'company_health':company_health,'h232_candidates':[r for r in stocks if r['H232同分母成長複核']],'summary':summary,'stocks':stocks,'candidates':[r for r in stocks if r['高成長財報複核']],'health':health,'errors':errors,'rejected':rejected,'conflicts':conflicts,'trade_authority_changed':False}
 
 
 def excel(r):
@@ -357,4 +359,7 @@ def excel(r):
         table(w,name,rows)
     if r.get('company_health'):table(w,'06_個股歷史補證',r['company_health'].get('scope',[]))
     if 'h232_candidates' in r:table(w,'07_H232同分母成長',r['h232_candidates'])
+    if r.get('auto_health'):
+        table(w,'08_H233自動補證',r['auto_health'].get('queue',[]))
+        table(w,'09_H233佇列摘要',[{**r['auto_health'].get('counts',{}),'資料時間':r['auto_health'].get('asof'),'狀態':r['auto_health'].get('status'),'彙總請求':r['auto_health'].get('bulk_requests'),'個股請求':r['auto_health'].get('company_requests')}])
     out=io.BytesIO();w.save(out);return out.getvalue()

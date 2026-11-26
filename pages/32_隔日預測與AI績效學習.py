@@ -425,9 +425,16 @@ if st.checkbox('載入 H222 歷史財報驗收（唯讀）'):
             st.dataframe(pd.DataFrame(h222['health'].get('scope',[])),hide_index=True,use_container_width=True)
             st.markdown('**H231 個股歷史財報補證（不計入全市場分期達標）**')
             ch=h222.get('company_health',{})
-            st.caption('個股補證為限量、手動觸發；正式年度、累計起訖及單位必須核實。')
+            st.caption('個股補證支援 H233 限額自動佇列及 H231 手動指定；正式年度、累計起訖及單位必須核實。')
             if ch:st.dataframe(pd.DataFrame(ch.get('scope',[])),hide_index=True,use_container_width=True)
             else:st.info('尚無個股補證收集紀錄。GitHub Actions H222 可輸入 company_codes。')
+            st.markdown('**H233 自動回補佇列（非推薦順位）**')
+            auto=h222.get('auto_health',{})
+            if auto:
+                st.caption(str(auto.get('asof',''))+'｜'+str(auto.get('status','')))
+                st.write(auto.get('counts',{}),{'彙總請求':auto.get('bulk_requests'),'個股請求':auto.get('company_requests'),'錯誤':auto.get('errors',[])})
+                st.dataframe(pd.DataFrame(auto.get('queue',[])),hide_index=True,use_container_width=True)
+            else:st.info('尚無H233自動補證紀錄；原H222工作流保留手動及全市場模式。')
             st.write(h222['errors'],h222['rejected'],h222['conflicts'])
     except Exception as ex:st.error('H222 歷史財報驗收失敗：'+str(ex)[:180])
 
