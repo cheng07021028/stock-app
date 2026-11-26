@@ -13,5 +13,8 @@ def main():
     from godpick_h227_strategy_validation import run as strategy,excel as strategy_excel
     z=strategy(a.root,r['asof'],base=r,acceptance=q);dd=a.out/'h227';dd.mkdir(exist_ok=True)
     (dd/'H227_StrategyValidation.xlsx').write_bytes(strategy_excel(z));(dd/'health.json').write_text(json.dumps({k:v for k,v in z.items() if k not in ('batch','precision','sectors','miss','pairs','validation','stages','tasks')},ensure_ascii=False,allow_nan=False,indent=2),'utf-8')
+    from godpick_h228_market_competition import run as competition,excel as competition_excel
+    x=competition(a.root,r['asof'],base=r,acceptance=q,review=z);ddd=a.out/'h228';ddd.mkdir(exist_ok=True)
+    (ddd/'H228_MarketCompetition.xlsx').write_bytes(competition_excel(x));(ddd/'health.json').write_text(json.dumps({k:v for k,v in x.items() if k not in ('batch','competition','detail','shortlist','precision','pairs','validation','tasks')},ensure_ascii=False,allow_nan=False,indent=2),'utf-8')
     print(json.dumps(h,ensure_ascii=False));return 0 if r['status']=='DATA_GATES_PASS' and q['status']=='DATA_GATES_PASS' else 2
 if __name__=='__main__':raise SystemExit(main())

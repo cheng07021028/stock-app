@@ -185,6 +185,12 @@ def append_manager(w,root,research_day,comparison=None,now=None):
         for r in sorted(pending,key=lambda x:(x['市場'],x['H195研究原序'] if first.finite(x['H195研究原序']) else math.inf,x['股票代號'])):
             c[r['市場']]+=1
             if c[r['市場']]<=5:ws.append([command.safe(r.get(k)) for k in ('市場','股票名稱','股票代號','H195研究分級','H198階段','資料日','官方收盤')]+['未通過H219完整前段證據'])
+    from godpick_h228_market_competition import narrow
+    ws.append(['H228 優先複核（H225原前段子集／每市場最多5檔／非授權）'])
+    ws.append(['市場','股票名稱','股票代號','研究分層','來源','資料日','官方收盤','複核序','用途'])
+    front=narrow(short)
+    for r in front:ws.append([command.safe(r.get(k)) for k in ('市場','股票名稱','股票代號','研究分層','來源','資料日','官方收盤','H228複核序','用途')])
+    if not front:ws.append(['無符合H228前段複核／原研究及授權表保留'])
     for i,width in enumerate([28,25,15,30,32,16,16,20,18,15,35],1):ws.column_dimensions[get_column_letter(i)].width=width
     for row in (1,7):
         for cell in ws[row]:cell.font=Font(color='FFFFFF',bold=True);cell.fill=PatternFill('solid',fgColor='185C70');cell.alignment=Alignment(wrap_text=True)

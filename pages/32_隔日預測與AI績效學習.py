@@ -523,3 +523,19 @@ if st.checkbox('載入 H227 真實績效反證（唯讀）'):
         if st.checkbox('產生 H227 策略驗收 Excel'):
             st.download_button('下載 H227 策略驗收',strategy_excel(h227),'H227_StrategyValidation.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     except Exception as ex:st.error('H227 驗收失敗：'+str(ex)[:180])
+
+
+st.subheader('H228｜首批成熟實證、全市場排名競爭與優先複核')
+if st.checkbox('載入 H228 全市場競爭（唯讀）'):
+    try:
+        from godpick_h228_market_competition import run as market_competition,excel as competition_excel
+        with st.spinner('核對前瞻研究與全市場原價排名…'):h228=market_competition(Path(root))
+        st.caption(h228['version']+'｜'+h228['asof']+'｜'+h228['day'])
+        st.warning('排名為當前主檔回顧、非含息績效；等量隨機基準不是可交易策略；正式授權仍依原H126。')
+        st.write(h228['status'],h228['batch_status'],h228['counts'])
+        for k in ('batch','competition','shortlist'):st.dataframe(pd.DataFrame(h228[k]),hide_index=True,use_container_width=True)
+        with st.expander('逐股排名、強勢榜與樣本外'):
+            for k in ('detail','precision','validation'):st.dataframe(pd.DataFrame(h228[k]),hide_index=True,use_container_width=True)
+        if st.checkbox('產生 H228 全市場競爭 Excel'):
+            st.download_button('下載 H228 全市場競爭',competition_excel(h228),'H228_MarketCompetition.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    except Exception as ex:st.error('H228 驗收失敗：'+str(ex)[:180])
