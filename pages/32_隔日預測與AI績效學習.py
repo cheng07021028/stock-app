@@ -467,3 +467,26 @@ if st.checkbox('載入 H224 成長共振研究（唯讀）'):
             from godpick_h224_growth_resonance import excel as excel_h224
             st.download_button('下載 H224 共振驗收',excel_h224(h224),'H224_GrowthResonance.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     except Exception as ex:st.error('H224 共振驗收失敗：'+str(ex)[:180])
+
+
+st.subheader('H225｜全市場資料品質與主管研究整合')
+@st.cache_data(ttl=120,show_spinner=False)
+def load_h225(path):
+    from godpick_h225_integrated_quality import run
+    return run(Path(path))
+if st.checkbox('載入 H225 統一驗收（唯讀）'):
+    try:
+        if st.button('重新讀取 H225'):load_h225.clear()
+        with st.spinner('重驗資料管線及同日研究封存…'):h225=load_h225(str(root))
+        st.caption(h225['version']+'｜'+h225['asof']+'｜資料日 '+h225['day'])
+        st.warning('獨立研究去重，不等同原掃描同輪或買進；正式授權僅依第7頁原H126。')
+        st.write(h225['status'],h225['first_counts'])
+        st.dataframe(pd.DataFrame(h225['gates']),hide_index=True,use_container_width=True)
+        st.dataframe(pd.DataFrame(h225['shortlist']),hide_index=True,use_container_width=True)
+        with st.expander('來源、全量研究及未入前段'):st.dataframe(pd.DataFrame(h225['sources']),hide_index=True,use_container_width=True);st.dataframe(pd.DataFrame(h225['rows']),hide_index=True,use_container_width=True);st.write(h225['errors'])
+        with st.expander('H224 獨立含成本模擬績效'):st.dataframe(pd.DataFrame(h225['maturity']),hide_index=True,use_container_width=True);st.dataframe(pd.DataFrame(h225['detail']),hide_index=True,use_container_width=True)
+        with st.expander('H219 首批研究召回及技術缺口'):st.dataframe(pd.DataFrame(h225['recall']),hide_index=True,use_container_width=True);st.dataframe(pd.DataFrame(h225['recall_gaps']),hide_index=True,use_container_width=True)
+        if st.checkbox('產生 H225 統一驗收 Excel'):
+            from godpick_h225_integrated_quality import excel as excel_h225
+            st.download_button('下載 H225 統一驗收',excel_h225(h225),'H225_IntegratedQuality.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    except Exception as ex:st.error('H225 統一驗收失敗：'+str(ex)[:180])

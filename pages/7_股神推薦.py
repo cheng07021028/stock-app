@@ -17922,6 +17922,14 @@ def _build_excel_bytes_fast_h85(
             del wb['H206_市場強勢差異']
         wb.create_sheet('H206_市場強勢差異').append(['H206 稽核暫不可用，原報表不受影響', type(_h206_exc).__name__])
 
+    # H225 read-only integrated first sheet; original H126 and all previous sheets intact.
+    try:
+        from godpick_h225_integrated_quality import append_manager as _h225_append
+        _h225_append(wb, Path(__file__).resolve().parents[1], locals().get('_h148_research_day'), comparison=locals().get('_h206_result'))
+    except Exception as _h225_exc:
+        if '00_H225主管總覽' in wb.sheetnames:del wb['00_H225主管總覽']
+        wb.create_sheet('00_H225主管總覽',0).append(['H225 整合待核；請查閱原H126及主管榜',type(_h225_exc).__name__])
+
     try:
         wb.active = 0
     except Exception:
