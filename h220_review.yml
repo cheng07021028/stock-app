@@ -24,6 +24,18 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install 'pandas==2.3.3' 'numpy>=1.26,<3' 'requests>=2.31,<3' 'openpyxl>=3.1.2,<4'
+      - name: H236 optional private GCS restore (read-only)
+        if: vars.H236_RESTORE_QUARTERS != ''
+        env:
+          H236_GCS_BUCKET: ${{ vars.H236_GCS_BUCKET }}
+          H236_GCS_PROJECT: ${{ vars.H236_GCS_PROJECT }}
+          H236_RESTORE_QUARTERS: ${{ vars.H236_RESTORE_QUARTERS }}
+          H236_GCS_CREDENTIALS_JSON: ${{ secrets.H236_GCS_READ_CREDENTIALS_JSON }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$H236_GCS_BUCKET" || -z "$H236_GCS_CREDENTIALS_JSON" ]]; then echo "H236 private bucket/read credentials missing" >&2; exit 2; fi
+          python -m pip install 'google-cloud-storage>=2.16,<4' 'lxml>=5.4,<7' 'beautifulsoup4>=4.12,<5'
+          python tools/h236_cloud.py restore-configured
       - run: python tools/h220_review.py --out h220_output --capture
       - name: Publish immutable public H220 cohorts only
         if: always() && hashFiles('h220_output/health.json') != ''
