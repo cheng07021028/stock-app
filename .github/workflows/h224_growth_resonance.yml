@@ -53,6 +53,9 @@ jobs:
       - name: H225 integrated read-only quality acceptance
         if: always() && hashFiles('h224_output/health.json') != ''
         run: python tools/h225_review.py --out h224_output/h225
+      - name: H237 fallback acceptance even when prior steps fail
+        if: always() && hashFiles('h224_output/h225/h237/health.json') == ''
+        run: python tools/h237_acceptance.py --out h224_output/h225/h237 --json-only --report-only
       - uses: actions/upload-artifact@v4
         if: always()
         with:
