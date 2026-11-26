@@ -4,7 +4,7 @@ on:
     inputs:
       months:
         description: 'Historical months (13-36)'
-        default: '13'
+        default: '24'
       quarters:
         description: 'Historical quarters (8-12)'
         default: '8'
@@ -32,7 +32,7 @@ jobs:
       - name: Collect historical periods
         id: collect
         env:
-          MONTHS: ${{ inputs.months || '13' }}
+          MONTHS: ${{ inputs.months || '24' }}
           QUARTERS: ${{ inputs.quarters || '8' }}
         run: python tools/h222_history.py --collect --months "$MONTHS" --quarters "$QUARTERS" --budget 8
       - name: Persist public historical evidence only
