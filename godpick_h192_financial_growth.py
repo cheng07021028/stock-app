@@ -113,7 +113,11 @@ def parse(kind,market,raw,observed_at):
             if kind=='margin':
                 aliases=('毛利率(%)','營業利益率(%)','稅後純益率(%)')
                 for k,prefix in zip(METRICS[kind],aliases):
-                    vals=[num(v) for key,v in r.items() if str(key).replace(' ','').replace('（','(').replace('）',')').startswith(prefix)]
+                    # H224: TPEX actual response (2026-11-26) uses bare ratio names.
+                    # Accept only exact named aliases; reject two aliases in one row.
+                    bare=prefix.removesuffix('(%)')
+                    labels={prefix,bare} if market=='TPEX' else {prefix}
+                    vals=[num(v) for key,v in r.items() if str(key).replace(' ','').replace('（','(').replace('）',')') in labels or (market=='TWSE' and str(key).replace(' ','').startswith(prefix))]
                     item[k]=vals[0] if len(vals)==1 else None
                 if any(item[k] is None or not -100<=item[k]<=1000 for k in METRICS[kind]):continue
                 item['statement_basis']='SINGLE_QUARTER'

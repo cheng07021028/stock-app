@@ -17901,6 +17901,14 @@ def _build_excel_bytes_fast_h85(
         if 'H223_成長優勢研究' not in wb.sheetnames:
             wb.create_sheet('H223_成長優勢研究').append(['H223 研究證據待核；原報表不受影響',type(_h223_exc).__name__])
 
+    # H224 same-session growth resonance; no authority changes.
+    try:
+        from godpick_h224_growth_resonance import append_manager as _h224_append
+        _h224_append(wb, Path(__file__).resolve().parents[1], locals().get('_h148_research_day'))
+    except Exception as _h224_exc:
+        if 'H224_成長共振' not in wb.sheetnames:
+            wb.create_sheet('H224_成長共振').append(['H224 研究證據待核；原報表不受影響',type(_h224_exc).__name__])
+
     # H206 same-export reconciliation, independent public market snapshot.
     try:
         from godpick_h206_market_gap import load as _h206_load, compare_export as _h206_compare, append_sheet as _h206_append

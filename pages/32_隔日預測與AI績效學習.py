@@ -445,3 +445,25 @@ if st.checkbox('載入 H223 財報、情境與優勢研究（唯讀）'):
             from godpick_h223_growth_scenarios import excel as excel_h223
             st.download_button('下載 H223 成長情境',excel_h223(h223),'H223_GrowthScenarios.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     except Exception as ex:st.error('H223 成長情境驗收失敗：'+str(ex)[:180])
+
+st.subheader('H224｜營收加速度與財報籌碼共振驗收')
+@st.cache_data(ttl=120,show_spinner=False)
+def load_h224(path):
+    from godpick_h224_growth_resonance import run
+    return run(Path(path))
+if st.checkbox('載入 H224 成長共振研究（唯讀）'):
+    try:
+        if st.button('重新讀取 H224'):load_h224.clear()
+        with st.spinner('核對實際營收、財報、同日技術及籌碼證據…'):h224=load_h224(str(root))
+        st.caption(h224['version']+'｜'+h224['asof']+'｜資料日 '+h224['day'])
+        st.warning('所有分層均為獨立研究，不等於買進；營收加速度是實際同比中位數差，非預測。EPS股本變動仍待核。')
+        st.write(h224['status'],h224['counts'])
+        st.dataframe(pd.DataFrame(h224['rows']),hide_index=True,use_container_width=True)
+        with st.expander('全市場營收加速度與回補驗收'):
+            st.dataframe(pd.DataFrame(h224['acceleration']),hide_index=True,use_container_width=True)
+            st.dataframe(pd.DataFrame(h224['scope']),hide_index=True,use_container_width=True);st.write(h224['errors'])
+        with st.expander('H223 營收情境誤差（非H224交易績效）'):st.dataframe(pd.DataFrame(h224['forecast_feedback']),hide_index=True,use_container_width=True)
+        if st.checkbox('產生 H224 共振驗收 Excel'):
+            from godpick_h224_growth_resonance import excel as excel_h224
+            st.download_button('下載 H224 共振驗收',excel_h224(h224),'H224_GrowthResonance.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    except Exception as ex:st.error('H224 共振驗收失敗：'+str(ex)[:180])
