@@ -25,5 +25,8 @@ def main():
     from godpick_h238_first_attribution import run as first_attribution,excel as first_excel
     f=first_attribution(a.root,r['asof'],base=r,acceptance=q,review=z,ranking=x,edge=y);dest=a.out/'h238';dest.mkdir(exist_ok=True)
     (dest/'H238_FirstT1Attribution.xlsx').write_bytes(first_excel(f));(dest/'health.json').write_text(json.dumps({k:f[k] for k in ('version','asof','day','first_day','target','status','counts','weight_multiplier','trade_authority_changed')},ensure_ascii=False,allow_nan=False,indent=2),'utf-8')
+    from godpick_h239_rotation_counterproof import run as rotation_review,excel as rotation_excel
+    j=rotation_review(a.root,r['asof'],base=r,first_review=f);dest=a.out/'h239';dest.mkdir(exist_ok=True)
+    (dest/'H239_RotationCounterproof.xlsx').write_bytes(rotation_excel(j));(dest/'health.json').write_text(json.dumps({k:j[k] for k in ('version','asof','day','first_day','status','counts','weight_multiplier','trade_authority_changed')},ensure_ascii=False,allow_nan=False,indent=2),'utf-8')
     print(json.dumps(h,ensure_ascii=False));return 0 if r['status']=='DATA_GATES_PASS' and q['status']=='DATA_GATES_PASS' else 2
 if __name__=='__main__':raise SystemExit(main())

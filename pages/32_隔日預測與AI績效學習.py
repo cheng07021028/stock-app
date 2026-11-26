@@ -634,3 +634,24 @@ if st.checkbox('載入 H238 首批強勢漏選與高成長複核'):
         if st.checkbox('產生 H238 首批績效 Excel'):
             st.download_button('下載 H238 首批績效解剖',first_attribution_excel(h238),'H238_FirstT1Attribution.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     except Exception as ex:st.error('H238 驗收失敗：'+type(ex).__name__)
+
+
+st.subheader('H239｜主流輪動與重複研究反證（唯讀）')
+if st.checkbox('載入 H239 同市場同分級反證'):
+    try:
+        from godpick_h239_rotation_counterproof import run as rotation_review,excel as rotation_excel
+        from godpick_h238_first_attribution import run as first_review
+        from godpick_h225_integrated_quality import run as integrated_review
+        with st.spinner('核對原始封存、前五交易日及決策前產業輪動…'):
+            _h239base=integrated_review(Path(root),include_detail=True)
+            _h239first=first_review(Path(root),_h239base['asof'],base=_h239base)
+            h239=rotation_review(Path(root),_h239base['asof'],base=_h239base,first_review=_h239first)
+        st.caption(h239['version']+'｜'+h239['asof']+'｜'+h239['status'])
+        st.info('近五交易日封存缺期不視為新股；產業為當前主檔回顧，同市場同分級完整成熟樣本才比較。非正式買進，不調權。')
+        st.dataframe(pd.DataFrame([h239['counts']]),hide_index=True,use_container_width=True)
+        for k in ('pairs','sectors'):st.dataframe(pd.DataFrame(h239[k]),hide_index=True,use_container_width=True)
+        with st.expander('逐股反證、首批漏選及異常'):
+            for k in ('detail','first_miss','errors'):st.dataframe(pd.DataFrame(h239[k]),hide_index=True,use_container_width=True)
+        if st.checkbox('產生 H239 反證 Excel'):
+            st.download_button('下載 H239 主流輪動反證',rotation_excel(h239),'H239_RotationCounterproof.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    except Exception as ex:st.error('H239 驗收失敗：'+type(ex).__name__)
