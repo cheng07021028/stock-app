@@ -38,7 +38,7 @@ def classify(r,a,e,chip):
     elif both:level='財技籌碼共振／加速度另核'
     elif same:level='財技同日交集／籌碼未共振或待核'
     else:level='財報成長複核／技術待核'
-    return {**r,**a,**chip,'H224分層':level,'H220財報交叉一致':same,'H220原始收盤':e.get('原始收盤') if same else None,'H198階段':e.get('H198階段') if same else None,'用途':'獨立研究／非正式買進'}
+    return {**r,**a,**chip,'H224分層':level,'H232同分母起漲複核':bool(r.get('H232同分母成長複核') and same),'H232同分母籌碼共振':bool(r.get('H232同分母成長複核') and both),'H220財報交叉一致':same,'H220原始收盤':e.get('原始收盤') if same else None,'H198階段':e.get('H198階段') if same else None,'用途':'獨立研究／非正式買進'}
 
 ORDER=['財技籌碼加速共振','財技籌碼共振／加速度另核','財技同日交集／籌碼未共振或待核','財報成長複核／技術待核']
 def rank(rows):

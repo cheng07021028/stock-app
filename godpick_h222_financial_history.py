@@ -316,7 +316,7 @@ def load_rows(root):
         return b
     for family in (quarters,individual):
         for (market,code,p),(r,t,source) in family.items():
-            out['ytd'].append({**base('ytd',market,p,code,t,source),**{k:r[k] for k in fin.METRICS['ytd']},'history_financial_values':{k:r[k] for k in ('revenue_ytd','gross_profit_ytd',*fin.METRICS['ytd'])},'industry_type':'GENERAL','basis':'CUMULATIVE_YTD_NOT_SINGLE_QUARTER','unit':'元／股','profit_basis':'SAME_SOURCE_DISCLOSED_UNIT','operating_profit_ytd_label':'營業利益（損失）','net_profit_ytd_label':'本期淨利（淨損）','report_date':None})
+            out['ytd'].append({**base('ytd',market,p,code,t,source),**{k:r[k] for k in fin.METRICS['ytd']},'h232_eps_basis':r.get('h232_eps_basis'),'history_financial_values':{k:r[k] for k in ('revenue_ytd','gross_profit_ytd',*fin.METRICS['ytd'])},'industry_type':'GENERAL','basis':'CUMULATIVE_YTD_NOT_SINGLE_QUARTER','unit':'元／股','profit_basis':'SAME_SOURCE_DISCLOSED_UNIT','operating_profit_ytd_label':'營業利益（損失）','net_profit_ytd_label':'本期淨利（淨損）','report_date':None})
             if p%4 and (market,code,p-1) not in family:continue
             prev,pt,ps=family.get((market,code,p-1),({},t,source)) if p%4 else ({},t,source)
             if ps!=source:continue
@@ -336,15 +336,16 @@ def inspect(root=ROOT,now=None):
     for c,identity in identities.items():
         market=identity['市場'];rev,mar,ytd,pe=(ledger[k,market,c] for k in ('revenue','margin','ytd','pe'))
         p=fin.financial_profile(rev,mar,ytd,pe,m,q,'')
-        stocks.append({**identity,'13月缺期':'、'.join(fin.monthstr(i) for i in range(m-12,m+1) if i not in rev),'三率缺期':'、'.join(fin.qstr(i) for i in (q,q-1,q-4,q-5) if i not in mar),'累計財報缺期':'、'.join(fin.qstr(i) for i in range(q-5,q+1) if i not in ytd),**{k:p[k] for k in ('營收年增%','連3月成長','近13月新高','連兩季三率年增','獲利突破','TTM EPS重建','TTM狀態')},'高成長財報複核':bool((p['連3月成長'] is True or p['近13月新高'] is True) and (p['連兩季三率年增'] is True or p['獲利突破'] is True) and p['TTM EPS重建'] is not None and p['TTM EPS重建']>=5 and p['獲利率為正'])})
+        from godpick_h232_eps_comparability import high_growth
+        stocks.append({**identity,'13月缺期':'、'.join(fin.monthstr(i) for i in range(m-12,m+1) if i not in rev),'三率缺期':'、'.join(fin.qstr(i) for i in (q,q-1,q-4,q-5) if i not in mar),'累計財報缺期':'、'.join(fin.qstr(i) for i in range(q-5,q+1) if i not in ytd),**{k:p[k] for k in ('營收年增%','連3月成長','近13月新高','連兩季三率年增','獲利突破','TTM EPS重建','TTM狀態','EPS可比性','EPS分母核實期數','EPS分母變動%','EPS同分母TTM','EPS權益事件','EPS證據期間')},'H232同分母成長複核':high_growth(p),'高成長財報複核':bool((p['連3月成長'] is True or p['近13月新高'] is True) and (p['連兩季三率年增'] is True or p['獲利突破'] is True) and p['TTM EPS重建'] is not None and p['TTM EPS重建']>=5 and p['獲利率為正'])})
     for market in MARKETS:
         rs=[r for r in stocks if r['市場']==market]
-        summary.append({'市場':market,'母體':len(rs),'13月完整':sum(not r['13月缺期'] for r in rs),'三率指定四期完整':sum(not r['三率缺期'] for r in rs),'累計六季完整':sum(not r['累計財報缺期'] for r in rs),'三率三升成立':sum(r['連兩季三率年增'] is True for r in rs),'TTM可重建':sum(r['TTM EPS重建'] is not None for r in rs),'TTM>=5':sum(r['TTM EPS重建'] is not None and r['TTM EPS重建']>=5 for r in rs),'高成長財報複核':sum(r['高成長財報複核'] for r in rs)})
+        summary.append({'市場':market,'母體':len(rs),'13月完整':sum(not r['13月缺期'] for r in rs),'三率指定四期完整':sum(not r['三率缺期'] for r in rs),'累計六季完整':sum(not r['累計財報缺期'] for r in rs),'三率三升成立':sum(r['連兩季三率年增'] is True for r in rs),'TTM可重建':sum(r['TTM EPS重建'] is not None for r in rs),'TTM>=5':sum(r['TTM EPS重建'] is not None and r['TTM EPS重建']>=5 for r in rs),'高成長財報複核':sum(r['高成長財報複核'] for r in rs),'H232同分母成長複核':sum(r['H232同分母成長複核'] for r in rs)})
     try:health=ar._read(root/'data/h222/health.json')
     except (OSError,ValueError):health={}
     try:company_health=ar._read(root/'data/h222/h231/health.json')
     except (OSError,ValueError):company_health={}
-    return {'version':VERSION,'asof':now.isoformat(),'company_health':company_health,'summary':summary,'stocks':stocks,'candidates':[r for r in stocks if r['高成長財報複核']],'health':health,'errors':errors,'rejected':rejected,'conflicts':conflicts,'trade_authority_changed':False}
+    return {'version':VERSION,'asof':now.isoformat(),'company_health':company_health,'h232_candidates':[r for r in stocks if r['H232同分母成長複核']],'summary':summary,'stocks':stocks,'candidates':[r for r in stocks if r['高成長財報複核']],'health':health,'errors':errors,'rejected':rejected,'conflicts':conflicts,'trade_authority_changed':False}
 
 
 def excel(r):
@@ -355,4 +356,5 @@ def excel(r):
     for name,rows in [('01_母體驗收',r['summary']),('02_高成長財報複核',r['candidates']),('03_逐股缺期',r['stocks']),('04_回補日誌',r['health'].get('scope',[])),('05_異常',[{'來源異常':x} for x in r['errors']]+[{'證據衝突種類':k,'衝突數':v} for k,v in r['conflicts'].items()])]:
         table(w,name,rows)
     if r.get('company_health'):table(w,'06_個股歷史補證',r['company_health'].get('scope',[]))
+    if 'h232_candidates' in r:table(w,'07_H232同分母成長',r['h232_candidates'])
     out=io.BytesIO();w.save(out);return out.getvalue()

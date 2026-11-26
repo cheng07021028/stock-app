@@ -103,7 +103,9 @@ def load(root):
             if p is None or master.get(code,{}).get('市場')!=market:raise ValueError('current market identity or period invalid')
             v=read(root,market,code,p,path)
             if v.get('company_name') is not None and v['company_name']!=unique_name(master,code):raise ValueError('current issuer name identity changed or ambiguous')
-            out[market,code,p]=(v['row'],v['observed_at'],URL)
+            from godpick_h232_eps_comparability import extract
+            basis=extract(v['html'],p,v['row']['eps_ytd'])
+            out[market,code,p]=({**v['row'],'h232_eps_basis':basis},v['observed_at'],URL)
         except Exception as e:errors.append(f'H231 {market}/{code}/{path.name}: {str(e)[:150]}')
     return out,errors
 

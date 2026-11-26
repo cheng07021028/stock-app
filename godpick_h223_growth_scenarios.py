@@ -78,6 +78,7 @@ def signature(root):
     return tuple((str(x),s.st_size,s.st_mtime_ns,s.st_ctime_ns,s.st_ino) for x in sorted(set(paths)) for s in [x.stat()])
 
 def candidates(profiles,forecasts,early):
+    from godpick_h232_eps_comparability import high_growth
     grouped=defaultdict(list)
     for r in forecasts:grouped[identity(r)].append(r)
     out=[]
@@ -85,7 +86,7 @@ def candidates(profiles,forecasts,early):
         if not ((r['連3月成長'] is True or r['近13月新高'] is True) and (r['連兩季三率年增'] is True or r['獲利突破'] is True) and good(r['TTM EPS重建']) and r['TTM EPS重建']>=5 and r['獲利率為正'] and r['EPS季度']==r['三率季度']):continue
         k=identity(r);fs=grouped[k];e=early.get(k,{})
         value='低PE高TTM EPS' in r.get('研究池','').split('、') and r.get('PE同交易日') is True
-        out.append({'市場':k[0],'股票代號':k[1],'股票名稱':r['股票名稱'],'產業':r['產業'],'研究分層':'H220同日成長起漲交集' if e else '財報成長複核／技籌待核','H198階段':e.get('H198階段'),'籌碼分組':e.get('籌碼分組'),'營收年月':r['營收年月'],'營收年增%':r['營收年增%'],'連3月成長':r['連3月成長'],'近13月新高':r['近13月新高'],'連兩季三率年增':r['連兩季三率年增'],'獲利突破':r['獲利突破'],'TTM EPS重建':r['TTM EPS重建'],'EPS可比性':'股本變動未獨立核實／暫定重建','官方PE':r['官方PE'] if r['PE同交易日'] else None,'低PE高EPS複核':value,'情境期數':len(fs),'基準可能超過既有12月高點':any(x['基準超過既有12月高點'] for x in fs) if fs else None,'用途':'獨立研究／非正式買進'})
+        out.append({'市場':k[0],'股票代號':k[1],'股票名稱':r['股票名稱'],'產業':r['產業'],'研究分層':'H220同日成長起漲交集' if e else '財報成長複核／技籌待核','H198階段':e.get('H198階段'),'籌碼分組':e.get('籌碼分組'),'營收年月':r['營收年月'],'營收年增%':r['營收年增%'],'連3月成長':r['連3月成長'],'近13月新高':r['近13月新高'],'連兩季三率年增':r['連兩季三率年增'],'獲利突破':r['獲利突破'],'TTM EPS重建':r['TTM EPS重建'],'H232同分母成長複核':high_growth(r),'EPS可比性':r.get('EPS可比性','股本變動未獨立核實／暫定重建'),'EPS同分母TTM':r.get('EPS同分母TTM'),'EPS分母核實期數':r.get('EPS分母核實期數',0),'EPS權益事件':r.get('EPS權益事件','尚未獨立核實'),'官方PE':r['官方PE'] if r['PE同交易日'] else None,'低PE高EPS複核':value,'情境期數':len(fs),'基準可能超過既有12月高點':any(x['基準超過既有12月高點'] for x in fs) if fs else None,'用途':'獨立研究／非正式買進'})
     # Actual evidence precedes scenario; no forecast score or auto-weight.
     out.sort(key=lambda r:(r['市場'],r['研究分層']!='H220同日成長起漲交集',not r['低PE高EPS複核'],r['連兩季三率年增'] is not True,r['獲利突破'] is not True,r['近13月新高'] is not True,r['股票代號']))
     counts=Counter()

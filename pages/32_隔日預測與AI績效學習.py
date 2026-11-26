@@ -413,6 +413,9 @@ if st.checkbox('載入 H222 歷史財報驗收（唯讀）'):
         st.warning('回補資料自實際首次取得後才可使用。TTM為累計EPS差分研究，不代表已核實股本變動。')
         st.dataframe(pd.DataFrame(h222['summary']),hide_index=True,use_container_width=True)
         st.markdown('**高成長財報複核（非正式推薦）**');st.dataframe(pd.DataFrame(h222['candidates']),hide_index=True,use_container_width=True)
+        with st.expander('H232 EPS同分母成長複核（非買進授權）'):
+            st.caption('明示EPS分子與加權平均股數一致；仍需獨立核實股本事件及追溯重編。')
+            st.dataframe(pd.DataFrame(h222.get('h232_candidates',[])),hide_index=True,use_container_width=True)
         if st.checkbox('產生 H222 歷史財報驗收 Excel'):
             from godpick_h222_financial_history import excel as excel_h222
             st.download_button('下載 H222 財報驗收',excel_h222(h222),'H222_FinancialHistory.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
