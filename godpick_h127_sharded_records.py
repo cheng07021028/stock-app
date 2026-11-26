@@ -108,7 +108,7 @@ def write_snapshot(records: list, state: dict, *, get_json: Callable, put_json: 
 
 
 def load_snapshot(state: dict, *, get_json: Callable, record_hash_func: Callable,
-                  max_raw_bytes: int = 400_000_000) -> tuple[list | None, str]:
+                  max_raw_bytes: int = 400_000_000, workers: int = 1) -> tuple[list | None, str]:
     """Reject missing/modified/incomplete shards, never return partial records."""
     try:
         if state.get('storage_mode') != MODE:
@@ -129,9 +129,17 @@ def load_snapshot(state: dict, *, get_json: Callable, record_hash_func: Callable
             return None, 'snapshot exceeds safe decompression ceiling'
         gathered = []
         for i, e in enumerate(entries):
-            if e.get('path') != f'{path.rsplit("/",1)[0]}/part-{i:05d}.json':
+            if not isinstance(e, dict) or e.get('path') != f'{path.rsplit("/",1)[0]}/part-{i:05d}.json':
                 return None, f'shard path/index mismatch at {i}'
-            part, message = get_json(e['path'], None)
+        def fetch(e):
+            return get_json(e['path'], None)
+        if workers > 1 and len(entries) > 1:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=min(4, int(workers), len(entries))) as pool:
+                parts = list(pool.map(fetch, entries))
+        else:
+            parts = list(map(fetch, entries))
+        for i, (e, (part, message)) in enumerate(zip(entries, parts)):
             if not isinstance(part, dict) or part.get('format') != MODE or part.get('payload_hash') != expected_hash or part.get('part_index') != i:
                 return None, f'incomplete/incorrect shard {i}: {message}'
             compressed_part = base64.b64decode(part['data_b64'], validate=True)

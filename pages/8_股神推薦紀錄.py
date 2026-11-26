@@ -44,6 +44,7 @@ try:
         ensure_records_local_authority_current,
         records_authority_signature,
         records_authority_status,
+        records_authority_verification_h240,
         get_firestore_read_guard_status,
         upsert_records_authority_fast,
     )
@@ -69,6 +70,7 @@ except Exception:
     ensure_records_local_authority_current = None
     records_authority_signature = None
     records_authority_status = None
+    records_authority_verification_h240 = None
     get_firestore_read_guard_status = None
     upsert_records_authority_fast = None
 
@@ -5101,6 +5103,7 @@ def _sync_authority_before_actions(force_remote_summary: bool = False) -> tuple[
                 restored_df = _ensure_godpick_record_columns(pd.DataFrame(rows))
                 _save_state_df(restored_df)
                 _remove_normalized_record_cache_v165()
+                st.session_state[_k("records_source_sig")] = _records_local_signature()
                 remote_restored_flag = True
         except Exception as exc:
             details.append(f"權威遠端摘要檢查失敗：{exc}")
@@ -5115,6 +5118,10 @@ def _sync_authority_before_actions(force_remote_summary: bool = False) -> tuple[
         st.session_state[_k("records_source_sig")] = current_sig
         details.append(f"第8頁已在按鈕執行前重新載入本機最新權威紀錄：{len(current_df)}筆。")
 
+    _h240 = records_authority_verification_h240() if callable(records_authority_verification_h240) else {}
+    # A stale page-7 snapshot cannot be used to patch an unverified authority.
+    if _h240.get("status") != "VERIFIED":
+        return current_df, details, False
     reconciled, reconcile_details = _reconcile_latest_snapshot_into_authority_v174(current_df)
     details.extend(reconcile_details)
     if reconciled:
@@ -6421,8 +6428,15 @@ def main():
 
     # V174：任何按鈕執行前，先同步唯一權威檔。舊畫面不得回寫覆蓋新紀錄。
     _authority_df_v174, _authority_details_v174, _authority_restored_v174 = _sync_authority_before_actions()
-    if _authority_restored_v174:
-        st.success(f"Reboot 後已自動還原最新遠端權威推薦紀錄，共 {len(_authority_df_v174)} 筆；不需再按重新帶入。")
+    _h240_verify = records_authority_verification_h240() if callable(records_authority_verification_h240) else {"status": "UNCHECKED"}
+    if _authority_restored_v174 and _h240_verify.get("status") == "VERIFIED":
+        st.success(f"H240｜已核實遠端權威並還原 {len(_authority_df_v174)} 筆，最新 {_h240_verify.get('latest') or '無'}。")
+    if _h240_verify.get("status") != "VERIFIED":
+        st.warning("H240｜目前顯示為本機或已核實但待對帳的參考快照，非已確認最新權威。"
+                   f"｜本機 {len(_authority_df_v174)} 筆｜遠端摘要 {_h240_verify.get('remote_count', '未取得')} 筆／{_h240_verify.get('remote_latest') or '未取得'}。"
+                   " 請按重新載入；不允許以舊紀錄覆寫遠端。" + str(_h240_verify.get('reason') or ''))
+    else:
+        st.caption(f"H240｜實際驗證來源：{_h240_verify.get('source')}｜{_h240_verify.get('checked_at')}")
     if _authority_details_v174:
         st.session_state[_k("authority_auto_sync_details_v174")] = _authority_details_v174
 
@@ -6433,7 +6447,8 @@ def main():
             if not _dates_v174.empty:
                 _authority_latest_date_v174 = _dates_v174.max().strftime("%Y-%m-%d")
         _authority_path_v174 = project_path("godpick_records.json") if callable(project_path) else "godpick_records.json"
-        st.caption(f"唯一權威檔：{_authority_path_v174}｜{len(_authority_df_v174)} 筆｜最新推薦日期：{_authority_latest_date_v174 or '未取得'}")
+        _h240_caption = "唯一權威檔" if _h240_verify.get("status") == "VERIFIED" else "本機參考檔（遠端待驗收）"
+        st.caption(f"{_h240_caption}：{_authority_path_v174}｜{len(_authority_df_v174)} 筆｜最新推薦日期：{_authority_latest_date_v174 or '未取得'}")
         if len(_authority_df_v174) == 0:
             st.error(
                 "V191-H3重大資料完整性保護：目前推薦歷史權威為0筆。系統已禁止任何0筆/子集合整檔回寫，"
@@ -6495,8 +6510,12 @@ def main():
                 _save_state_df(df)
                 _load_ui_config_once()
                 msg = f"推薦紀錄已重新載入，共 {len(df) if df is not None else 0} 筆。"
-                _set_status(msg, "success")
-                _add_action_result("重新載入", True, msg)
+                verified = callable(records_authority_verification_h240) and records_authority_verification_h240().get("status") == "VERIFIED"
+                if not verified:
+                    msg += "｜H240 遠端最新權威未核實，僅保留參考快照。"
+                _set_status(msg, "success" if verified else "warning")
+                _add_action_result("重新載入", bool(verified), msg)
+                st.session_state[_k("authority_remote_check_ts_v174")] = 0.0
             except Exception as e:
                 msg = f"重新載入失敗：{e}"
                 _set_status(msg, "error")
@@ -6694,6 +6713,7 @@ def main():
         st.toggle("慢速備援補缺口（utils/Yahoo/歷史逐檔，較慢）", value=False, key=_k("enable_slow_price_fallback"), help="替代來源仍抓不到時才開。預設關閉，避免 Streamlit Cloud 卡很久。")
         st.number_input("慢速備援最多補幾檔 / 每批", min_value=0, max_value=100, value=20, step=5, key=_k("slow_price_fallback_limit"))
     with top_cols[6]:
+        st.caption("以下圖示僅表示服務已設定，非同步驗收成功。")
         st.caption(
             f"GitHub紀錄：{'✅' if _safe_str(_github_config().get('token')) else '❌'} ｜ "
             f"Firestore：{'✅' if _safe_str(_firebase_config().get('project_id')) else '❌'} ｜ "

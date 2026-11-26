@@ -355,7 +355,11 @@ def _guard_records_full_replace(
     current_rows = records_as_rows_exact(current_payload)
     before = len(current_rows)
     after = len(new_rows)
-    if allow_destructive_replace or before <= 0 or after >= before:
+    if allow_destructive_replace or before <= 0:
+        return True, "", before, after
+    before_ids = {_safe_str(row.get("record_id")) for row in current_rows}
+    after_ids = {_safe_str(row.get("record_id")) for row in new_rows}
+    if after >= before and before_ids.issubset(after_ids) and _latest_record_recommendation_date(new_rows) >= _latest_record_recommendation_date(current_rows):
         return True, "", before, after
     msg = (
         f"V191-H3 防歸零/防縮水已阻止完整覆蓋：目前權威 {before} 筆，"
@@ -526,6 +530,110 @@ def records_authority_status() -> dict[str, Any]:
     }
 
 
+# H240: current immutable publication takes precedence over historical rescue.
+# Process-local diagnostics only; never invent a durable revision on read failure.
+_H240_CHECKS: dict[str, dict[str, Any]] = {}
+
+
+def _h240_status(rows, *, status, source="", head=None, reason=""):
+    head = head if isinstance(head, dict) else {}
+    result = {"status": status, "source": source, "count": len(rows),
+              "latest": _latest_record_recommendation_date(rows),
+              "remote_count": int(head.get("count") or 0),
+              "remote_latest": _recommendation_date_text(head.get("latest_recommendation_date")),
+              "reason": reason, "checked_at": _now_text(), "local_signature": records_authority_signature()}
+    _H240_CHECKS[str(BASE_DIR)] = result
+    return result
+
+
+def records_authority_verification_h240():
+    result = dict(_H240_CHECKS.get(str(BASE_DIR), {"status": "UNCHECKED"}))
+    if result.get("status") == "VERIFIED" and result.get("local_signature") != records_authority_signature():
+        result.update(status="UNCHECKED", reason="本機權威已變動，須重新核對遠端")
+    return result
+
+
+def _h240_read_current_shards(head):
+    """Read exactly the manifest designated by the observed head, not legacy JSON."""
+    from godpick_h127_sharded_records import load_snapshot
+    raw, msg = load_snapshot(head, get_json=read_github_json, record_hash_func=_json_hash, workers=4)
+    if raw is None:
+        return None, msg
+    rows = records_as_rows_exact(raw)
+    if (len(rows) != int(head.get("count", -1)) or
+            _json_hash(rows) != head.get("payload_hash") or
+            _latest_record_recommendation_date(rows) != _recommendation_date_text(head.get("latest_recommendation_date"))):
+        return None, "H240 分片實際日期/筆數/完整內容與權威摘要不一致"
+    current, msg2 = read_github_json(RECORDS_STATE_FILE, {})
+    if not isinstance(current, dict) or any(current.get(k) != head.get(k) for k in (
+            "payload_hash", "revision", "count", "latest_recommendation_date", "shard_manifest_sha256")):
+        return None, "H240 還原期間遠端權威已變更或無法讀取；下次重試｜" + str(msg2)
+    return rows, msg
+
+
+def _h240_current_github_restore(local_rows, local_state, local_valid, gh_state, fs_state, details, *, fallback=False):
+    """Prefer a verified current H127 head; never publish or merge during recovery.
+
+    A competing newer Firestore state is not automatically erased: GitHub can
+    provide a verified view, but mutations remain blocked until reconciliation.
+    """
+    if gh_state.get("storage_mode") != "h127-gzip-shards-v1":
+        return None
+    gh_count = int(gh_state.get("count", -1))
+    gh_date = _recommendation_date_text(gh_state.get("latest_recommendation_date"))
+    if gh_count < 0 or (gh_count and not gh_date):
+        return None
+    local_date = _latest_record_recommendation_date(local_rows)
+    local_hash = _json_hash(local_rows)
+    gh_hash = _safe_str(gh_state.get("payload_hash"))
+    gh_rev = _state_revision_v191_h8(gh_state)
+    fs_rev = _state_revision_v191_h8(fs_state)
+    local_rev = _state_revision_v191_h8(local_state) if local_valid else 0
+    newer_fs = bool(fs_state and fs_state.get("payload_hash") != gh_hash and fs_rev > gh_rev)
+    newer_delete = bool(_records_state_is_destructive_mutation(gh_state) and gh_rev > local_rev)
+    if local_valid and local_rev > gh_rev and _records_state_is_destructive_mutation(local_state):
+        return None
+    if newer_fs and _records_state_is_destructive_mutation(fs_state):
+        return None  # let explicit newer deletion be validated in the normal path
+    if (gh_count < len(local_rows) or gh_date < local_date) and not newer_delete:
+        return None
+    if gh_hash == local_hash and gh_count == len(local_rows) and gh_date == local_date and local_valid:
+        if newer_fs:
+            return None
+        _h240_status(local_rows, status="VERIFIED", source="GitHub H127 同Hash", head=gh_state)
+        return local_rows, details + ["H240 GitHub現行H127權威同Hash；不掃歷史、不重抓分片"], False
+    # Do not override newer same-date local edits, except a count-proven gap.
+    if local_valid and local_rev > gh_rev and gh_count == len(local_rows) and gh_date == local_date:
+        return None
+    if newer_fs and not fallback and (int(fs_state.get("count") or 0) > gh_count or
+                     _recommendation_date_text(fs_state.get("latest_recommendation_date")) > gh_date):
+        return None
+    rows, msg = _h240_read_current_shards(gh_state)
+    details.append("H240 現行GitHub完整分片：" + str(msg))
+    if rows is None:
+        return None  # the existing verified Firestore twin fallback can still succeed
+    # A current verified head is enough for recovery; the older checkout is
+    # diagnostic only and must never be merged back into the remote authority.
+    if local_rows and local_hash != gh_hash:
+        ok, backup = write_local_json_atomic(f".cache/h240_pre_restore/{local_hash}.json", local_rows)
+        if not ok:
+            _h240_status(local_rows, status="BLOCKED", head=gh_state, reason="舊本機快照備份失敗")
+            return local_rows, details + [backup], False
+    state = dict(gh_state)
+    state.update(restored_from="github_h240", restored_at=_now_text())
+    ok1, msg1 = write_local_json_atomic(RECORDS_FILE, rows)
+    ok2, msg2 = write_local_json_atomic(RECORDS_STATE_FILE, state) if ok1 else (False, "未更新state")
+    ok3, msg3 = write_local_json_atomic(RECORDS_MANIFEST_FILE, _records_manifest(rows, gh_hash)) if ok2 else (False, "未更新manifest")
+    details.extend([msg1, msg2, msg3])
+    if not (ok1 and ok2 and ok3):
+        _h240_status(rows if ok1 else local_rows, status="BLOCKED", head=gh_state, reason="還原未完整提交")
+        return rows if ok1 else local_rows, details, False
+    status = "CONFLICT" if newer_fs else "VERIFIED"
+    reason = "Firestore有較新且不同Hash摘要，須對帳，不允許覆寫" if newer_fs else "現行H127完整分片、筆數、日期及Hash均核實"
+    _h240_status(rows, status=status, source="GitHub H127", head=gh_state, reason=reason)
+    return rows, details + [f"H240 {reason}｜{len(rows)}筆｜最新{gh_date}"], not newer_fs
+
+
 def ensure_records_local_authority_current() -> tuple[list[dict[str, Any]], list[str], bool]:
     """Restore the local canonical JSON from the freshest verified authority.
 
@@ -542,8 +650,19 @@ def ensure_records_local_authority_current() -> tuple[list[dict[str, Any]], list
         local_hash = _json_hash(local_rows)
         local_state = dict(local_state or {}) if isinstance(local_state, dict) else {}
         local_valid = bool(_safe_str(local_state.get("payload_hash")) == local_hash)
-        local_state.setdefault("count", len(local_rows))
-        local_state.setdefault("latest_recommendation_date", _latest_record_recommendation_date(local_rows))
+        local_state["count"] = len(local_rows)
+        local_state["latest_recommendation_date"] = _latest_record_recommendation_date(local_rows)
+        if not local_valid:
+            # A checkout may include an old payload plus unrelated state metadata.
+            local_state.pop("revision", None)
+            local_state.pop("updated_at_epoch", None)
+            local_state.pop("updated_at_utc", None)
+            local_state.pop("updated_at", None)
+            local_state.pop("mutation_kind", None)
+            local_state.pop("mutation_reason", None)
+            local_state.pop("mutation_deleted_count", None)
+            local_state.pop("sync_reason", None)
+            local_state.pop("recovery_reason", None)
         if not local_valid:
             # Use file mtime only as a tie-breaker.  Never stamp a stale rebooted
             # repository copy with "now" before checking remote authorities.
@@ -583,6 +702,15 @@ def ensure_records_local_authority_current() -> tuple[list[dict[str, Any]], list
                 ):
                     candidates.append(("github", gh_state, None, None))
 
+        _h240_status(local_rows, status="BLOCKED", head=gh_state or fs_summary,
+                     reason="尚未核實現行遠端權威；舊本機快照僅供參考")
+        try:
+            current_result = _h240_current_github_restore(local_rows, local_state, local_valid, gh_state, fs_summary, details)
+            if current_result is not None:
+                return current_result
+        except Exception as exc:
+            details.append(f"H240 現行分片還原未完成：{type(exc).__name__}｜{exc}")
+
         # V191-H4 authority-gap recovery.  H3 only reacted to 0/4-row collapse
         # states and chose the first merely-large historical snapshot.  H4 also
         # audits a stale large authority (e.g. 1810 rows ending 07/09) and selects
@@ -601,7 +729,13 @@ def ensure_records_local_authority_current() -> tuple[list[dict[str, Any]], list
                 details.append(f"V191-H4歷史缺口稽核略過：{audit_reason}")
             else:
                 audit_needed, audit_reason = _records_history_gap_audit_needed(local_state, local_rows)
-            if github_config().get("token") and audit_needed:
+            # H240: never resurrect older history in front of an existing current
+            # authority (or a temporarily unreadable current head). History rescue
+            # is retained as an explicit diagnostic tool, not an automatic writer.
+            if github_config().get("token") and audit_needed and not gh_state and not fs_summary:
+                details.append("H240 現行遠端權威無法核實；停止自動歷史救援回寫，保留歷史救援工具供人工核對。")
+                audit_needed = False
+            if github_config().get("token") and audit_needed and not gh_state and not fs_summary:
                 audit_signature = "|".join([
                     _safe_str(local_state.get("payload_hash")),
                     str(len(local_rows)),
@@ -668,24 +802,33 @@ def ensure_records_local_authority_current() -> tuple[list[dict[str, Any]], list
                 if source == "local" or int((newest_state or {}).get("count") or 0) < int((supersede[1] or {}).get("count") or 0):
                     source, newest_state, newest_fallback, newest_rows_hint = supersede
                     details.append(f"H161不採用局部權威：本機 {len(local_rows)} 筆，{source} 摘要 {int(newest_state.get('count') or 0)} 筆；須核實完整內容後恢復，禁止縮水覆蓋。")
+        # A newer explicit delete is allowed to lower the newest business date.
+        # Do not let older date-first snapshots resurrect it after reboot.
+        valid_candidates = [item for item in candidates if item[0] != "local" or local_valid]
+        highest_rev = max((_state_revision_v191_h8(item[1]) for item in valid_candidates), default=0)
+        deletes = [item for item in valid_candidates if highest_rev > 0 and
+                   _state_revision_v191_h8(item[1]) == highest_rev and _records_state_is_destructive_mutation(item[1])]
+        if deletes:
+            source, newest_state, newest_fallback, newest_rows_hint = max(deletes, key=lambda item: item[0] == "local")
+            details.append("H240 較新明確刪除權威需完整核實；不以較舊日期/筆數復活紀錄。")
         local_key = _authority_freshness_key("local", local_state, fallback=(local_mtime if local_valid else datetime.min), rows=local_rows)
         newest_key = _authority_freshness_key(source, newest_state, fallback=newest_fallback, rows=newest_rows_hint)
         details.append(f"新鮮度比較：local={local_key[:4]}｜{source}={newest_key[:4]}")
 
         if source == "local":
-            if not local_valid and local_rows:
-                repaired_state = _new_state(
-                    "godpick_records_durable_v7_local_repair",
-                    local_rows,
-                    count=len(local_rows),
-                    latest_recommendation_date=_latest_record_recommendation_date(local_rows),
-                )
-                write_local_json_atomic(RECORDS_STATE_FILE, repaired_state)
-                write_local_json_atomic(RECORDS_MANIFEST_FILE, _records_manifest(local_rows, repaired_state["payload_hash"]))
-                details.append("本機為最新來源；已補建權威state，但未改變資料日期。")
+            same = next((item for item in candidates if item[0] != "local" and
+                         item[1].get("payload_hash") == local_hash and
+                         int(item[1].get("count", -1)) == len(local_rows) and
+                         _recommendation_date_text(item[1].get("latest_recommendation_date")) == _latest_record_recommendation_date(local_rows)), None)
+            if same:
+                _h240_status(local_rows, status="VERIFIED" if (gh_state or not github_config().get("token")) else "PARTIAL",
+                             source=same[0], head=same[1], reason="GitHub現行權威未核實" if github_config().get("token") and not gh_state else "")
+            else:
+                details.append("H240 未取得與本機一致的遠端權威；保留本機唯讀參考，不重建權威revision。")
             return local_rows, details + [f"權威來源：local｜{len(local_rows)}筆"], False
 
         remote_rows: list[dict[str, Any]] = []
+        fs_full_state = {}
         remote_state: dict[str, Any] = dict(newest_state or {})
         _h163_gh_hash = _safe_str(remote_state.get("payload_hash")) if source == "github" else ""
         _h163_gh_count = int(remote_state.get("count") or 0) if source == "github" else 0
@@ -700,6 +843,8 @@ def ensure_records_local_authority_current() -> tuple[list[dict[str, Any]], list
             fs_hash = _safe_str(remote_state.get("payload_hash"))
             fs_count = int(remote_state.get("count") or 0)
             if local_valid and fs_hash and fs_hash == local_hash and fs_count == len(local_rows):
+                _h240_status(local_rows, status="VERIFIED" if (gh_state or not github_config().get("token")) else "PARTIAL",
+                             source="Firestore 同Hash", head=remote_state, reason="GitHub現行權威未核實" if github_config().get("token") and not gh_state else "")
                 details.append(f"H163 Firestore摘要與本機 {len(local_rows)} 筆同Hash；略過整個Collection讀取")
                 return local_rows, details + [f"權威來源：local/Firestore同Hash｜{len(local_rows)}筆"], False
             # If BOTH remote sources certify the identical hash/count, prefer
@@ -722,7 +867,13 @@ def ensure_records_local_authority_current() -> tuple[list[dict[str, Any]], list
                     remote_state.update(fs_full_state)
         if source == "github":
             gh_path = _secret("GODPICK_RECORDS_GITHUB_PATH", RECORDS_FILE) or RECORDS_FILE
-            gh_payload, gh_msg = read_github_json(gh_path, [])
+            if remote_state.get("storage_mode") == "h127-gzip-shards-v1":
+                if any(str(line).startswith("H240 現行GitHub完整分片：") for line in details):
+                    gh_payload, gh_msg = None, "H240 本輪已嘗試相同權威分片；不重複下載，等待下一輪或Firestore同Hash備援"
+                else:
+                    gh_payload, gh_msg = _h240_read_current_shards(remote_state)
+            else:
+                gh_payload, gh_msg = read_github_json(gh_path, [])
             details.append(f"GitHub完整資料：{gh_msg}")
             remote_rows = records_as_rows_exact(gh_payload)
             if not remote_rows and _h163_firestore_twin:
@@ -741,21 +892,40 @@ def ensure_records_local_authority_current() -> tuple[list[dict[str, Any]], list
                     remote_rows = records_as_rows_exact(recovered_fs)
 
         if not remote_rows:
-            details.append(f"遠端 {source} 摘要較新，但完整資料為空；保留本機，不做回退。")
-            return local_rows, details, False
+            explicit_empty = bool(_records_state_is_destructive_mutation(newest_state) and
+                                  _state_revision_v191_h8(newest_state) > (_state_revision_v191_h8(local_state) if local_valid else 0) and
+                                  newest_state.get("count") == 0 and newest_state.get("payload_hash") == _json_hash([]) and
+                                  remote_state.get("count") == 0 and remote_state.get("payload_hash") == _json_hash([]) and
+                                  source == "firestore" and isinstance(fs_full_state, dict) and fs_full_state)
+            if not explicit_empty:
+                if source == "firestore" and gh_state.get("storage_mode") == "h127-gzip-shards-v1":
+                    fallback_result = _h240_current_github_restore(local_rows, local_state, local_valid, gh_state, fs_summary, details, fallback=True)
+                    if fallback_result is not None:
+                        return fallback_result
+                details.append(f"遠端 {source} 摘要較新，但完整資料為空；保留本機，不做回退。")
+                return local_rows, details, False
 
         remote_hash = _json_hash(remote_rows)
-        summary_hash = _safe_str(remote_state.get("payload_hash"))
-        if summary_hash and summary_hash != remote_hash:
-            # Legacy/partial summaries can lag behind the collection.  A full
-            # reload already proves later rows exist, so compare semantic dates
-            # before rejecting the data outright.
-            remote_latest = _latest_record_recommendation_date(remote_rows)
-            local_latest = _latest_record_recommendation_date(local_rows)
-            if remote_latest <= local_latest:
-                details.append(f"遠端 {source} hash不一致且資料日期未較新；保留本機。")
-                return local_rows, details, False
-            details.append(f"遠端 {source} 摘要hash落後，但完整資料最新至{remote_latest}；採完整資料修復摘要。")
+        claimed = gh_state if source == "github" else fs_summary
+        claimed_hash = _safe_str(claimed.get("payload_hash"))
+        remote_latest = _latest_record_recommendation_date(remote_rows)
+        claimed_latest = _recommendation_date_text(claimed.get("latest_recommendation_date"))
+        try:
+            claimed_count = int(claimed.get("count", -1))
+        except (TypeError, ValueError):
+            claimed_count = -1
+        if (claimed_hash and remote_hash != claimed_hash) or (claimed_count >= 0 and len(remote_rows) != claimed_count) or (claimed_latest and remote_latest != claimed_latest):
+            details.append("H240 完整資料與原始遠端摘要Hash/筆數/日期不一致；不覆蓋本機、不重寫摘要。")
+            if source == "firestore" and gh_state.get("storage_mode") == "h127-gzip-shards-v1":
+                fallback_result = _h240_current_github_restore(local_rows, local_state, local_valid, gh_state, fs_summary, details, fallback=True)
+                if fallback_result is not None:
+                    return fallback_result
+            return local_rows, details, False
+        authorized_delete = bool(_records_state_is_destructive_mutation(claimed) and
+                                  _state_revision_v191_h8(claimed) > (_state_revision_v191_h8(local_state) if local_valid else 0))
+        if not authorized_delete and (len(remote_rows) < len(local_rows) or remote_latest < _latest_record_recommendation_date(local_rows)):
+            details.append("H240 防回退：遠端實際內容縮水或日期落後；無較新明確刪除證據，不覆蓋。")
+            return local_rows, details, False
 
         remote_state.update({
             "version": "godpick_records_durable_v7_reboot_restore",
@@ -794,6 +964,8 @@ def ensure_records_local_authority_current() -> tuple[list[dict[str, Any]], list
                 f"最新{remote_state.get('latest_recommendation_date') or '未取得'}",
                 msg1, msg2,
             ])
+            _h240_status(remote_rows, status="VERIFIED" if (gh_state or not github_config().get("token")) else "PARTIAL",
+                         source=source, head=claimed, reason="GitHub現行權威未核實" if github_config().get("token") and not gh_state else "")
             return remote_rows, details, True
         details.append(f"遠端較新但本機還原失敗：{msg1}｜{msg2}")
         return local_rows, details, False
@@ -966,11 +1138,9 @@ def _secret(name: str, default: str = "") -> str:
 
 
 def github_config() -> dict[str, str]:
-    runtime_branch = (
-        _secret("GITHUB_RUNTIME_DATA_BRANCH", "")
-        or _secret("GITHUB_REPO_BRANCH", "runtime-data")
-        or "runtime-data"
-    )
+    explicit_runtime = _secret("GITHUB_RUNTIME_DATA_BRANCH", "")
+    legacy_branch = _secret("GITHUB_REPO_BRANCH", "runtime-data")
+    runtime_branch = explicit_runtime or (legacy_branch if legacy_branch not in {"", "main", "master"} else "runtime-data")
     return {
         "token": _secret("GITHUB_TOKEN"),
         "owner": _secret("GITHUB_REPO_OWNER", "cheng07021028"),
@@ -1257,7 +1427,13 @@ def recover_records_from_github_history(
     # missing/inconsistent, try the next ranked state rather than falling back to
     # a known stale snapshot.
     for _score, sha, state_payload, _item in ranked[:5]:
-        historical_payload, hist_msg = _read_github_json_at_ref(gh_path, sha, [])
+        if state_payload.get("storage_mode") == "h127-gzip-shards-v1":
+            from godpick_h127_sharded_records import load_snapshot
+            historical_payload, hist_msg = load_snapshot(state_payload,
+                get_json=lambda path, default: _read_github_json_at_ref(path, sha, default),
+                record_hash_func=_json_hash, workers=4)
+        else:
+            historical_payload, hist_msg = _read_github_json_at_ref(gh_path, sha, [])
         details.append(hist_msg)
         rows = records_as_rows_exact(historical_payload)
         hist_latest = _latest_record_recommendation_date(rows)
@@ -1418,6 +1594,10 @@ def write_github_json(path_name: str, payload: Any, message: str = "update durab
                             return False, (
                                 "GitHub records state 已有較新revision；拒絕舊快照覆寫"
                             )
+                        if existing_state.get("payload_hash") and not _records_state_is_destructive_mutation(safe_payload):
+                            if (int(safe_payload.get("count", -1)) < int(existing_state.get("count", -1)) or
+                                    _recommendation_date_text(safe_payload.get("latest_recommendation_date")) < _recommendation_date_text(existing_state.get("latest_recommendation_date"))):
+                                return False, "H240 GitHub CAS拒絕日期或筆數回退"
                 body: dict[str, Any] = {
                     "message": f"{message} @ {_now_text()}",
                     "content": encoded,
@@ -2085,6 +2265,13 @@ def _records_remote_state_relation_v191_h8(state: dict[str, Any]) -> tuple[str, 
         return "same", f"遠端state已同Hash｜{remote_hash[:12]}"
     local_rev = _state_revision_v191_h8(state)
     remote_rev = _state_revision_v191_h8(remote)
+    if not _records_state_is_destructive_mutation(state):
+        try:
+            if (int(state.get("count", -1)) < int(remote.get("count", -1)) or
+                    _recommendation_date_text(state.get("latest_recommendation_date")) < _recommendation_date_text(remote.get("latest_recommendation_date"))):
+                return "newer", "H240 遠端實際筆數或推薦日期較完整，拒絕舊快照回寫"
+        except (TypeError, ValueError):
+            return "unknown", "H240 權威摘要格式異常"
     if remote_rev and local_rev and remote_rev > local_rev:
         return "newer", f"遠端已有較新revision {remote_rev}>{local_rev}｜hash {remote_hash[:12]}"
     if remote_rev and local_rev and remote_rev < local_rev:
@@ -2392,6 +2579,9 @@ def write_records_firestore_mutation(
                     "updated_at": now,
                     "updated_at_text": state["updated_at"],
                     "source": "godpick_persistence_service_mutation",
+                    "mutation_kind": state.get("mutation_kind", "upsert"),
+                    "mutation_deleted_count": int(state.get("mutation_deleted_count") or 0),
+                    "mutation_reason": state.get("mutation_reason", ""),
                 },
             )
         )
@@ -2578,9 +2768,9 @@ def _h141_prevent_remote_rollback(
         gh_state, gh_msg = read_github_json(RECORDS_STATE_FILE, {})
         if isinstance(gh_state, dict) and gh_state.get("payload_hash"):
             states.append(("GitHub runtime-data", gh_state))
-        elif not has_firestore:
+        else:
             return False, (
-                f"H161 GitHub遠端權威無法驗證（{gh_msg}）；禁止刪除或以本機舊快照回寫。"
+                f"H240/H161 GitHub遠端權威無法驗證（{gh_msg}）；禁止刪除或以本機舊快照回寫。"
                 "若HTTP 403，請確認 Fine-grained Token 已選 stock-app 並授予 Contents: Read and write。"
             )
     if has_firestore:
@@ -2668,6 +2858,21 @@ def _h141_prevent_remote_rollback(
         good, why = record_snapshot_guard(records, state, destructive=False)
         if not good:
             return False, f"{source}｜{why}"
+    # H240: compare the *base* as well as the submitted result. Appending a
+    # current-date record to an obsolete checkout must not hide the missing history.
+    base_payload, _, _ = read_local_json(RECORDS_FILE, [])
+    base_rows = records_as_rows_exact(base_payload)
+    base_hash = _json_hash(base_rows)
+    base_state, _, _ = read_local_json(RECORDS_STATE_FILE, {})
+    base_rev = _state_revision_v191_h8(base_state) if _state_is_valid(base_rows, base_state) else 0
+    if not {_safe_str(r.get("record_id")) for r in base_rows}.issubset({_safe_str(r.get("record_id")) for r in records}):
+        return False, "H240 非刪除操作不得遺漏既有record_id；請由明確刪除流程執行。"
+    for source, state in states:
+        good, why = record_snapshot_guard(base_rows, state, destructive=False)
+        if not good:
+            return False, f"H240 舊基底禁止回寫：{source}｜{why}"
+        if (state.get("payload_hash") != base_hash and _state_revision_v191_h8(state) > base_rev):
+            return False, f"H240 {source}有較新不同Hash權威；先重新載入完整歷史再修改。"
     return True, "已核對遠端權威，禁止較舊資料回寫"
 
 
@@ -3095,6 +3300,11 @@ def restore_records_snapshot(payload: Any, *, source: str = "remote") -> tuple[b
         rows = normalize_records(payload)
         if not rows:
             return False, f"{source} 快照沒有有效推薦紀錄，未覆蓋本機權威檔。"
+        current, _, _ = read_local_json(RECORDS_FILE, [])
+        previous = records_as_rows_exact(current)
+        if (len(rows) < len(previous) or _latest_record_recommendation_date(rows) < _latest_record_recommendation_date(previous) or
+                not {_safe_str(x.get("record_id")) for x in previous}.issubset({_safe_str(x.get("record_id")) for x in rows})):
+            return False, "H240 相容還原防回退：未經現行遠端權威核實的舊快照不得覆蓋。"
         state = _new_state(
             "godpick_records_durable_v181_restore_compat",
             rows,
@@ -3150,6 +3360,10 @@ def load_records_permanent() -> tuple[list[dict[str, Any]], list[str]]:
     gh_path = _secret("GODPICK_RECORDS_GITHUB_PATH", RECORDS_FILE) or RECORDS_FILE
     gh_payload, gh_msg = read_github_json(gh_path, [])
     gh_state, gh_state_msg = read_github_json(RECORDS_STATE_FILE, {})
+    if isinstance(gh_state, dict) and gh_state.get("storage_mode") == "h127-gzip-shards-v1":
+        rows = records_as_rows_exact(local_payload)
+        _h240_status(rows, status="BLOCKED", head=gh_state, reason="現行權威解析例外；禁止相容層改寫H127")
+        return rows, [authority_fallback_msg, "H240 禁止由舊相容層改寫現行H127權威；保留本機參考，請重新載入。"]
 
     fs_payload: list[dict[str, Any]] = []
     fs_msg = "H163未執行不必要的Firestore全量讀取"
@@ -3216,6 +3430,14 @@ def load_records_permanent() -> tuple[list[dict[str, Any]], list[str]]:
                 f"Firestore：{fs_msg}",
             ]
 
+    previous_exact = records_as_rows_exact(local_payload)
+    if not valid or source == "legacy_merge_v178" or (source == "firestore" and fs_state.get("summary_payload_hash") and fs_state.get("summary_payload_hash") != fs_state.get("payload_hash")):
+        _h240_status(previous_exact, status="BLOCKED", head=gh_state or fs_state, reason="相容層未取得完整一致的現行遠端權威")
+        return previous_exact, [authority_fallback_msg, "H240/H163 未核實相容來源，不重建權威或覆寫本機；保留本機原貌。", f"Firestore：{fs_msg}"]
+    if len(chosen) < len(previous_exact) or _latest_record_recommendation_date(chosen) < _latest_record_recommendation_date(previous_exact):
+        return previous_exact, [authority_fallback_msg, "H240 相容讀取拒絕日期或筆數回退；保留本機。"]
+    if source == "local":
+        return previous_exact, [authority_fallback_msg, "H240/H163 保留本機參考，不重新生成revision。", f"Firestore：{fs_msg}"]
     restored_state = dict(chosen_state or {})
     restored_state.update({
         "version": restored_state.get("version") or "godpick_records_durable_v2",
