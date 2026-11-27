@@ -60,6 +60,12 @@ jobs:
           ref: main
           fetch-depth: 0
 
+      - name: H243 independent wake receipt (before dependency install)
+        id: wake_start
+        if: steps.checkout.outcome == 'success'
+        continue-on-error: true
+        run: python3 tools/h243_wake_receipt.py start
+
       - name: Setup Python
         id: python
         if: steps.checkout.outcome == 'success'
@@ -81,22 +87,45 @@ jobs:
         continue-on-error: true
         shell: bash
         run: |
-          git fetch origin runtime-data:refs/remotes/origin/runtime-data || true
+          git fetch origin +refs/heads/runtime-data:refs/remotes/origin/runtime-data
           python tools/restore_runtime_data_v191.py
 
       - name: Run V191 due checker
         id: due
-        if: steps.checkout.outcome == 'success' && steps.python.outcome == 'success' && steps.deps.outcome == 'success'
+        if: steps.restore.outcome == 'success'
         continue-on-error: true
         run: python tools/run_godpick_auto_scheduler_v191.py
 
       - name: Verify scheduler heartbeat/history reached runtime-data
         id: verify
-        if: steps.checkout.outcome == 'success' && steps.python.outcome == 'success' && steps.deps.outcome == 'success'
+        if: steps.due.outcome == 'success'
         continue-on-error: true
         env:
           GODPICK_EXPECTED_WAKEUP_RUN_ID: ${{ github.run_id }}
         run: python tools/verify_godpick_scheduler_remote_v191.py
+
+      - name: H243 terminal wake receipt (separate from job success)
+        id: wake_finish
+        if: always() && steps.checkout.outcome == 'success'
+        continue-on-error: true
+        env:
+          H243_CHECKOUT: ${{ steps.checkout.outcome }}
+          H243_PYTHON: ${{ steps.python.outcome }}
+          H243_DEPS: ${{ steps.deps.outcome }}
+          H243_RESTORE: ${{ steps.restore.outcome }}
+          H243_DUE: ${{ steps.due.outcome }}
+          H243_VERIFY: ${{ steps.verify.outcome }}
+        run: python3 tools/h243_wake_receipt.py finish
+
+      - name: H243 preserve failed infrastructure receipt
+        if: always() && steps.checkout.outcome == 'success' && (steps.restore.outcome != 'success' || steps.due.outcome != 'success' || steps.verify.outcome != 'success' || steps.wake_finish.outcome != 'success')
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: h243-wake-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+          path: h243_wake_receipt.json
+          if-no-files-found: warn
+          retention-days: 3
 
       - name: H33 scheduler wake summary (mail-noise guard)
         if: always()
