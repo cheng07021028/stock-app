@@ -1,0 +1,41 @@
+test_anchor_strict (test_h244.Tests.test_anchor_strict) ... ok
+test_attempt_mismatch (test_h244.Tests.test_attempt_mismatch) ... ok
+test_cancelled (test_h244.Tests.test_cancelled) ... ok
+test_dependency_patch_fixture (test_h244.Tests.test_dependency_patch_fixture) ... ok
+test_due_zero (test_h244.Tests.test_due_zero) ... ok
+test_failure_dispatch (test_h244.Tests.test_failure_dispatch) ... ok
+test_manual_zero (test_h244.Tests.test_manual_zero) ... ok
+test_other_run_not_success (test_h244.Tests.test_other_run_not_success) ... ok
+test_pending (test_h244.Tests.test_pending) ... ok
+test_read_403 (test_h244.Tests.test_read_403) ... ok
+test_read_exception_safe (test_h244.Tests.test_read_exception_safe) ... ok
+test_read_run (test_h244.Tests.test_read_run) ... ok
+test_read_wrong_id (test_h244.Tests.test_read_wrong_id) ... ok
+test_receipt_missing_id (test_h244.Tests.test_receipt_missing_id) ... ok
+test_running (test_h244.Tests.test_running) ... ok
+test_success_matches_exact_batch (test_h244.Tests.test_success_matches_exact_batch) ... ok
+test_taipei (test_h244.Tests.test_taipei) ... ok
+test_warning_fourteen (test_h244.Tests.test_warning_fourteen) ... ok
+test_workflow_patch_fixture (test_h244.Tests.test_workflow_patch_fixture) ... ok
+test_wrong_source_no_output (test_h244.Tests.test_wrong_source_no_output) ... ok
+
+----------------------------------------------------------------------
+Ran 20 tests in 0.017s
+
+OK
+
+GitHub read-only source verification (main, 2026-11-27):
+24/24 patch anchors uniquely located across 7 source files.
+Original wake service reconstructed byte-for-byte and verified Git blob SHA1
+5938c7e20e21937b6fcd831ef63134501964cc9f (2888 bytes).
+Patched actual service compiled; six mocked HTTP integration checks passed:
+1. HTTP 200 with exact run ID and force-mode input, version 2026-03-10.
+2. HTTP 204 accepted without fabricated run ID.
+3. Original routine HTTP 204 / API version 2022-11-28 retained.
+4. HTTP 403 no fake receipt.
+5. Malformed HTTP 200 response no fabricated ID.
+6. Exception does not disclose token.
+TOTAL 26 local checks passed; 24 remote anchor checks passed.
+Limitations: full repo bytes unavailable in container; full Page17 compile will run
+on actual local source during overlay generation, before output is created.
+No live dispatch, remote write, end-to-end cloud verification or dependency install performed.

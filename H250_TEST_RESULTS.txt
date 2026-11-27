@@ -1,0 +1,10 @@
+H250 offline results (2026-11-27)
+H244: 20 passed
+H245: 22 passed
+H246: 22 passed
+H247: 33 passed
+H248: 45 passed, 6 skipped (full installed scheduler source absent)
+H249: 43 passed
+H250 builder + acceptance: 19 passed
+Total: 204 passed; 6 skipped (not passes).
+Verified production baseline hashes via GitHub tree: all 21 existing source paths, including H244 helper. Stage patch metadata: 78 ordered anchors. Actual worker exact reverse->H248->H249 compile checked; H244 helper -> H248 checked. Full source compile and complete output generation require local exact project. Mock overlay generation, no-write and block-on-conflict checks passed. H250 workflow YAML parsed; Python helper/test compile passed. No cloud deployment, no production execution, no measured speedup.

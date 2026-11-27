@@ -1,0 +1,38 @@
+[
+  [
+    "# H168: independent read-only Actions truth while the worker's local",
+    "from godpick_h244_dispatch_truth import read_run as _h244_read_run, describe as _h244_describe, taipei_now as _h244_now, ACTIVE as _H244_ACTIVE, mode_label as _h244_mode\n\n@st.cache_data(ttl=25, show_spinner=False)\ndef _h244_cached_run(token, owner, repo, run_id):\n    return _h244_read_run(token=token, owner=owner, repo=repo, run_id=run_id)\n\n# H168: independent read-only Actions truth while the worker's local"
+  ],
+  [
+    "\"事件\": x.get(\"event\"), \"排隊/執行開始UTC\": x.get(\"created_at_utc\"),",
+    "\"事件\": x.get(\"event\"), \"批次模式\": x.get(\"display_title\"), \"排隊/執行開始UTC\": x.get(\"created_at_utc\"),"
+  ],
+  [
+    "\"GitHub 並行群組只保留有限待處理項目，取消不代表業務工作完成。\"",
+    "\"取消不代表業務工作完成；H244 採最多100筆等待的序列佇列。\""
+  ],
+  [
+    "                _ok, _msg = dispatch_auto_scheduler_wakeup(\n                    token=_token, owner=_owner, repo=_repo, branch=_branch,\n                    wakeup_source=wake_source, manual_job=manual_job,\n                )\n                st.session_state[\"h159_worker_dispatch\"] = {\n                    \"ok\": bool(_ok), \"manual_job\": manual_job,\n                    \"time\": time.strftime(\"%Y-%m-%d %H:%M:%S\"), \"message\": str(_msg),\n                }",
+    "                _receipts = st.session_state.setdefault(\"h244_receipts\", {})\n                _old = _receipts.get(manual_job or \"due_only\", {})\n                if _old.get(\"ok\") and _old.get(\"run_id\"):\n                    _run = _h244_read_run(token=_token, owner=_owner, repo=_repo, run_id=_old[\"run_id\"])\n                    if _run.get(\"available\") and _run.get(\"status\") in _H244_ACTIVE:\n                        st.info(f\"本模式已有 Run {_old['run_id']} 排隊／執行中，不重複派送。\")\n                        return\n                _receipt = {}\n                _ok, _msg = dispatch_auto_scheduler_wakeup(\n                    token=_token, owner=_owner, repo=_repo, branch=_branch,\n                    wakeup_source=wake_source, manual_job=manual_job, receipt=_receipt,\n                )\n                _record = {\"ok\": bool(_ok), \"manual_job\": manual_job,\n                           \"time\": _h244_now(), \"message\": str(_msg), **_receipt}\n                _receipts[manual_job or \"due_only\"] = _record\n                st.session_state[\"h159_worker_dispatch\"] = _record"
+  ],
+  [
+    "st.info(str(_msg) + \"｜僅確認派送成功，不代表14項已完成；請以下方遠端批次履歷和最後訊息為準。\")",
+    "st.info(str(_msg) + \"｜僅確認派送，請看下方本筆 Run ID 專區；不是完成回報。\")"
+  ],
+  [
+    "            st.caption(\"最近 Worker 派送：\" + str(_h159_last_dispatch.get(\"time\")) + \"｜\" + (\n                \"已受理，待遠端確認\" if _h159_last_dispatch.get(\"ok\") else \"派送失敗\"\n            ))",
+    "            st.caption(\"最近 Worker 派送：\" + str(_h159_last_dispatch.get(\"time\")) + \"｜\" + _h244_mode(_h159_last_dispatch.get(\"manual_job\") or \"\") + \"｜Run \" + str(_h159_last_dispatch.get(\"run_id\") or \"未取得\"))"
+  ],
+  [
+    "            st.markdown(\"#### 即時排程狀態 / 成功失敗訊息\")",
+    "            st.markdown(\"#### H244｜本次人工派送（依 Run ID，不混入例行排程）\")\n            for _receipt in st.session_state.get(\"h244_receipts\", {}).values():\n                try:\n                    _rid = _receipt.get(\"run_id\")\n                    _token = str(st.secrets.get(\"GITHUB_TOKEN\", \"\") or \"\").strip()\n                    _owner = str(st.secrets.get(\"GITHUB_REPO_OWNER\", \"cheng07021028\") or \"cheng07021028\").strip()\n                    _repo = str(st.secrets.get(\"GITHUB_REPO_NAME\", \"stock-app\") or \"stock-app\").strip()\n                    _run = _h244_cached_run(_token, _owner, _repo, _rid) if _rid else {}\n                    _level, _detail = _h244_describe(_receipt, _run, _live_status)\n                    getattr(st, _level)(_detail)\n                    if _run.get(\"url\"):\n                        st.markdown(f\"[查看本筆 GitHub Run {_rid}]({_run['url']})\")\n                except Exception as _exc:\n                    st.warning(\"本筆 Run 查詢未確認：\" + type(_exc).__name__)\n            _latest_manual = (_live_status.get(\"last_manual_batch\") or {}) if isinstance(_live_status, dict) else {}\n            if _latest_manual:\n                _ms = _latest_manual.get(\"summary\") or {}\n                st.caption(f\"遠端最近手動批次（重啟後仍可查）：{_latest_manual.get('batch_id')}｜{_latest_manual.get('batch_mode')}｜成功 {_ms.get('success',0)}／警示 {_ms.get('warning',0)}／失敗 {_ms.get('failed',0)}／阻擋 {_ms.get('blocked',0)}\")\n            st.markdown(\"#### 即時排程狀態 / 成功失敗訊息（全域，非本次人工派送）\")"
+  ],
+  [
+    "            _ok, _msg = dispatch_auto_scheduler_wakeup(\n                token=_token, owner=_owner, repo=_repo, branch=_branch,\n                wakeup_source=\"page17_h156_\" + _manual_job,\n                manual_job=_manual_job,\n            )\n            st.session_state[\"h156_last_dispatch\"] = {\n                \"ok\": bool(_ok), \"mode\": _manual_job,\n                \"time\": time.strftime(\"%Y-%m-%d %H:%M:%S\"), \"message\": str(_msg),\n            }",
+    "            _receipts = st.session_state.setdefault(\"h244_receipts\", {})\n            _old = _receipts.get(_manual_job, {})\n            if _old.get(\"ok\") and _old.get(\"run_id\"):\n                _run = _h244_read_run(token=_token, owner=_owner, repo=_repo, run_id=_old[\"run_id\"])\n                if _run.get(\"available\") and _run.get(\"status\") in _H244_ACTIVE:\n                    st.info(f\"本模式已有 Run {_old['run_id']} 排隊／執行中，不重複派送。\")\n                    return\n            _receipt = {}\n            _ok, _msg = dispatch_auto_scheduler_wakeup(\n                token=_token, owner=_owner, repo=_repo, branch=_branch,\n                wakeup_source=\"page17_h156_\" + _manual_job,\n                manual_job=_manual_job, receipt=_receipt,\n            )\n            _record = {\"ok\": bool(_ok), \"mode\": _manual_job, \"manual_job\": _manual_job,\n                       \"time\": _h244_now(), \"message\": str(_msg), **_receipt}\n            _receipts[_manual_job] = _record\n            st.session_state[\"h156_last_dispatch\"] = _record"
+  ],
+  [
+    "st.caption(f\"本頁最近派送：{_dispatch_state.get('time')}｜{_dispatch_state.get('mode')}｜{'已受理，待 worker 執行' if _dispatch_state.get('ok') else '派送失敗'}\")",
+    "st.caption(f\"本頁最近派送：{_dispatch_state.get('time')}｜{_dispatch_state.get('mode')}｜Run {_dispatch_state.get('run_id') or '未取得'}｜{'已受理，請看 H244 本次人工派送' if _dispatch_state.get('ok') else '派送失敗'}\")"
+  ]
+]

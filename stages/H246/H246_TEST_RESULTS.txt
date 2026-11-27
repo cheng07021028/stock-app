@@ -1,0 +1,8 @@
+2026-11-27 H246 local tests
+python -m pytest -q test_h246.py : 22 passed
+Python compileall : PASS (package code only)
+Remote source anchor counts : tasks 1,1,1; H138 1 (4 unique)
+Local bare git test : two-file atomic commit, readback, non-fast-forward rejection, no history mutation PASS
+H245 baseline reverse hash guard : synthetic-source positive/negative test PASS
+Full production project AST and exact blob check : on user's H245 source at overlay generation; not run locally
+Production deploy / actual remote writes / full integration : NOT RUN

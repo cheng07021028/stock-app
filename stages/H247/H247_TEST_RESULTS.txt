@@ -1,0 +1,4 @@
+H247 local offline: 33/33 pytest PASS (contract fixtures, source alias selection, fair rotation, workflow YAML, H244 compatibility, synthetic overlay integrity, version guard).
+GitHub connector: 10 audited files, 16 unique exact anchors matched.
+Python AST and py_compile: installer, helper, tests PASS.
+Production repository full runtime, actual H124/H221 integration tests, remote source collection and cloud deployment: NOT RUN (container cannot download GitHub; separate real-project integration test supplied).
