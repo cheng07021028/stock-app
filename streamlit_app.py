@@ -6,6 +6,9 @@ alone does not execute its ``if __name__ == '__main__'`` block, so this wrapper
 must call ``main()`` explicitly; otherwise Streamlit shows only the multipage
 sidebar and a blank main canvas after login.
 """
+from godpick_h250r3_table_guard import install as _install_h250r3_table_guard
+_install_h250r3_table_guard()
+
 from legacy_page_cleanup import cleanup_duplicate_encoded_pages
 from runtime_branch_bootstrap import install_runtime_branch_guard
 
