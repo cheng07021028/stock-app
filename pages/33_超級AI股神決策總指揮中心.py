@@ -35,7 +35,11 @@ if b.get('h211'):
             st.dataframe(pd.DataFrame(rr).reindex(columns=['股票代號','股票名稱','H200研究優先序',*H211_FIELDS]),hide_index=True,use_container_width=True)
 for tab,t in zip(st.tabs(list(TIERS)),TIERS):
     with tab:
-        df=pd.DataFrame(ordered([r for r in b['rows'] if r['研究分級']==t]));st.dataframe(df,hide_index=True,use_container_width=True) if not df.empty else st.info('此池未找到具備對應證據的股票。')
+        df=pd.DataFrame(ordered([r for r in b['rows'] if r['研究分級']==t]))
+        if not df.empty:
+            st.dataframe(df,hide_index=True,use_container_width=True)
+        else:
+            st.info('此池未找到具備對應證據的股票。')
 st.subheader('研究機會雷達');st.dataframe(pd.DataFrame([{'研究池':k,'檔數':v} for k,v in b['radar'].items()]),hide_index=True,use_container_width=True)
 st.subheader('十二研究員與反方查核')
 items={(r['市場'],r['股票代號']):r for r in b['reviews']}

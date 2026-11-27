@@ -36,7 +36,11 @@ with st.expander('資料健康與來源衝突',expanded=not r['same_session']):
 st.caption('雙證據須同交易日且具H192完整研究條件；單月觀察不能升格雙證據。財報池按已知年增、月增排序；技術池依各池最佳已顯示名次排序，未顯示名次者依代號；不跨策略比較原始分數。')
 for tab,p in zip(st.tabs(list(TIERS)),TIERS):
     with tab:
-        df=pd.DataFrame(r['pools'][p]);st.dataframe(df,hide_index=True,use_container_width=True) if not df.empty else st.info('此池無符合證據的候選。')
+        df=pd.DataFrame(r['pools'][p])
+        if not df.empty:
+            st.dataframe(df,hide_index=True,use_container_width=True)
+        else:
+            st.info('此池無符合證據的候選。')
 with st.expander('全母體稽核'):
     st.dataframe(pd.DataFrame(r['audit']),hide_index=True,use_container_width=True)
 st.subheader('逐股十二研究員聯合審查')
