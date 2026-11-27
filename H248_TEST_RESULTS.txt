@@ -1,0 +1,7 @@
+H248 local verification
+- Offline unittest policy/receipt cases: 45 passed.
+- Complete project mocked integration cases: 6 skipped locally; must run after overlay installation.
+- GitHub main source anchor audit: 23/23 uniquely matched across 5 files.
+- Syntax: compile helper, generator, and test module locally; complete modified source compile enforced by generator.
+- ZIP integrity and per-file SHA256 checked at packaging.
+- No production remote execution or data change. Full repo unavailable locally.
