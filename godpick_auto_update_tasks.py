@@ -203,6 +203,12 @@ def _ensure_records_authority_safe() -> tuple[list[dict[str, Any]], list[str], b
     try:
         from godpick_persistence_service import ensure_records_local_authority_current
         rows, msgs, restored = ensure_records_local_authority_current()
+        # H241: even nonempty rows may be a read-only fallback after a failed
+        # remote head read. Never spend a whole market scan on such a snapshot.
+        from godpick_persistence_service import records_authority_verification_h240
+        verification=records_authority_verification_h240()
+        if verification.get("status") != "VERIFIED":
+            return [], [*list(msgs or []), "H243 GitHub推薦權威未核實；暫停所有歷史寫入"], False
         return list(rows or []), list(msgs or []), bool(restored)
     except ModuleNotFoundError as import_exc:
         # The repository smoke environment may omit Streamlit; production does
@@ -288,7 +294,7 @@ def task_record_performance(cfg: dict[str, Any] | None = None) -> dict[str, Any]
                 started=t0,
             )
         result = update_recommendation_perf_fast_v77(
-            json_files=["godpick_records.json", "godpick_calibration_samples.json", "godpick_latest_recommendations.json"],
+            json_files=["godpick_records.json", "godpick_calibration_samples.json", "godpick_latest_recommendations.json"], require_identity=True,
             max_records=int(cfg.get("max_records", 2000) or 2000),
             batch_limit=int(cfg.get("batch_limit", 100) or 100),
             max_workers=int(cfg.get("max_workers", 12) or 12),
@@ -387,9 +393,6 @@ def _recover_current_list_from_records_v191_h7(latest_payload: dict[str, Any], r
             rdf = rdf.loc[same_run].copy()
         else:
             return []
-    elif ts.notna().any():
-        max_ts = ts.max()
-        rdf = rdf.loc[(max_ts - ts).dt.total_seconds().between(0, 15 * 60)].copy()
     else:
         return []
     if "股票代號" in rdf.columns:
@@ -418,6 +421,10 @@ def _load_recommend_list() -> tuple[pd.DataFrame, list[str]]:
     latest = latest if isinstance(latest, dict) else {}
     rows = _extract_named_rows_v191_h7(latest)
     if rows:
+        from godpick_h243_tracking_evidence import eligible
+        if not all(eligible(row) for row in rows):
+            msgs.append("H243最新快照含待補證身分，僅供參考；不自動覆寫10清單。")
+            return pd.DataFrame(rows), msgs
         try:
             rep = save_named_json_permanent("godpick_recommend_list.json", rows)
             msgs.append(f"H7由Page07最新快照修復Page10清單：{len(rows)}筆｜永久化={'成功' if rep.permanent_ok else '警示'}")
@@ -452,6 +459,14 @@ def _load_recommend_list() -> tuple[pd.DataFrame, list[str]]:
     return pd.DataFrame(), msgs
 
 
+def _h243_identity_guard(df, msgs, started):
+    from godpick_h243_tracking_evidence import eligible
+    if not df.empty and not df.apply(eligible, axis=1).any():
+        return _report(True, f"H243：{len(df)}筆缺原始推薦日期／唯一ID，隔離待補證；未計算、未同步、未清空歷史",
+            details={"quarantined":len(df),"load_messages":msgs[-10:]},started=started,warning=True)
+    return None
+
+
 def task_recommend_list_performance(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     t0=time.perf_counter(); cfg=cfg or {}
     try:
@@ -460,8 +475,10 @@ def task_recommend_list_performance(cfg: dict[str, Any] | None = None) -> dict[s
         ns=load_page_namespace("pages/10_推薦清單.py",base_dir=BASE_DIR)
         _require_headless_callables(ns, "Page10", ["_sync_records", "upsert_records_authority_fast", "save_named_json_permanent"])
         df,msgs=_load_recommend_list()
+        blocked=_h243_identity_guard(df,msgs,t0)
+        if blocked is not None:return blocked
         result=update_recommendation_perf_fast_v77(
-            json_files=["godpick_recommend_list.json"],
+            json_files=["godpick_recommend_list.json"], require_identity=True,
             max_records=int(cfg.get("max_records",5000) or 5000), batch_limit=int(cfg.get("batch_limit",120) or 120),
             max_workers=int(cfg.get("max_workers",12) or 12), stale_minutes=int(cfg.get("stale_minutes",30) or 30), process_all=bool(cfg.get("process_all",True)),
         )
@@ -507,7 +524,13 @@ def task_recommend_list_n_day(cfg: dict[str, Any] | None = None) -> dict[str, An
         ns=load_page_namespace("pages/10_推薦清單.py", base_dir=BASE_DIR)
         _require_headless_callables(ns, "Page10", ["_update_formal_n_day_metrics_v98", "_sync_records", "upsert_records_authority_fast", "save_named_json_permanent"])
         df,msgs=_load_recommend_list()
-        out,summary=ns["_update_formal_n_day_metrics_v98"](df,max_rows=int(cfg.get("max_rows",300) or 300),show_progress=False)
+        blocked=_h243_identity_guard(df,msgs,t0)
+        if blocked is not None:return blocked
+        from godpick_h243_tracking_evidence import eligible
+        valid=df.apply(eligible,axis=1) if not df.empty else pd.Series([],dtype=bool)
+        out,summary=ns["_update_formal_n_day_metrics_v98"](df.loc[valid],max_rows=int(cfg.get("max_rows",300) or 300),show_progress=False)
+        if not df.empty and not valid.all():
+            out=pd.concat([out,df.loc[~valid]],ignore_index=True)
         ok_sync,sync_msgs=ns["_sync_records"](out)
         hint = "" if ok_sync else f"；原因：{_h1533_remote_failure_hint(sync_msgs)}"
         ok=bool(ok_sync and (int(summary.get("processed",0) or 0)>=0))
@@ -524,6 +547,16 @@ def task_recommend_list_hits(cfg: dict[str, Any] | None = None) -> dict[str, Any
         ns=load_page_namespace("pages/10_推薦清單.py", base_dir=BASE_DIR)
         _require_headless_callables(ns, "Page10", ["_update_night_hit_tracking_v101", "_sync_records", "upsert_records_authority_fast", "save_named_json_permanent"])
         df,msgs=_load_recommend_list()
+        from godpick_h243_tracking_evidence import missing_ids, repair
+        repaired=0
+        if not df.empty and missing_ids(df):
+            try:
+                from godpick_persistence_service import ensure_records_local_authority_current, records_authority_verification_h240
+                history, _, _ = ensure_records_local_authority_current()
+                if records_authority_verification_h240().get("status") == "VERIFIED":
+                    df,repaired=repair(df,history)
+            except Exception as exc:
+                msgs=[*msgs,"H243推薦日期補證未完成："+type(exc).__name__]
         # Small scheduled batches are essential: a per-stock HTTP timeout is
         # not a whole-task deadline, especially with multi-source fallbacks.
         # Manual page10 keeps its existing explicit refresh UI behaviour.
@@ -532,25 +565,39 @@ def task_recommend_list_hits(cfg: dict[str, Any] | None = None) -> dict[str, Any
         per_request=max(2,min(int(cfg.get("per_request_timeout_seconds",4) or 4),6))
         out,summary=ns["_update_night_hit_tracking_v101"](
             df,max_rows=max_rows,show_progress=False,
-            time_budget_seconds=time_budget,per_request_timeout_seconds=per_request,
+            time_budget_seconds=time_budget,per_request_timeout_seconds=per_request,require_identity=True,
         )
         # Empty/unchanged batches must not issue another round of remote
         # GitHub+Firestore writes (the prior four jobs may already be failing).
+        summary["h243_repaired_dates"]=repaired
         if int(summary.get("success",0) or 0)==0:
-            note = "無成熟可驗證新資料" if int(summary.get("processed",0) or 0)==0 else "資料不足／來源錯誤，未建立任何新的已核實命中"
-            return _report(True,
-                f"隔日命中追蹤：{note}；已嘗試 {summary.get('processed',0)}／失敗 {summary.get('fail',0)}／待續 {summary.get('remaining',0)}／缺推薦日期 {summary.get('missing_recommendation_date',0)}；未發出整檔遠端同步；下次續跑",
+            missing=int(summary.get("missing_recommendation_date",0) or 0)
+            remaining=int(summary.get("remaining",0) or 0)
+            failed=int(summary.get("fail",0) or 0)
+            missing_identity=int(summary.get("missing_identity",0) or 0)
+            if not df.empty and not missing and not missing_identity and not remaining and not failed and int(summary.get("processed",0) or 0)==0:
+                return _report(True,"H243隔日命中追蹤：目前無到期可驗證新資料，正常略過；未計入勝率、未發出遠端同步",
+                    details={"summary":summary,"load_messages":msgs[-10:],"outcome":"NO_NEW_DUE"},started=t0)
+            note = "原始推薦日期缺失，隔離待補證" if (missing or missing_identity) and not remaining else "尚無成熟可驗證新資料／來源不足"
+            result=_report(True,
+                f"隔日命中追蹤：{note}；已嘗試 {summary.get('processed',0)}／失敗 {failed}／待續 {remaining}／缺推薦日期 {missing}／缺有效身分 {missing_identity}；同ID補證 {repaired}；未發出整檔遠端同步；下次續跑",
                 details={"summary":summary,"load_messages":msgs[-10:]},started=t0,warning=True)
+            # A missing date alone is not retryable every 10 minutes. It is
+            # retried at the next configured slot after fresh evidence arrives.
+            result["retry_pending"]=bool(remaining or failed)
+            return result
         ok_sync,sync_msgs=ns["_sync_records"](out)
         hint = "" if ok_sync else f"；原因：{_h1533_remote_failure_hint(sync_msgs)}"
         no_data=bool(df.empty)
         remaining=int(summary.get("remaining",0) or 0)
-        return _report(bool(ok_sync),
+        result = _report(bool(ok_sync),
             f"隔日命中追蹤：處理 {summary.get('processed',0)}／成功 {summary.get('success',0)}／失敗 {summary.get('fail',0)}／待續 {remaining}；"
             + ('0筆安全略過（未清空歷史）' if no_data else ('遠端同步已確認' if ok_sync else '遠端同步失敗，已保留本輪結果與失敗明細')) + hint,
             details={"summary":summary,"load_messages":msgs[-10:],"sync_messages":sync_msgs[-20:]},
             changed_files=["godpick_recommend_list.json","godpick_records.json"],started=t0,
-            warning=bool(ok_sync and (no_data or remaining>0 or int(summary.get("fail",0) or 0)>0)))
+            warning=bool(ok_sync and (no_data or remaining>0 or int(summary.get("fail",0) or 0)>0 or int(summary.get("missing_recommendation_date",0) or 0)>0)))
+        result["retry_pending"]=bool(ok_sync and (remaining or int(summary.get("fail",0) or 0)))
+        return result
     except Exception as exc:
         return _report(False,f"隔日命中追蹤失敗：{type(exc).__name__}: {exc}",started=t0)
 
@@ -626,7 +673,7 @@ def task_durability_retry(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
         attempted=int(result.get("attempted",0) or 0)
         confirmed=int(result.get("confirmed_this_run",0) or 0)
         failed=int(result.get("failed_this_run",0) or 0)
-        history_incident = bool(not authority_rows and any("歷史救援" in str(x) or "意外" in str(x) or "縮水" in str(x) for x in authority_msgs))
+        history_incident = bool(not authority_rows and any("歷史救援" in str(x) or "意外" in str(x) or "縮水" in str(x) or "權威未核實" in str(x) for x in authority_msgs))
         hard_missing=[r for r in (audit.get("rows") or []) if isinstance(r,dict) and r.get("critical") and not r.get("exists")] if isinstance(audit,dict) else []
         ok=not bool(hard_missing) and not history_incident and failed==0
         if history_incident:
@@ -638,7 +685,7 @@ def task_durability_retry(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
                 + ("；已逐檔checkpoint，下次只續跑剩餘項目" if pending and ok else "")
                 + (f"；推薦歷史權威 {'已救援' if authority_restored else '已確認'} {len(authority_rows)} 筆" if authority_rows else "")
             )
-        return _report(
+        result_report = _report(
             ok,msg,details={
                 "authority_count":len(authority_rows),"authority_restored":authority_restored,"authority_messages":authority_msgs[-30:],
                 "convergence":result,"audit":audit,
@@ -646,6 +693,8 @@ def task_durability_retry(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
             changed_files=["godpick_durability_outbox.json","godpick_durability_audit.json"],started=t0,
             warning=bool(ok and pending)
         )
+        result_report["retry_pending"] = bool(ok and pending)
+        return result_report
     except Exception as exc:
         return _report(False,f"永久化重試失敗：{type(exc).__name__}: {exc}",started=t0)
 

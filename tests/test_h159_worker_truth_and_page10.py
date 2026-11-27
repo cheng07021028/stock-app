@@ -176,7 +176,7 @@ def test_page10_worker_remote_ack_is_executed_not_just_source_text(monkeypatch):
         "_safe_str": str, "_now_text": lambda: "2026-11-13 23:00:00",
     }
     exec(code,env)
-    data=pd.DataFrame([{"股票代號":"2330","推薦日期":"2026-11-13","資料來源":"本輪推薦清單"}])
+    data=pd.DataFrame([{"record_id":"test-valid-record","市場別":"上市","股票代號":"2330","推薦日期":"2026-11-13","資料來源":"本輪推薦清單"}])
     monkeypatch.setenv("GITHUB_ACTIONS", "true")
     ok,msg=env["_sync_records"](data)
     assert not ok

@@ -1146,16 +1146,8 @@ def _extract_price_range_v101(value: Any) -> tuple[float | None, float | None]:
 
 
 def _row_recommend_date_v101(row: Any) -> date | None:
-    # A later metric/record update time is NOT a recommendation timestamp.
-    for c in ["推薦日期", "推薦時間", "建立時間"]:
-        try:
-            v = row.get(c) if hasattr(row, "get") else None
-            d = pd.to_datetime(v, errors="coerce")
-            if pd.notna(d):
-                return d.date()
-        except Exception:
-            continue
-    return None
+    from godpick_h243_tracking_evidence import row_date
+    return row_date(row) if hasattr(row,"get") else None
 
 
 def _base_price_v101(row: Any) -> float | None:
@@ -1294,6 +1286,7 @@ def _update_night_hit_tracking_v101(
     *,
     time_budget_seconds: float | None = None,
     per_request_timeout_seconds: int = 7,
+    require_identity: bool = False,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """H153.3: bounded, resumable hit update; manual UI retains its old defaults.
 
@@ -1311,13 +1304,13 @@ def _update_night_hit_tracking_v101(
     if x.empty:
         return x, {"processed": 0, "success": 0, "fail": 0, "remaining": 0, "messages": ["無推薦清單資料"]}
     work = x.copy()
-    work["_rec_dt"] = pd.to_datetime(work.get("推薦日期"), errors="coerce")
+    work["_rec_dt"] = pd.to_datetime(work.apply(_row_recommend_date_v101, axis=1), errors="coerce")
     # Older versions stamped failed/too-early rows as completed. Reopen
     # transient outcomes without turning missing evidence into a false hit.
     _transient = {"歷史K線不足", "缺可信OHLC", "尚未到隔日", "缺推薦日期", "缺股票代號"}
     needs = work["作戰追蹤更新時間"].map(_is_blank_value) | work["作戰追蹤狀態"].astype(str).isin(_transient)
     pending = work[needs].sort_values("_rec_dt", ascending=False, na_position="last")
-    invalid_date_count = int(pending["_rec_dt"].isna().sum())
+    invalid_date_count = int(work["_rec_dt"].isna().sum())
     if time_budget_seconds is not None and not pending.empty:
         # There is no T+1 result on recommendation day. Keep these rows
         # pending, but do not spend a provider call or remote write on them.
@@ -1342,6 +1335,13 @@ def _update_night_hit_tracking_v101(
     # false tracking result to the permanent recommendation authority.
     _today_tw = datetime.now(ZoneInfo("Asia/Taipei")).date()
     pending = pending[pending["_rec_dt"].notna() & (pending["_rec_dt"] < pd.Timestamp(_today_tw))]
+    missing_identity = 0
+    if require_identity:
+        from godpick_h243_tracking_evidence import eligible
+        mask = work.apply(eligible, axis=1)
+        missing_identity = int((~mask).sum())
+        pending = pending[mask.reindex(pending.index, fill_value=False)]
+    eligible_count = int((work["_rec_dt"].notna() & (work["_rec_dt"] < pd.Timestamp(_today_tw))).sum())
     batch = max(1, min(int(max_rows or 60), 300))
     candidates = pending.head(batch)
     pending_count = len(pending)
@@ -1398,7 +1398,7 @@ def _update_night_hit_tracking_v101(
         "processed": processed, "success": success, "fail": fail,
         "remaining": remaining, "budget_exhausted": bool(deadline is not None and remaining > 0),
         "time_budget_seconds": time_budget_seconds,
-        "missing_recommendation_date": invalid_date_count,
+        "missing_recommendation_date": invalid_date_count, "eligible_date_count": eligible_count, "missing_identity": missing_identity,
         "messages": (errors[:8] + ([f"缺推薦日期共{invalid_date_count}筆，無法驗證隔日命中；不可用更新時間替代"] if invalid_date_count else []))[:10],
     }
 
@@ -1858,6 +1858,15 @@ def _sync_records(df: pd.DataFrame) -> tuple[bool, list[str]]:
         st.session_state[_k("last_sync_msgs")] = messages
         return True, messages
 
+    from godpick_h243_tracking_evidence import eligible
+    valid_mask = work.apply(eligible, axis=1)
+    quarantined = int((~valid_mask).sum())
+    if quarantined:
+        messages.append(f"H243：{quarantined}筆缺原始推薦身分／日期，隔離待補證；不得補造ID或回寫08歷史。")
+    if not valid_mask.any():
+        st.session_state[_k("last_sync_msgs")] = messages
+        return False, messages
+
     # H159: the unattended GitHub worker must not claim that the entire Page10
     # update has been permanently saved when the historic Page08 authority was
     # merely queued for an asynchronous GitHub write. This also makes a
@@ -1869,7 +1878,7 @@ def _sync_records(df: pd.DataFrame) -> tuple[bool, list[str]]:
     )
     # Update only matching current rows; keep the H3 non-destructive upsert.
     rec_report, rec_stats = upsert_records_authority_fast(
-        work.to_dict(orient="records"),
+        work.loc[valid_mask].to_dict(orient="records"),
         reason="Page10 tracking metrics incremental upsert (V191-H3/H159)",
         require_remote_confirm=_h159_worker,
     )
@@ -1878,6 +1887,11 @@ def _sync_records(df: pd.DataFrame) -> tuple[bool, list[str]]:
         f"added={rec_stats.get('added',0)} updated={rec_stats.get('updated',0)}",
         *["推薦紀錄增量｜" + x for x in rec_report.messages()],
     ])
+
+    if quarantined:
+        messages.append("H243：合法紀錄已嘗試增量保存；含待補證資料的10清單與07快照不覆寫，避免遺失或錯誤升格。")
+        st.session_state[_k("last_sync_msgs")] = messages
+        return False, messages
 
     # Page10 current list can be rewritten because this file is explicitly the
     # current operational list, not cumulative history.

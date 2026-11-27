@@ -363,8 +363,8 @@ def refresh_super_ai_market_context(*, fetch_etf: bool = False, unattended: bool
         "provenance": {
             "TWSE融資融券": TWSE_MARGIN_URL,
             "TPEx融資融券": TPEX_MARGIN_URL,
-            "TAIFEX期貨": "https://openapi.taifex.com.tw/v1/MarketDataOfMajorInstitutionalTradersDetailsOfFuturesContractsBytheDate",
-            "TAIFEX_PCR": "https://openapi.taifex.com.tw/v1/PutCallRatio",
+            "TAIFEX期貨": "https://www.taifex.com.tw/cht/3/futContractsDate" if (taifex.get("H243來源") or {}).get("TAIFEX期貨資料日期") == "OFFICIAL_HTML" else "https://openapi.taifex.com.tw/v1/MarketDataOfMajorInstitutionalTradersDetailsOfFuturesContractsBytheDate",
+            "TAIFEX_PCR": "https://www.taifex.com.tw/cht/3/pcRatio" if (taifex.get("H243來源") or {}).get("TAIFEX_PCR資料日期") == "OFFICIAL_HTML" else "https://openapi.taifex.com.tw/v1/PutCallRatio",
             "ETF": "TWSE/TPEx price history via existing history service",
         },
     }

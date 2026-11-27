@@ -61,7 +61,10 @@ def _recent(d: str, now: datetime | None = None) -> bool:
     if not d:
         return False
     now = (now or datetime.now(TZ)).astimezone(TZ)
-    day = datetime.strptime(d, "%Y-%m-%d").date()
+    try:
+        day = datetime.strptime(d, "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return False
     # A weekend can legitimately use the preceding Friday. A longer data outage
     # is never silently called fresh, even when the HTTP request succeeds.
     return now.date() - timedelta(days=4) <= day <= now.date()
@@ -144,13 +147,24 @@ def parse_futures(rows: list[dict[str, Any]], now: datetime | None = None) -> di
 def complete(payload: dict[str, Any], now: datetime | None = None) -> bool:
     if not isinstance(payload, dict):
         return False
+    sources = payload.get("H243來源")
+    sources = sources if isinstance(sources, dict) else {}
+    ratios = [_number(payload.get(k)) for k in ("PCR成交量比%", "PCR未平倉量比%")]
+    net = _number(payload.get("外資臺指期未平倉淨口數"))
     return bool(
-        _recent(str(payload.get("TAIFEX_PCR資料日期") or ""), now)
+        all(v is not None and 1 <= v <= 1500 for v in ratios)
+        and net is not None and net == int(net) and abs(net) <= 10_000_000
+        and _recent(str(payload.get("TAIFEX_PCR資料日期") or ""), now)
         and _recent(str(payload.get("TAIFEX期貨資料日期") or ""), now)
         and _number(payload.get("PCR成交量比%")) is not None
         and _number(payload.get("PCR未平倉量比%")) is not None
         and _number(payload.get("外資臺指期未平倉淨口數")) is not None
-        and payload.get("來源") == "TAIFEX_OPENAPI_VERIFIED"
+        and (payload.get("來源") == "TAIFEX_OPENAPI_VERIFIED"
+             or (payload.get("來源") == "TAIFEX_OFFICIAL_DUAL_VERIFIED"
+                 and set(sources) == {"TAIFEX_PCR資料日期", "TAIFEX期貨資料日期"}
+                 and all(x in ("OPENAPI", "OFFICIAL_HTML") for x in sources.values())
+                 and "OFFICIAL_HTML" in sources.values()))
+        and payload.get("TAIFEX_PCR資料日期") == payload.get("TAIFEX期貨資料日期")
     )
 
 
@@ -175,7 +189,10 @@ def fetch_taifex_openapi(*, timeout: int = 12, http_get: Any = None, now: dateti
     if (result.get("TAIFEX_PCR資料日期") and result.get("TAIFEX期貨資料日期")
             and all(k in result for k in ("PCR成交量比%", "PCR未平倉量比%", "外資臺指期未平倉淨口數"))):
         result["來源"] = "TAIFEX_OPENAPI_VERIFIED"
-    return result, diagnostics
+    # H243: current official HTML when OpenAPI lags, including unattended mode.
+    from godpick_h243_taifex_web import fallback
+    result, extra = fallback(result, get=get, now=now, timeout=timeout)
+    return result, diagnostics + extra
 
 
 __all__ = ["fetch_taifex_openapi", "parse_pcr", "parse_futures", "complete"]

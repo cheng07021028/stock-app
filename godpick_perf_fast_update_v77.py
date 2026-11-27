@@ -854,6 +854,7 @@ def update_recommendation_perf_fast_v77(
     track_days: List[int] | None = None,
     process_all: bool = False,
     max_total_records: int | None = None,
+    require_identity: bool = False,
 ) -> Dict[str, Any]:
     """
     直接更新專案根目錄 JSON 紀錄。
@@ -914,6 +915,11 @@ def update_recommendation_perf_fast_v77(
             indexed.reverse()
 
         for idx, row in indexed:
+            if require_identity and Path(fn).name in {"godpick_recommend_list.json", "godpick_latest_recommendations.json"}:
+                from godpick_h243_tracking_evidence import eligible
+                if not eligible(row):
+                    summary["identity_quarantined"] = summary.get("identity_quarantined",0)+1
+                    continue
             if _needs_update(row, stale_minutes=stale_minutes):
                 code = _normalize_code(row.get("股票代號") or row.get("代號"))
                 if code:

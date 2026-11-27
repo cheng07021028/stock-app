@@ -20,7 +20,7 @@ import socket
 import threading
 import time
 
-VERSION = "godpick_auto_scheduler_v191_h159_page17_remote_truth"
+VERSION = "godpick_auto_scheduler_v191_h243_retry_receipt"
 # Compatibility lineage marker retained for H11 smoke/contracts: hotfix11_dual_wakeup
 BASE_DIR = Path(__file__).resolve().parent
 TZ = ZoneInfo("Asia/Taipei")
@@ -412,8 +412,36 @@ def _run_key(job:str, slot_dt:datetime, *, force:bool=False)->str:
     return f"{job}|{slot_dt.strftime('%Y-%m-%d %H:%M')}"
 
 
+def _h243_retry_warning(job: str, row: dict[str, Any]) -> bool:
+    # A core source WARNING is not a completed dependency. Other WARNINGs
+    # retry only when the handler explicitly identifies remaining actionable work.
+    return row.get("last_status") == "WARNING" and (
+        job in H155_REQUIRED_REFRESH_JOBS or row.get("retry_pending") is True)
+
+
+def _h243_same_due_warning(row, slot):
+    last=str(row.get("last_slot") or "")
+    return len(last)==16 and len(slot)==16 and last[:10]==slot[:10] and last>=slot
+
+
 def _already_done(status:dict[str,Any],run_key:str)->bool:
+    job, _, slot = run_key.partition("|")
+    row = (status.get("jobs") or {}).get(job) or {}
+    if isinstance(row, dict) and _h243_same_due_warning(row, slot) and _h243_retry_warning(job, row):
+        return False
     return run_key in set(status.get("completed_run_keys",[]) or [])
+
+
+def _h243_due_allowed(status, job, slot, now):
+    # Bound same-slot warning retries, while a new scheduled slot is always due.
+    row = (status.get("jobs") or {}).get(job) or {}
+    if not isinstance(row, dict) or not _h243_retry_warning(job, row):
+        return True
+    if not _h243_same_due_warning(row, slot.strftime("%Y-%m-%d %H:%M")):
+        return True
+    last = _parse_status_datetime(row.get("last_run_at"))
+    return last is None or (now-last).total_seconds() >= 20*60
+
 
 
 def _due_slots(job_cfg:dict[str,Any], now:datetime, grace_minutes:int, *, force:bool=False, catch_up_missed_same_day: bool = True)->list[datetime]:
@@ -532,7 +560,7 @@ def h156_verify_full_batch_predecessors(executed: list[dict[str, Any]], planned:
     return True, ""
 
 
-def _recommendation_final_gate(global_cfg: dict[str, Any], status: dict[str, Any], now: datetime, job: str, *, force: bool = False) -> tuple[bool, str]:
+def _recommendation_final_gate(global_cfg: dict[str, Any], status: dict[str, Any], now: datetime, job: str, *, force: bool = False, recommendation_slot: datetime | None = None) -> tuple[bool, str]:
     """H28: recommendation waits for every enabled predecessor's final daily slot.
 
     Merely sorting the loop is insufficient when recommendation is scheduled at
@@ -566,6 +594,12 @@ def _recommendation_final_gate(global_cfg: dict[str, Any], status: dict[str, Any
         times = _normalize_times(dep_cfg.get("times"))
         if not times:
             continue
+        # Preserve final daily barrier, but an explicitly configured earlier
+        # recommendation slot should only wait for its own preceding slots.
+        rec_times=_normalize_times((jobs_cfg.get("godpick_recommendation") or {}).get("times"))
+        if recommendation_slot is not None and len(rec_times)>1 and recommendation_slot.strftime("%H:%M") < max(rec_times):
+            times=[x for x in times if x<=recommendation_slot.strftime("%H:%M")]
+            if not times:continue
         latest_slot = _slot_datetime(now, max(times))
         label = JOB_LABELS.get(dep, dep)
         if now < latest_slot:
@@ -587,7 +621,7 @@ def _recommendation_final_gate(global_cfg: dict[str, Any], status: dict[str, Any
             last_slot == latest_slot.strftime("%Y-%m-%d %H:%M")
             and str(dep_state.get("last_run_at") or "")[:10] == now.strftime("%Y-%m-%d")
         )
-        if dep not in H155_REQUIRED_REFRESH_JOBS and attempted_this_slot and last_status in {"FAILED", "BLOCKED"}:
+        if dep not in H155_REQUIRED_REFRESH_JOBS and attempted_this_slot and last_status in {"FAILED", "BLOCKED", "WARNING"}:
             advisory.append(f"{label}({last_status})")
             continue
         suffix = f"{last_status} {last_slot}".strip()
@@ -693,7 +727,7 @@ def _repair_failed_completed_keys(status: dict[str, Any]) -> int:
     bad=set()
     jobs=status.get("jobs") if isinstance(status.get("jobs"),dict) else {}
     for job, row in jobs.items():
-        if not isinstance(row,dict) or row.get("last_status") in {"SUCCESS","WARNING"}:
+        if not isinstance(row,dict) or row.get("last_status") == "SUCCESS" or (row.get("last_status") == "WARNING" and not _h243_retry_warning(job,row)):
             continue
         slot=str(row.get("last_slot") or "").strip()
         if slot:
@@ -923,7 +957,7 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
             force=force_all_enabled,
             catch_up_missed_same_day=bool(cfg.get("catch_up_missed_same_day",True)),
         )
-        if any(force_all_enabled or not _already_done(status, _run_key(_job, _slot, force=force_all_enabled)) for _slot in _slots):
+        if any(force_all_enabled or (not _already_done(status, _run_key(_job, _slot, force=force_all_enabled)) and _h243_due_allowed(status,_job,_slot,now)) for _slot in _slots):
             planned_order.append(_job)
     _progress_total=len(planned_order)
     _progress_counts={"success":0,"warning":0,"failed":0,"blocked":0}
@@ -966,7 +1000,7 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
             job_had_slot=False
             for slot in due:
                 key=_run_key(job,slot,force=force_all_enabled)
-                if _already_done(status,key) and not force_all_enabled: continue
+                if not force_all_enabled and (_already_done(status,key) or not _h243_due_allowed(status,job,slot,now)): continue
                 job_had_slot=True
                 _touch_lock(job)
                 try:
@@ -1003,7 +1037,7 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
                 else:
                     deps_ok,deps_msg=_dependency_check(job_cfg,status,now)
                 if deps_ok:
-                    deps_ok,deps_msg=_recommendation_final_gate(cfg,status,now,job,force=force_all_enabled)
+                    deps_ok,deps_msg=_recommendation_final_gate(cfg,status,now,job,force=force_all_enabled,recommendation_slot=slot)
                     if deps_ok and job == "godpick_recommendation":
                         _h158_advisory_warning = "｜".join(
                             x for x in (_h158_advisory_warning, str(deps_msg or "")) if x
@@ -1041,13 +1075,18 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
                 js=status["jobs"].setdefault(job,{})
                 js.update({"label":JOB_LABELS.get(job,job),"last_status":row["status"],"last_run_at":row["finished_at"],"last_message":row["message"],"last_duration_seconds":row.get("duration_seconds"),"last_slot":row["slot"]})
                 completed=list(status.get("completed_run_keys",[]) or [])
+                js["retry_pending"] = bool(row["status"] == "WARNING" and (job in H155_REQUIRED_REFRESH_JOBS or result.get("retry_pending") is True))
                 if row["status"] in {"SUCCESS","WARNING"}:
                     if row["status"]=="SUCCESS":
                         js["last_success_at"]=row["finished_at"]
                     else:
                         js["last_warning_at"]=row["finished_at"]
-                    js["last_completed_at"]=row["finished_at"]
-                    if key not in completed: completed.append(key)
+                    if js["retry_pending"]:
+                        overall=False
+                        completed=[x for x in completed if x != key]
+                    else:
+                        js["last_completed_at"]=row["finished_at"]
+                        if key not in completed: completed.append(key)
                 else:
                     overall=False
                     # Failed/blocked slots remain retryable; warnings are complete
@@ -1083,7 +1122,7 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
                 active=status.get("active_run") if isinstance(status.get("active_run"),dict) else {}
                 pending=active.get("pending_jobs") if isinstance(active.get("pending_jobs"),list) else []
                 _last_job_status = str((status.get("jobs",{}).get(job,{}) or {}).get("last_status") or "")
-                if _last_job_status in {"SUCCESS","WARNING"}:
+                if _last_job_status in {"SUCCESS","WARNING"} and not (status.get("jobs",{}).get(job,{}) or {}).get("retry_pending"):
                     active["pending_jobs"]=[x for x in pending if x != job]
                     if job not in active.get("completed_jobs",[]): active.setdefault("completed_jobs",[]).append(job)
                 else:
@@ -1187,7 +1226,7 @@ def scheduler_wakeup_decision(settings:dict[str,Any]|None=None,status:dict[str,A
                 jc or {}, now, int(cfg.get("grace_minutes",35) or 35),
                 force=False, catch_up_missed_same_day=bool(cfg.get("catch_up_missed_same_day",True)),
             )
-            if any(_run_key(job,slot) not in completed for slot in slots):
+            if any(not _already_done(status,_run_key(job,slot)) and _h243_due_allowed(status,job,slot,now) for slot in slots):
                 due_jobs.append(job)
 
     active=status.get("active_run") if isinstance(status.get("active_run"),dict) else {}
@@ -1255,7 +1294,7 @@ def next_run_rows(settings:dict[str,Any]|None=None,status:dict[str,Any]|None=Non
         overdue_slot=None
         if bool(jc.get("enabled")) and trading_day_today and latest_past is not None:
             key=_run_key(job,latest_past)
-            if key not in completed and (catch_up or now<=latest_past+timedelta(minutes=grace)):
+            if not _already_done(status,key) and _h243_due_allowed(status,job,latest_past,now) and (catch_up or now<=latest_past+timedelta(minutes=grace)):
                 overdue=True; overdue_slot=latest_past
         candidates=[]
         for add in range(0,8):

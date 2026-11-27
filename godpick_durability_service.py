@@ -250,10 +250,8 @@ def persist_json_async(
     """
     global _RUNNING
     safe = _json_safe(payload)
-    if Path(path_name).name == "godpick_records.json" and isinstance(safe, list) and not safe:
-        existing = _read_json(path_name, [], base_dir=base_dir)
-        if isinstance(existing, list) and existing:
-            return False, f"V191-H3防歸零：拒絕以0筆覆蓋既有推薦歷史 {len(existing)} 筆"
+    if Path(path_name).name == "godpick_records.json":
+        return False, "H241/H243推薦歷史必須走GitHub專用CAS提交；禁止通用本機／Firestore保存"
     local_ok, local_msg = _atomic_write(path_name, safe, base_dir=base_dir)
     if not local_ok:
         return False, local_msg
@@ -364,6 +362,9 @@ def retry_failed_durability(*, base_dir: str | Path | None = None) -> list[str]:
             continue
         if item.get("status") not in {"failed", "pending", "running"}:
             continue
+        if Path(path_name).name == "godpick_records.json":
+            messages.append(f"{path_name}: H241專用權威；略過舊版通用佇列")
+            continue
         payload = _read_json(path_name, None, base_dir=base_dir)
         if payload is None:
             messages.append(f"{path_name}: local missing")
@@ -392,7 +393,7 @@ def _probe_remote_state_hashes(rows: list[dict[str, Any]], *, ttl_seconds: float
             continue
         path_name = str(row.get("file") or "")
         payload_hash = str(row.get("payload_hash") or "")
-        if not path_name or not payload_hash:
+        if not path_name or not payload_hash or Path(path_name).name == "godpick_records.json":
             continue
         state_name = _state_file_for(path_name)
         ck = (state_name, payload_hash)
@@ -507,21 +508,15 @@ def audit_core_durability(*, base_dir: str | Path | None = None, write_audit: bo
         # GitHub sync, not the generic one-document durability worker.  Read its
         # verified hashes so the audit does not stay WARNING forever or attempt
         # an unsafe generic migration of a 20MB record file.
-        if path_name == "godpick_records.json" and payload_hash:
+        if path_name == "godpick_records.json":
+            # H241: never certify history via Firestore or a legacy outbox.
+            remote_confirmed=False; remote_hash=""; remote_status="unverified-specialized"
             try:
-                from godpick_persistence_service import (
-                    load_records_github_sync_status, _read_records_firestore_summary
-                )
-                gh_status, _ = load_records_github_sync_status()
-                fs_summary, _ = _read_records_firestore_summary()
-                gh_ok = bool(isinstance(gh_status, dict) and str(gh_status.get("status") or "") == "success" and str(gh_status.get("payload_hash") or "") == payload_hash)
-                fs_ok = bool(isinstance(fs_summary, dict) and str(fs_summary.get("payload_hash") or "") == payload_hash and int(fs_summary.get("count") or -1) == len(payload if isinstance(payload, list) else []))
-                if gh_ok or fs_ok:
-                    remote_confirmed = True
-                    remote_status = "success-specialized"
-                    remote_hash = payload_hash
-                elif str(gh_status.get("status") or "") in {"pending", "running", "retry_pending"}:
-                    remote_status = "pending-specialized"
+                from godpick_persistence_service import records_authority_verification_h240, BASE_DIR as authority_base
+                if base.resolve()==Path(authority_base).resolve() and payload_hash and state_match:
+                    ver=records_authority_verification_h240()
+                    if ver.get("status")=="VERIFIED" and ver.get("count")==len(payload):
+                        remote_confirmed=True; remote_status="success-H241-GitHub"; remote_hash=payload_hash
             except Exception:
                 pass
         if critical and exists:

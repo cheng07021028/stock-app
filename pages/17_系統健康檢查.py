@@ -320,6 +320,24 @@ if callable(load_auto_scheduler_settings):
             with st.expander("🔎 中央遠端最新異常原因（不必橫向捲動尋找最後訊息）", expanded=True):
                 st.caption("此處是 runtime-data 最新持久化的各工作最後狀態；不是目前按鈕派送成功的證明。")
                 st.dataframe(pd.DataFrame(_h159_failures), use_container_width=True, hide_index=True)
+        # Independent control-plane evidence; never advance job success timestamps.
+        @st.cache_data(ttl=120, show_spinner=False)
+        def _h243_wake_probe():
+            try:
+                from godpick_persistence_service import read_github_json
+                v,_=read_github_json("godpick_scheduler_wake_probe.json",{})
+                return v if isinstance(v,dict) and v.get("version")=="V191-H243" else {}
+            except Exception:
+                return {}
+        _h243_probe=_h243_wake_probe()
+        if _h243_probe:
+            with st.expander("H243｜獨立喚醒與環境驗收",expanded=False):
+                st.caption("此憑據只證明Worker啟動／結束，不代表選股成功。")
+                st.json({k:_h243_probe.get(k) for k in ("run_id","attempt","phase","observed_at","stages")})
+                _h243_stages=_h243_probe.get("stages") or {}
+                if _h243_probe.get("phase")=="FINISH" and any(_h243_stages.get(k)!="success" for k in ("checkout","python","deps","restore","due","verify")):
+                    st.warning("H243 Worker前置環境或遠端驗收失敗；請依上方階段查看Actions診斷附件。")
+        st.caption("H243｜必要來源警示後同時段至少20分鐘才補跑；未成熟績效不計勝率；缺推薦日期不以更新時間冒充。")
         _rank_flash = st.session_state.pop("_v191_rank_save_flash", None)
         if isinstance(_rank_flash, dict):
             if bool(_rank_flash.get("ok")):
@@ -366,7 +384,7 @@ if callable(load_auto_scheduler_settings):
             )
         if _h158_super.get("last_status") in {"WARNING", "FAILED"}:
             st.warning("17 SuperAI 最近未完整更新：" + str(_h158_super.get("last_message") or "來源未驗證")
-                       + "。H158 優先使用期交所官方 OpenAPI（PCR／外資臺指期淨未平倉），不捏造缺漏數值。")
+                       + "。H243 OpenAPI滯後時核實期交所官方網頁（日期、表頭、口數及比率）；警示時段限頻補跑。")
         if _h158_perf.get("last_status") == "FAILED":
             st.warning("08 推薦績效最近永久同步未確認：" + str(_h158_perf.get("last_message") or "待查")
                        + "。H158 會要求當次遠端確認；未確認的資料不會被標為成功。")
@@ -408,6 +426,14 @@ if callable(load_auto_scheduler_settings):
             except Exception:
                 _progress_age_min = None
 
+        _h243_probe_age=None
+        if _h243_probe and _now_tw is not None:
+            try:
+                _h243_probe_dt=_dt.fromisoformat(str(_h243_probe.get("observed_at") or ""))
+                if _h243_probe_dt.tzinfo is not None:
+                    _h243_probe_age=max(0.0,(_now_tw-_h243_probe_dt).total_seconds()/60.0)
+            except (ValueError,TypeError):
+                pass
         if _auto_cfg.get("enabled"):
             if isinstance(_active_run, dict) and _active_run.get("pending_jobs"):
                 _current_job_key = str(_active_run.get("current_job") or _active_run.get("last_job") or "")
@@ -438,6 +464,10 @@ if callable(load_auto_scheduler_settings):
                     st.info(f"外部喚醒器正常：最後喚醒約 {_wake_age_min:.0f} 分鐘前，但中央自動排程總開關目前停用。")
                 elif _wake_age_min <= 35:
                     st.success(f"GitHub/中央排程 heartbeat 正常：最後可驗證喚醒約 {_wake_age_min:.0f} 分鐘前。")
+                elif _h243_probe_age is not None and _h243_probe_age<=70 and _h243_probe.get("phase")=="START":
+                    st.info("H243已核實Worker最近喚醒，但尚未取得終態；不將舊heartbeat直接判為Windows喚醒故障。")
+                elif _h243_probe_age is not None and _h243_probe_age<=70 and _h243_probe.get("phase")=="FINISH":
+                    st.warning("H243 Worker已有終態但業務heartbeat尚未更新，請檢查獨立喚醒憑據的restore／due／verify階段，而非重複派送。")
                 else:
                     st.warning(
                         f"目前沒有執行中批次，且中央排程 heartbeat 已約 {_wake_age_min:.0f} 分鐘未更新。"
