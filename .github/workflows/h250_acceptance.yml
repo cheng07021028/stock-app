@@ -1,0 +1,53 @@
+name: H250 installed release and unattended read-only acceptance
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: h250-read-only-acceptance
+  cancel-in-progress: false
+jobs:
+  acceptance:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install production and test dependencies
+        run: python -m pip install -r requirements.txt pytest PyYAML lxml beautifulsoup4 html5lib
+      - name: Actual installed-project mocked integration and safety tests
+        id: tests
+        continue-on-error: true
+        env:
+          GITHUB_ACTIONS: 'false'
+          GITHUB_TOKEN: ''
+          FINMIND_TOKEN: ''
+          PYTHONPATH: .
+        run: |
+          mkdir -p h250_output
+          env -u GITHUB_RUN_ID -u GITHUB_RUN_ATTEMPT GITHUB_ACTIONS=false python -m pytest -q tests/test_h247_source_contract.py tests/test_h248_scheduler_contract.py tests/test_h249_queue.py tests/test_h250_acceptance.py --junitxml=h250_output/junit.xml
+      - name: Fetch runtime-data into separate read-only ref; never checkout or push
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          git -c "http.extraHeader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)" fetch --no-tags --depth=1 origin +refs/heads/runtime-data:refs/remotes/origin/runtime-data
+      - name: H250 independent acceptance (pending evidence remains exit 2)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python tools/h250_acceptance.py --runtime-ref refs/remotes/origin/runtime-data --junit h250_output/junit.xml --deep --out h250_output
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: H250-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: h250_output/
+          if-no-files-found: warn
+          retention-days: 30
