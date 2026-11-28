@@ -7,11 +7,16 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import sys
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 
 
 def verify_manual_dispatch(status: dict, run_id: str, manual_job: str) -> tuple[bool, str]:
     if not manual_job:
         return True, "routine wake: explicit-manual verdict not applicable"
+    if manual_job == "force_enabled_jobs":
+        from godpick_h250r5_manual import verify_receipt
+        return verify_receipt(status,run_id,str(os.environ.get("GITHUB_RUN_ATTEMPT") or ""))
     if str(status.get("last_wakeup_run_id") or "") != str(run_id or "") or not run_id:
         return False, "Scheduler status does not match this GitHub Actions run; old success cannot substitute"
     result = str(status.get("last_wakeup_result") or "")
@@ -47,6 +52,18 @@ def main() -> int:
         print("::error::Cannot read scheduler status for this run: " + type(exc).__name__)
         return 1
     ok, detail = verify_manual_dispatch(status, str(os.environ.get("H159_EXPECTED_RUN_ID") or ""), job)
+    if ok and job == "force_enabled_jobs":
+        # The old verifier may check only the last history key. R5 must read every row of this run.
+        try:
+            import sys
+            sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
+            from godpick_h250r5_manual import verify_receipt
+            from godpick_persistence_service import read_github_json
+            remote,_=read_github_json("godpick_auto_scheduler_status.json",{})
+            hist,_=read_github_json("godpick_auto_scheduler_history.json",{})
+            ok,detail=verify_receipt(remote,str(os.environ.get("H159_EXPECTED_RUN_ID") or ""),str(os.environ.get("GITHUB_RUN_ATTEMPT") or ""),history=hist if isinstance(hist,(dict,list)) else {})
+        except Exception as exc:
+            ok,detail=False,"R5 remote verification unavailable: "+type(exc).__name__
     print(("H159 VERIFIED: " if ok else "::error::H159 MANUAL FAILED: ") + detail)
     return 0 if ok else 1
 

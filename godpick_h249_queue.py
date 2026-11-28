@@ -12,7 +12,7 @@ import requests
 VERSION='V191-H249-DURABLE-QUEUE-1'
 TZ=timezone(timedelta(hours=8))
 ROOT='data/h249'
-MODES=frozenset(('full_refresh_and_recommend','market_refresh_and_recommend','h248_retry_due','stock_master','macro_full','official_factors','super_ai_context','watchlist_runtime','godpick_recommendation','record_latest_price','record_performance','recommend_list_performance','recommend_list_n_day','recommend_list_hits','t1_truth','feedback_learning','durability_retry'))
+MODES=frozenset(('force_enabled_jobs','full_refresh_and_recommend','market_refresh_and_recommend','h248_retry_due','stock_master','macro_full','official_factors','super_ai_context','watchlist_runtime','godpick_recommendation','record_latest_price','record_performance','recommend_list_performance','recommend_list_n_day','recommend_list_hits','t1_truth','feedback_learning','durability_retry'))
 ID_RE=re.compile(r'\d{8}-[0-9a-f]{32}\Z')
 RUN_RE=re.compile(r'\d+\.\d+\Z')
 ACTIVE={'QUEUED','CLAIMED','REVIEW_REQUIRED','EXECUTION_RECORDED'}
@@ -173,7 +173,7 @@ def scope_verified(mode,identity,rows,status):
         from godpick_h248_retry_policy import verify_retry_receipt
         receipt=status.get('last_h248_retry_batch') or {};rid,attempt=identity.split('.')
         return verify_retry_receipt(receipt,rid,attempt)[0] and receipt.get('planned_jobs')==jobs
-    if mode in ('full_refresh_and_recommend','market_refresh_and_recommend'):
+    if mode in ('full_refresh_and_recommend','market_refresh_and_recommend','force_enabled_jobs'):
         receipt=status.get('last_manual_batch') or {}
         return receipt.get('batch_id')==identity and receipt.get('batch_mode')==mode and receipt.get('planned_jobs')==jobs and (receipt.get('validation') or {}).get('all_success') is True
     return jobs==[mode]

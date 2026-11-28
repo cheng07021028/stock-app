@@ -502,7 +502,7 @@ def h155_verify_same_run_dependencies(executed: list[dict[str, Any]]) -> tuple[b
 # H156: manual Page17 refresh has two explicit scopes, independent of the
 # user's unattended schedule and independently editable permanent run order.
 H156_CORE_REFRESH_AND_RECOMMEND = (*H155_REQUIRED_REFRESH_JOBS, "godpick_recommendation")
-H156_MANUAL_BATCH_MODES = ("market_refresh_and_recommend", "full_refresh_and_recommend")
+H156_MANUAL_BATCH_MODES = ("market_refresh_and_recommend", "full_refresh_and_recommend", "force_enabled_jobs")
 
 
 def h156_plan_manual_batch(settings: dict[str, Any], mode: str) -> list[str]:
@@ -514,6 +514,9 @@ def h156_plan_manual_batch(settings: dict[str, Any], mode: str) -> list[str]:
     """
     if mode not in H156_MANUAL_BATCH_MODES:
         raise ValueError(f"不支援的17頁更新模式：{mode}")
+    if mode == "force_enabled_jobs":
+        from godpick_h250r5_manual import plan_enabled
+        return plan_enabled(normalize_settings(settings), JOB_LABELS)
     if mode == "market_refresh_and_recommend":
         return list(H156_CORE_REFRESH_AND_RECOMMEND)
     normalized = normalize_settings(settings)
@@ -876,6 +879,19 @@ def _emit_progress(progress_callback, event: dict[str, Any]) -> None:
 
 def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simulate:bool=False, selected_jobs:list[str]|None=None, progress_callback=None, temporary_enable_jobs:list[str]|None=None, strict_same_run:bool=False, execution_order_override:list[str]|None=None, manual_batch_mode:str="") -> dict[str,Any]:
     now=(now or now_tw()).astimezone(TZ); cfg=load_settings(); status=load_status(); history=load_history()
+    _r5_manual=manual_batch_mode == "force_enabled_jobs"
+    if _r5_manual:
+        from godpick_h250r5_manual import plan_enabled, verify_restored_settings
+        if not force_all_enabled or temporary_enable_jobs or selected_jobs is not None or execution_order_override:
+            raise ValueError("R5 手動全啟用不接受其他工作範圍或臨時啟用覆寫")
+        _r5_raw=_read_local(SETTINGS_FILE,{})
+        if os.environ.get("GITHUB_ACTIONS")=="true":
+            verify_restored_settings(_r5_raw,BASE_DIR)
+        selected_jobs=plan_enabled(cfg,JOB_LABELS,raw=_r5_raw)
+        if not selected_jobs:
+            return {"ok":False,"skipped":True,"executed":[],"message":"R5 沒有已啟用工作；未執行任何項目"}
+        execution_order_override=list(selected_jobs)
+        strict_same_run=True
     # H156: fixed one-run order. Do not persist this override to scheduler JSON.
     if execution_order_override:
         cfg=copy.deepcopy(cfg)
@@ -894,8 +910,11 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
             if _required_job in JOB_LABELS:
                 cfg.setdefault("jobs", {}).setdefault(_required_job, {})["enabled"]=True
     status.setdefault("version",VERSION); status.setdefault("jobs",{}); status.setdefault("completed_run_keys",[])
-    repaired_count=_repair_failed_completed_keys(status)
-    repaired_future_count=_repair_future_completed_keys(status, now)
+    # R5 manual state is isolated from the regular schedule's completion keys and last-slot retry state.
+    _r5_scheduled_jobs=copy.deepcopy(status["jobs"]) if _r5_manual else None
+    _r5_scheduled_keys=list(status["completed_run_keys"]) if _r5_manual else None
+    repaired_count=0 if _r5_manual else _repair_failed_completed_keys(status)
+    repaired_future_count=0 if _r5_manual else _repair_future_completed_keys(status, now)
     status["version"]=VERSION; status["last_wakeup_at"]=now_text(now); status["scheduler_enabled"]=bool(cfg.get("enabled"))
     _wake_source = str(os.environ.get("GODPICK_WAKEUP_SOURCE") or os.environ.get("GODPICK_WAKEUP_EVENT") or ("page17_force" if force_all_enabled else "interactive_due_check")).strip()
     status["last_wakeup_source"] = _wake_source[:80]
@@ -1000,6 +1019,7 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
             job_had_slot=False
             for slot in due:
                 key=_run_key(job,slot,force=force_all_enabled)
+                if _r5_manual: key += "|" + batch_id
                 if not force_all_enabled and (_already_done(status,key) or not _h243_due_allowed(status,job,slot,now)): continue
                 job_had_slot=True
                 _touch_lock(job)
@@ -1026,7 +1046,13 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
                     # A complete H156 manual batch proves its own dependencies;
                     # stale/missing earlier-day status never substitutes for it.
                     deps_ok,deps_msg=h155_verify_same_run_dependencies(executed)
-                    if deps_ok and manual_batch_mode == "full_refresh_and_recommend":
+                    if deps_ok and _r5_manual and job_cfg.get("require_dependencies",False):
+                        _r5_done={r.get("job"):r.get("status") for r in executed}
+                        _r5_missing=[d for d in (job_cfg.get("dependencies") or []) if _r5_done.get(d)!="SUCCESS"]
+                        if _r5_missing:
+                            deps_ok=False
+                            deps_msg="R5 本輪自訂前置尚未成功："+"、".join(JOB_LABELS.get(d,d) for d in _r5_missing)
+                    if deps_ok and manual_batch_mode in ("full_refresh_and_recommend","force_enabled_jobs"):
                         _full_ok, _full_msg = h156_verify_full_batch_predecessors(executed, list(selected_jobs or []))
                         if not _full_ok:
                             # H159: after five verified core sources, optional
@@ -1145,6 +1171,14 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
                 "validation":h156_manual_batch_summary(executed, planned_jobs=list(planned_order)),
                 "remote_confirmation":"PENDING_TERMINAL_CHECKPOINT",
             }
+        if _r5_manual:
+            from godpick_h250r5_manual import validation
+            _r5_batch=status["last_manual_batch"]
+            _r5_batch["validation"]=validation(executed,list(planned_order),H155_REQUIRED_REFRESH_JOBS)
+            overall=bool(_r5_batch["validation"]["all_success"])
+            status["last_force_enabled_batch"]=copy.deepcopy(_r5_batch)
+            status["jobs"]=_r5_scheduled_jobs
+            status["completed_run_keys"]=_r5_scheduled_keys
         status["last_wakeup_result"]="COMPLETED" if overall else "COMPLETED_WITH_FAILURE"
         status["last_wakeup_message"]=(
             f"本輪完成：成功 {summary['success']}／警示 {summary['warning']}／失敗 {summary['failed']}／前置阻擋 {summary['blocked']}"

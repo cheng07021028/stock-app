@@ -720,13 +720,9 @@ if callable(load_auto_scheduler_settings):
         if _b2.button("▶ 執行目前已到期項目", use_container_width=True):
             _h159_dispatch_central(manual_job="", wake_source="page17_h159_due_only")
             st.caption("交易日到期排程由 GitHub worker 執行；若今日為週末，Worker 將依原設定安全略過。")
-        _force_confirm = _b3.checkbox("允許本次強制跑全部已啟用工作", value=False, help="會包含第7頁股神推薦，可能需要數分鐘；只用於部署驗證。Hotfix2 使用獨立 FORCE 執行鍵，不會佔用今天尚未到時的正式排程時段。")
-        if st.button("🧪 強制執行全部已啟用工作（部署驗證）", disabled=not _force_confirm, use_container_width=True):
-            _h159_dispatch_central(
-                manual_job="full_refresh_and_recommend",
-                wake_source="page17_h159_force_all_worker",
-            )
-            st.caption("本鍵保留全部已啟用工作、固定推薦最後；由 GitHub Worker 執行並永久保存，不在 Streamlit UI 跑大型任務。")
+        _b3.caption("手動全啟用工作請使用下方獨立按鈕")
+        from godpick_h250r5_manual import render_button as _r5_render_button
+        _r5_render_button(st,_auto_cfg,AUTO_JOB_LABELS,dispatch_auto_scheduler_wakeup)
         _h159_last_dispatch = st.session_state.get("h159_worker_dispatch")
         if isinstance(_h159_last_dispatch, dict):
             st.caption("最近 Worker 派送：" + str(_h159_last_dispatch.get("time")) + "｜" + (
@@ -842,6 +838,8 @@ if callable(load_auto_scheduler_settings):
             _c3.metric("本輪已完成", len(_completed))
             _c4.metric("需下次補跑", len(_failed))
 
+            from godpick_h250r5_manual import render_status as _r5_render_status
+            _r5_render_status(st,_live_status,AUTO_JOB_LABELS)
             _next_rows = auto_next_run_rows(_live_cfg, _live_status) if callable(auto_next_run_rows) else []
             if _next_rows:
                 st.dataframe(pd.DataFrame(_next_rows), use_container_width=True, hide_index=True, height=480)

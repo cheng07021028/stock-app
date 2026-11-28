@@ -12,6 +12,15 @@ from godpick_auto_scheduler import (
 
 def run_worker_dispatch(manual_job: str):
     manual_job = str(manual_job or "").strip()
+    if manual_job == "force_enabled_jobs":
+        # The scheduler re-reads the restored settings exactly once, inside this invocation.
+        _prior=os.environ.get("GODPICK_PAGE17_FULL_REFRESH")
+        os.environ["GODPICK_PAGE17_FULL_REFRESH"]="1"
+        try:
+            return run_due_jobs(force_all_enabled=True,strict_same_run=True,manual_batch_mode=manual_job)
+        finally:
+            if _prior is None: os.environ.pop("GODPICK_PAGE17_FULL_REFRESH",None)
+            else: os.environ["GODPICK_PAGE17_FULL_REFRESH"]=_prior
     if manual_job in H156_MANUAL_BATCH_MODES:
         plan = h156_plan_manual_batch(load_settings(), manual_job)
         os.environ["GODPICK_PAGE17_FULL_REFRESH"] = "1"

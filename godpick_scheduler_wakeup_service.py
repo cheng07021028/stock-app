@@ -24,8 +24,11 @@ def dispatch_scheduler_wakeup(
     timeout_seconds: int = 12,
     manual_job: str = "",
     http_post: Callable[..., Any] | None = None,
+    receipt: dict | None = None,
 ) -> tuple[bool, str]:
     """Submit one workflow_dispatch without exposing the token in URL/log text."""
+    if receipt is not None:
+        receipt.clear()
     token = str(token or "").strip()
     owner = str(owner or "").strip()
     repo = str(repo or "").strip()
@@ -42,7 +45,7 @@ def dispatch_scheduler_wakeup(
     headers = {
         "Accept": "application/vnd.github+json",
         "Authorization": f"Bearer {token}",
-        "X-GitHub-Api-Version": "2022-11-28",
+        "X-GitHub-Api-Version": "2026-03-10" if receipt is not None else "2022-11-28",
         "User-Agent": "GodPick-V191-H19-Page17",
     }
     try:
@@ -53,13 +56,24 @@ def dispatch_scheduler_wakeup(
             timeout=max(3, min(int(timeout_seconds or 12), 30)),
         )
         code = int(getattr(response, "status_code", 0) or 0)
-        if code == 204:
+        if code in (200, 204):
+            run_id = ""
+            if code == 200:
+                try:
+                    candidate = str(response.json().get("workflow_run_id") or "")
+                    run_id = candidate if candidate.isdigit() else ""
+                except Exception:
+                    pass
+            if receipt is not None:
+                receipt.update({"run_id": run_id, "http_status": code})
+            if run_id:
+                return True, f"已受理 {'手動工作 ' + manual_job if manual_job else '到期工作'}｜Run {run_id}；尚未完成驗收。"
             if manual_job:
                 return True, f"已送出中央 worker 手動工作：{manual_job}；GitHub worker 啟動後，runtime-data 狀態會更新真正執行結果。"
             return True, "已送出 Page17 自動補跑喚醒；GitHub worker 啟動後，即時狀態區會自動更新目前執行項目。"
         return False, f"Page17 自動補跑喚醒未送出：GitHub HTTP {code or 'unknown'}。不會在 Streamlit 內重跑大型工作，避免重複執行。"
     except Exception as exc:
-        return False, f"Page17 自動補跑喚醒失敗：{type(exc).__name__}: {exc}"
+        return False, f"Page17 自動補跑喚醒失敗：{type(exc).__name__}；遠端是否受理未知，請先查 Actions，勿直接重送。"
 
 
 __all__ = ["VERSION", "WORKFLOW_FILE", "dispatch_scheduler_wakeup"]
