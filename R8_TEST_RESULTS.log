@@ -1,0 +1,53 @@
+test_all_three_history_not_current_list (test_h250r7_tracking.Authority.test_all_three_history_not_current_list) ... ok
+test_conflict_no_write (test_h250r7_tracking.Authority.test_conflict_no_write) ... ok
+test_deferred_warning (test_h250r7_tracking.Authority.test_deferred_warning) ... ok
+test_no_maturity_is_success_not_update (test_h250r7_tracking.Authority.test_no_maturity_is_success_not_update) ... ok
+test_only_three_handlers (test_h250r7_tracking.Authority.test_only_three_handlers) ... ok
+test_remote_unconfirmed_is_fail (test_h250r7_tracking.Authority.test_remote_unconfirmed_is_fail) ... ok
+test_unchanged_no_commit (test_h250r7_tracking.Authority.test_unchanged_no_commit) ... ok
+test_unsafe_patch_denied (test_h250r7_tracking.Authority.test_unsafe_patch_denied) ... ok
+test_unverified_authority_no_write (test_h250r7_tracking.Authority.test_unverified_authority_no_write) ... ok
+test_300_row_continuation (test_h250r7_tracking.Tracking.test_300_row_continuation) ... ok
+test_batch_no_first_n_starvation (test_h250r7_tracking.Tracking.test_batch_no_first_n_starvation) ... ok
+test_current_no_reference_from_latest (test_h250r7_tracking.Tracking.test_current_no_reference_from_latest) ... ok
+test_current_real_raw_no_adjusted_overwrite (test_h250r7_tracking.Tracking.test_current_real_raw_no_adjusted_overwrite) ... ok
+test_current_stale_adjusted_pending (test_h250r7_tracking.Tracking.test_current_stale_adjusted_pending) ... ok
+test_duplicate_id_no_patch (test_h250r7_tracking.Tracking.test_duplicate_id_no_patch) ... ok
+test_hits_from_following_session (test_h250r7_tracking.Tracking.test_hits_from_following_session) ... ok
+test_hits_gap_no_false_negative (test_h250r7_tracking.Tracking.test_hits_gap_no_false_negative) ... ok
+test_hits_repeat_no_write (test_h250r7_tracking.Tracking.test_hits_repeat_no_write) ... ok
+test_hits_same_day_not_fill (test_h250r7_tracking.Tracking.test_hits_same_day_not_fill) ... ok
+test_hits_unknown_level (test_h250r7_tracking.Tracking.test_hits_unknown_level) ... ok
+test_invalid_duplicate_bar_rejected (test_h250r7_tracking.Tracking.test_invalid_duplicate_bar_rejected) ... ok
+test_invalid_id_no_patch (test_h250r7_tracking.Tracking.test_invalid_id_no_patch) ... ok
+test_nday_exact_trade_sessions (test_h250r7_tracking.Tracking.test_nday_exact_trade_sessions) ... ok
+test_nday_idempotent (test_h250r7_tracking.Tracking.test_nday_idempotent) ... ok
+test_nday_new_not_due (test_h250r7_tracking.Tracking.test_nday_new_not_due) ... ok
+test_nday_partial (test_h250r7_tracking.Tracking.test_nday_partial) ... ok
+test_unknown_level_not_latest_price (test_h250r7_tracking.Tracking.test_unknown_level_not_latest_price) ... ok
+test_import_failure_only_three_jobs (test_h250r7_tracking.WorkerContract.test_import_failure_only_three_jobs) ... ok
+test_manual_worker_r6_callback (test_h250r7_tracking.WorkerContract.test_manual_worker_r6_callback) ... ok
+test_ordinary_worker_new_handler (test_h250r7_tracking.WorkerContract.test_ordinary_worker_new_handler) ... ok
+test_actual_http_parser (test_h250r8_tracking.AdjustedEvidence.test_actual_http_parser) ... ok
+test_cap_zero_no_fetch (test_h250r8_tracking.AdjustedEvidence.test_cap_zero_no_fetch) ... ok
+test_corroborated_formula_and_separate_fields (test_h250r8_tracking.AdjustedEvidence.test_corroborated_formula_and_separate_fields) ... ok
+test_fetch_failure_keeps_raw_and_warning (test_h250r8_tracking.AdjustedEvidence.test_fetch_failure_keeps_raw_and_warning) ... ok
+test_mismatched_endpoints (test_h250r8_tracking.AdjustedEvidence.test_mismatched_endpoints) ... ok
+test_one_request_per_market_code_and_no_refetch (test_h250r8_tracking.AdjustedEvidence.test_one_request_per_market_code_and_no_refetch) ... ok
+test_real_commit_contract (test_h250r8_tracking.AdjustedEvidence.test_real_commit_contract) ... ok
+test_remote_fail_never_confirmed (test_h250r8_tracking.AdjustedEvidence.test_remote_fail_never_confirmed) ... ok
+test_tampered_proof (test_h250r8_tracking.AdjustedEvidence.test_tampered_proof) ... ok
+test_wrong_symbol (test_h250r8_tracking.AdjustedEvidence.test_wrong_symbol) ... ok
+test_zero_adjustment_rejected (test_h250r8_tracking.AdjustedEvidence.test_zero_adjustment_rejected) ... ok
+test_2385_all_three_full_scan (test_h250r8_tracking.FullBacklog.test_2385_all_three_full_scan) ... ok
+test_calendar_breakdown (test_h250r8_tracking.FullBacklog.test_calendar_breakdown) ... ok
+test_explicit_cap (test_h250r8_tracking.FullBacklog.test_explicit_cap) ... ok
+test_full_idempotence (test_h250r8_tracking.FullBacklog.test_full_idempotence) ... ok
+test_identity_breakdown (test_h250r8_tracking.FullBacklog.test_identity_breakdown) ... ok
+test_legacy_default_migration (test_h250r8_tracking.FullBacklog.test_legacy_default_migration) ... ok
+test_quote_breakdown (test_h250r8_tracking.FullBacklog.test_quote_breakdown) ... ok
+
+----------------------------------------------------------------------
+Ran 48 tests in 1.422s
+
+OK

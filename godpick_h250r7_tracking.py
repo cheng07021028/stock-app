@@ -1,12 +1,15 @@
 # -*- coding: utf-8 -*-
-"""H250-R7: three scheduled Page10 tasks track H241 history, not Page07 current list.
+"""H250-R8 (R7 compatible): full archive backlog, bounded corroborated adjusted evidence.
 Read-only archive evidence; exact-ID, metrics-only CAS. Raw and adjusted returns stay separate.
 """
 from __future__ import annotations
 from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
-import copy, json, re, time
+import copy, json, re, time, os, hashlib
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import timezone
+from godpick_h250r2_nday import MARKETS
 from godpick_h250r2_nday import (TZ, PERIODS, COLS, PROOF, text, number, positive,
     identity, base_price, load_calendar, months, compute, verified_value)
 ROOT=Path(__file__).resolve().parent
@@ -19,6 +22,9 @@ RAW_PROOF='H250R7_原價即時證據'
 NPROOF='H250R7_N日原價證據'
 N_COLS=tuple('官方原價'+c for c in COLS)
 HIT_PROOF='H250R7_觸價證據'
+ADJ_VALUE='還原候選目前報酬%'
+ADJ_PROOF='H250R8_還原候選證據'
+ADJ_VERSION='H250R8_PROVIDER_ADJUSTED_ENDPOINTS_V1'
 _ARCHIVE=None
 
 
@@ -186,9 +192,166 @@ def build_plan(rows,a,kind,limit):
     return patch,dict(stats)
 
 
+
+def archive_limit(cfg,kind):
+    # R7's 300/6 row ceilings belonged to the old per-stock network updater.
+    # Archive calculations are local and H241 already commits a full snapshot.
+    # Explicit archive_max_rows has priority. Preserve non-default lower N-day
+    # user caps, but migrate the historic 300-row default automatically.
+    legacy=cfg.get('max_rows') if kind==TASKS[1] else None
+    default=legacy if legacy is not None and 0<int(legacy)<300 else 5000
+    return max(1,min(int(cfg.get('archive_max_rows',default) or default),5000))
+
+
+def identity_reasons(r,now,ids):
+    from datetime import date
+    out=[];rid=text(r.get('record_id'));code=text(r.get('股票代號'));market=text(r.get('市場別'));raw=text(r.get('推薦日期'))
+    if not rid:out.append('MISSING_RECORD_ID')
+    elif ids[rid]!=1:out.append('DUPLICATE_RECORD_ID')
+    if not re.fullmatch(r'\d{4,6}',code):out.append('INVALID_STOCK_CODE')
+    if market not in MARKETS:out.append('UNKNOWN_MARKET')
+    m=re.fullmatch(r'(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?:[ T].*)?',raw)
+    if not m:out.append('MISSING_OR_INVALID_RECOMMEND_DATE')
+    else:
+        try:
+            d=date(*map(int,m.groups()))
+            if not date(2000,1,1)<=d<=now.date():out.append('OUT_OF_RANGE_RECOMMEND_DATE')
+        except ValueError:out.append('INVALID_RECOMMEND_DATE')
+    return out or ['IDENTITY_CONTRACT_MISMATCH']
+
+
+def gap_reason(a,ident,kind):
+    _,m,c,d=ident
+    if d[:7] not in a.cal.cal:return 'MISSING_RECOMMEND_MONTH:'+d[:7]
+    if d not in a.cal.dayset:return 'RECOMMEND_DATE_NOT_VERIFIED_SESSION'
+    missing=next((x for x in months(d,a.latest) if x not in a.cal.cal),None)
+    if missing:return 'MISSING_INTERVENING_MONTH:'+missing
+    q=a.quotes.get((m,c),{});bars=a.bars.get((m,c),{})
+    if d not in q:return 'MISSING_ANCHOR_QUOTE:'+m+':'+d[:7]
+    if kind==TASKS[0]:ds=[a.latest]
+    elif kind==TASKS[1]:
+        ds=max((a.cal.span(d,n) or [] for n in PERIODS),key=len,default=[])
+    else:ds=[x for x in a.cal.days if d<x<=a.latest]
+    bad=next((x for x in ds if x not in bars),None)
+    if bad:
+        return ('STOCK_QUOTE_MISSING:' if bad in a.markets.get(m,{}) else 'MARKET_PARTITION_MISSING:')+m+':'+bad[:7]
+    return 'OTHER_EVIDENCE_GAP'
+
+
+def _close_match(x,y):
+    x=positive(x);y=positive(y)
+    return x is not None and y is not None and abs(x-y)<=max(.011,y*1e-5)
+
+
+def fetch_adjusted(m,c,start,end,timeout=6):
+    """Market-specific Yahoo adjusted close; no raw-price fallback.
+    Verify explicit symbol, explicit adjusted array and exact Taipei sessions.
+    HTTP failure is a gap, never a performance observation.
+    """
+    import requests
+    if m not in ('TWSE','TPEX') or not re.fullmatch(r'\d{4,6}',c):raise ValueError('BAD_SYMBOL')
+    symbol=c+('.TW' if m=='TWSE' else '.TWO')
+    begin=datetime.fromisoformat(start).replace(tzinfo=TZ)
+    until=datetime.fromisoformat(end).replace(tzinfo=TZ)+timedelta(days=1)
+    response=requests.get('https://query1.finance.yahoo.com/v8/finance/chart/'+symbol,
+        params={'period1':int(begin.timestamp()),'period2':int(until.timestamp()),'interval':'1d','includeAdjustedClose':'true','events':'div,splits'},
+        headers={'User-Agent':'Mozilla/5.0'},timeout=(3,timeout))
+    if response.status_code!=200:raise ValueError('HTTP_'+str(response.status_code))
+    if len(response.content)>4_000_000:raise ValueError('RESPONSE_TOO_LARGE')
+    obj=response.json();chart=obj.get('chart',{});result=chart.get('result') or []
+    if chart.get('error') or len(result)!=1:raise ValueError('CHART_UNAVAILABLE')
+    x=result[0];meta=x.get('meta') or {}
+    if meta.get('symbol')!=symbol or meta.get('currency')!='TWD':raise ValueError('SYMBOL_OR_CURRENCY_MISMATCH')
+    i=x.get('indicators') or {};raw=(i.get('quote') or [{}])[0].get('close');adj=(i.get('adjclose') or [{}])[0].get('adjclose');ts=x.get('timestamp')
+    if not all(isinstance(v,list) for v in (raw,adj,ts)) or not len(raw)==len(adj)==len(ts) or not ts:raise ValueError('EXPLICIT_ADJUSTED_ARRAY_MISSING')
+    bars={};seen=set()
+    for t,v,w in zip(ts,raw,adj):
+        day=datetime.fromtimestamp(t,tz=timezone.utc).astimezone(TZ).date().isoformat()
+        if not start<=day<=end:continue
+        if day in seen:raise ValueError('DUPLICATE_PROVIDER_SESSION')
+        seen.add(day)
+        if positive(v) is not None and positive(w) is not None:bars[day]=(float(v),float(w))
+    return {'symbol':symbol,'bars':bars,'sha256':hashlib.sha256(response.content).hexdigest()}
+
+
+def adjusted_proof_valid(r,a,ident):
+    p=parse(r.get(ADJ_PROOF));_,m,c,d=ident;q=a.quotes.get((m,c),{});base=a.base(r,ident)
+    try:
+        if p.get('version')!=ADJ_VERSION or tuple(p['identity'])!=ident or p['day']!=a.latest or p['base']!=base:return False
+        if p['symbol']!=c+('.TW' if m=='TWSE' else '.TWO') or p['basis']!='PROVIDER_ADJUSTED_CANDIDATE_NOT_EXECUTED_OR_OFFICIAL_TOTAL_RETURN':return False
+        if not re.fullmatch(r'[0-9a-f]{64}',p['source_sha256']):return False
+        if not _close_match(p['raw_start'],q.get(d)) or not _close_match(p['raw_end'],q.get(a.latest)):return False
+        if not all(positive(p[k]) is not None for k in ('adj_start','adj_end','raw_start','base')):return False
+        val=round((p['adj_end']/(base*p['adj_start']/p['raw_start'])-1)*100,2)
+        return val==p['value']==number(r.get(ADJ_VALUE))
+    except (KeyError,TypeError,ValueError,ZeroDivisionError,OverflowError):return False
+
+
+def adjusted_delta(r,a,ident,provider):
+    _,m,c,d=ident;q=a.quotes.get((m,c),{});base=a.base(r,ident)
+    try:
+        if provider['symbol']!=c+('.TW' if m=='TWSE' else '.TWO') or not re.fullmatch(r'[0-9a-f]{64}',provider['sha256']):return {},'PROVIDER_IDENTITY_MISMATCH'
+        x,y=provider['bars'][d],provider['bars'][a.latest]
+        if not _close_match(x[0],q.get(d)) or not _close_match(y[0],q.get(a.latest)):return {},'OFFICIAL_RAW_MISMATCH'
+        if not all(positive(v) is not None for v in (*x,*y,base)):return {},'INVALID_ADJUSTMENT'
+        value=round((y[1]/(base*x[1]/x[0])-1)*100,2)
+        proof=compact({'version':ADJ_VERSION,'identity':ident,'day':a.latest,'base':base,'symbol':provider['symbol'],'source_sha256':provider['sha256'],'raw_start':x[0],'adj_start':x[1],'raw_end':y[0],'adj_end':y[1],'value':value,'basis':'PROVIDER_ADJUSTED_CANDIDATE_NOT_EXECUTED_OR_OFFICIAL_TOTAL_RETURN'})
+        return {ADJ_VALUE:value,ADJ_PROOF:proof},'ADJUSTED_CORROBORATED'
+    except (KeyError,TypeError,ValueError,ZeroDivisionError,OverflowError):return {},'PROVIDER_ENDPOINT_MISSING'
+
+
+def build_extended_plan(rows,a,kind,limit,cfg,fetch=None):
+    """All-row local scan; optional bounded adjusted-source repair.
+    One atomic save per task; no success from missing/corrupt provider data.
+    """
+    fetch=fetch or fetch_adjusted
+    stats=Counter();gaps=Counter();changes={};ids=Counter(text(r.get('record_id')) for r in rows);groups={};pending=[]
+    funcs={TASKS[0]:current_delta,TASKS[1]:nday_delta,TASKS[2]:hits_delta}
+    for r in rows:
+        rid=text(r.get('record_id'));ident=identity(r,a.cal.now)
+        if not ident or ids[rid]!=1:
+            stats['IDENTITY_PENDING']+=1;gaps.update(identity_reasons(r,a.cal.now,ids));continue
+        delta,state,extra=funcs[kind](r,a,ident);stats[state]+=1
+        if state in ('CALENDAR_GAP','QUOTE_PENDING'):gaps[gap_reason(a,ident,kind)]+=1
+        if delta:changes[rid]=delta
+        if kind==TASKS[0] and state=='READY':
+            if adjusted_proof_valid(r,a,ident):stats['ADJUSTED_CORROBORATED']+=1
+            elif extra:stats['PAGE08_CURRENT_REUSED']+=1
+            else:
+                pending.append((r,ident));groups.setdefault((ident[1],ident[2]),[]).append((r,ident))
+    if kind==TASKS[0] and pending:
+        # Bounded network repair; use run-specific rotating start, not a fixed
+        # first-N list, so failed symbols do not permanently starve the rest.
+        cap=max(0,min(int(cfg.get('adjusted_max_symbols',64)),128));keys=sorted(groups)
+        seed=str(os.environ.get('GITHUB_RUN_ID') or a.cal.now.isoformat(timespec='minutes'))
+        offset=int(hashlib.sha256(seed.encode()).hexdigest()[:12],16)%len(keys)
+        chosen=(keys[offset:]+keys[:offset])[:cap];results={}
+        if chosen:
+            with ThreadPoolExecutor(max_workers=min(8,len(chosen))) as ex:
+                futures={ex.submit(fetch,m,c,min(i[3] for _,i in groups[m,c]),a.latest):(m,c) for m,c in chosen}
+                for f in as_completed(futures):
+                    k=futures[f]
+                    try:results[k]=f.result()
+                    except Exception as exc:
+                        results[k]=None
+                        reason=str(exc) if isinstance(exc,ValueError) and re.fullmatch(r'[A-Z0-9_]{1,70}',str(exc)) else type(exc).__name__
+                        gaps['ADJUSTED_FETCH_'+reason]+=1
+        stats['ADJUSTED_SYMBOLS_ATTEMPTED']=len(chosen)
+        for r,ident in pending:
+            rid,m,c,_=ident;key=(m,c)
+            if key not in results:stats['ADJUSTED_PROVIDER_DEFERRED']+=1;stats['ADJUSTED_PENDING']+=1;continue
+            if results[key] is None:stats['ADJUSTED_PENDING']+=1;continue
+            delta,state=adjusted_delta(r,a,ident,results[key]);stats[state]+=1
+            if delta:changes.setdefault(rid,{}).update(delta)
+            else:stats['ADJUSTED_PENDING']+=1
+    patches=dict(list(changes.items())[:limit]);stats['DEFERRED']=len(changes)-len(patches)
+    # Provider success is calculation only until H241 confirms the patch.
+    return patches,dict(stats),dict(gaps)
+
+
 def exact_commit(rows,patch,sig,h,p):
     if not patch:return None
-    allowed={RAW_NOW,RAW_DATE,RAW_PRICE,RAW_PROOF,NPROOF,*N_COLS,HIT_PROOF,'作戰追蹤狀態','作戰追蹤資料源','作戰命中摘要','作戰追蹤更新時間'}
+    allowed={RAW_NOW,RAW_DATE,RAW_PRICE,RAW_PROOF,NPROOF,*N_COLS,HIT_PROOF,ADJ_VALUE,ADJ_PROOF,'作戰追蹤狀態','作戰追蹤資料源','作戰命中摘要','作戰追蹤更新時間'}
     for name in ('進場點命中','突破價命中','停損價觸發','第一壓力命中'):
         allowed.update((name,name+'日期'))
     for lab in ('隔日','3日','5日','10日'):
@@ -201,7 +364,7 @@ def exact_commit(rows,patch,sig,h,p):
         by={text(r.get('record_id')):r for r in base}
         if len(by)!=len(base) or not set(patch)<=set(by):raise ValueError('H241_ID_CHANGED')
         final=[dict(r,**patch[text(r.get('record_id'))]) if text(r.get('record_id')) in patch else r for r in base]
-        return h._commit(base,head,sha,final,set(),'H250R7 history-only verified performance metrics')
+        return h._commit(base,head,sha,final,set(),'H250R8 history-only verified performance metrics')
 
 
 def task(kind,cfg=None,*,root=ROOT):
@@ -213,30 +376,28 @@ def task(kind,cfg=None,*,root=ROOT):
         import godpick_persistence_service as p
         rows,msgs,_=h.ensure()
         if p.records_authority_verification_h240().get('status')!='VERIFIED' or not isinstance(rows,list) or not rows:
-            return _report(False,'R7 '+title+'：08歷史權威未核實或無歷史；禁止回寫',details={'outcome':'AUTHORITY_PENDING'},started=t)
+            return _report(False,'R8 '+title+'：08歷史權威未核實或無歷史；禁止回寫',details={'outcome':'AUTHORITY_PENDING'},started=t)
         rows=copy.deepcopy(rows);sig=p.records_authority_signature()
         a=load_archive(root)
-        configured=cfg.get('max_rows',300) if kind==TASKS[1] else cfg.get('max_records',300)
-        # H190 local calculation avoids per-stock HTTP. Keep bounded write size;
-        # hit max_rows=6 was the old network ceiling, not a new archive ceiling.
-        if kind==TASKS[2]:configured=cfg.get('archive_max_rows',300)
-        limit=max(1,min(int(configured or 300),300))
-        patches,stats=build_plan(rows,a,kind,limit)
+        limit=archive_limit(cfg,kind)
+        patches,stats,gaps=build_extended_plan(rows,a,kind,limit,cfg)
         pending=sum(stats.get(k,0) for k in ('IDENTITY_PENDING','CALENDAR_GAP','QUOTE_PENDING','BASE_PENDING','PLAN_PENDING','ADJUSTED_PENDING','DEFERRED'))
         report=exact_commit(rows,patches,sig,h,p)
         ok=not patches or bool(report and report.local_ok and report.github_ok and report.permanent_ok)
         confirmed=len(patches) if ok else 0
+        if kind==TASKS[0]:stats['ADJUSTED_NEW_CONFIRMED']=sum(ADJ_PROOF in d for d in patches.values()) if ok else 0
         outcome=('PARTIAL_SAVED' if pending else 'VERIFIED_SAVED') if ok and patches else 'NO_NEW_DUE' if ok and not pending else 'EVIDENCE_PENDING' if ok else 'REMOTE_PENDING'
-        details={'outcome':outcome,'authority_count':len(rows),'latest_official_day':a.latest,'confirmed':confirmed,'diagnostics':stats,'sync_messages':report.messages() if report else []}
-        msg=f'R7 {title}｜08權威 {len(rows)} 筆／官方至 {a.latest}／永久確認 {confirmed} 筆／'+('、'.join(f'{k} {v}' for k,v in stats.items()) or '無新資料')
+        details={'outcome':outcome,'authority_count':len(rows),'latest_official_day':a.latest,'confirmed':confirmed,'diagnostics':stats,'gap_breakdown':gaps,'archive_limit':limit,'sync_messages':report.messages() if report else []}
+        msg=f'R8 {title}｜08權威 {len(rows)} 筆／官方至 {a.latest}／永久確認 {confirmed} 筆／'+('、'.join(f'{k} {v}' for k,v in stats.items()) or '無新資料')
         if not ok:msg+='｜遠端未確認，不計成功'
         elif not patches and not pending:msg+='｜無新到期工作，正常略過'
-        elif pending:msg+='｜尚有證據缺口或待續，不冒充全數完成'
+        elif pending:msg+='｜剩餘可寫 '+str(stats.get('DEFERRED',0))+' 筆；證據缺口仍保留，不冒充全數完成'
+        if gaps:msg+='｜缺口明細：'+ '、'.join(f'{k} {v}' for k,v in sorted(gaps.items(),key=lambda kv:(-kv[1],kv[0]))[:4])
         result=_report(ok,msg,details=details,changed_files=['godpick_records.json'] if confirmed else [],started=t,warning=bool(ok and pending))
         result['retry_pending']=bool(ok and stats.get('DEFERRED',0))
         return result
     except Exception as exc:
-        return _report(False,'R7 '+title+'：'+type(exc).__name__+'｜'+str(exc)[:220]+'；未確認不算成功',started=t)
+        return _report(False,'R8 '+title+'：'+type(exc).__name__+'｜'+str(exc)[:220]+'；未確認不算成功',started=t)
 
 
 def install_handlers(module):
