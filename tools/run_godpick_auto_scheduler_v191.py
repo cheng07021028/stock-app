@@ -12,6 +12,19 @@ from godpick_auto_scheduler import (
 
 def run_worker_dispatch(manual_job: str):
     manual_job = str(manual_job or "").strip()
+    # H250-R7: use the same verified historical tracking handlers for every central wake.
+    import godpick_auto_update_tasks as _tasks
+    try:
+        from godpick_h250r7_tracking import install_handlers
+        install_handlers(_tasks)
+    except Exception as exc:
+        # A missing/incompatible R7 dependency must not send these three jobs
+        # back to the unsafe empty-current-list path, or disable other jobs.
+        reason = type(exc).__name__
+        def _r7_unavailable(cfg=None):
+            return _tasks._report(False, "R7 歷史追蹤處理器不可用：" + reason + "；禁止回退空清單更新")
+        for key in ("recommend_list_performance", "recommend_list_n_day", "recommend_list_hits"):
+            _tasks.TASK_HANDLERS[key] = _r7_unavailable
     if manual_job == "force_enabled_jobs":
         # The scheduler re-reads the restored settings exactly once, inside this invocation.
         _prior=os.environ.get("GODPICK_PAGE17_FULL_REFRESH")
