@@ -1,0 +1,28 @@
+test_admin_only_page_ui_and_no_snapshot_mutation (test_h162_github_auth_diagnostic.DiagnosticTests.test_admin_only_page_ui_and_no_snapshot_mutation) ... ok
+test_code_branch_is_not_probe_target (test_h162_github_auth_diagnostic.DiagnosticTests.test_code_branch_is_not_probe_target) ... ok
+test_environment_fallback_for_workers (test_h162_github_auth_diagnostic.DiagnosticTests.test_environment_fallback_for_workers) ... ok
+test_failed_cleanup_is_never_success_and_exposes_only_probe_path (test_h162_github_auth_diagnostic.DiagnosticTests.test_failed_cleanup_is_never_success_and_exposes_only_probe_path) ... ok
+test_h161_secret_precedence_is_executable_and_keeps_branch_guard (test_h162_github_auth_diagnostic.DiagnosticTests.test_h161_secret_precedence_is_executable_and_keeps_branch_guard) ... ok
+test_http_403_write_is_not_success (test_h162_github_auth_diagnostic.DiagnosticTests.test_http_403_write_is_not_success) ... ok
+test_missing_token_cannot_pass (test_h162_github_auth_diagnostic.DiagnosticTests.test_missing_token_cannot_pass) ... ok
+test_no_token_or_fingerprint_in_public_config (test_h162_github_auth_diagnostic.DiagnosticTests.test_no_token_or_fingerprint_in_public_config) ... ok
+test_read_denied_stops_write (test_h162_github_auth_diagnostic.DiagnosticTests.test_read_denied_stops_write) ... ok
+test_read_only_no_put_or_delete (test_h162_github_auth_diagnostic.DiagnosticTests.test_read_only_no_put_or_delete) ... ok
+test_secrets_priority_and_conflict_detected (test_h162_github_auth_diagnostic.DiagnosticTests.test_secrets_priority_and_conflict_detected) ... ok
+test_write_verify_delete_roundtrip (test_h162_github_auth_diagnostic.DiagnosticTests.test_write_verify_delete_roundtrip) ... ok
+test_401 (test_h250r11_diag.TestDenial.test_401) ... ok
+test_429 (test_h250r11_diag.TestDenial.test_429) ... ok
+test_no_leak (test_h250r11_diag.TestDenial.test_no_leak) ... ok
+test_permission (test_h250r11_diag.TestDenial.test_permission) ... ok
+test_primary (test_h250r11_diag.TestDenial.test_primary) ... ok
+test_remaining_positive_not_permission (test_h250r11_diag.TestDenial.test_remaining_positive_not_permission) ... ok
+test_reset_out_of_range (test_h250r11_diag.TestDenial.test_reset_out_of_range) ... ok
+test_rules (test_h250r11_diag.TestDenial.test_rules) ... ok
+test_secondary (test_h250r11_diag.TestDenial.test_secondary) ... ok
+test_sso (test_h250r11_diag.TestDenial.test_sso) ... ok
+test_unknown (test_h250r11_diag.TestDenial.test_unknown) ... ok
+
+----------------------------------------------------------------------
+Ran 23 tests in 0.033s
+
+OK

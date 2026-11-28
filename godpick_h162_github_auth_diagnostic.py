@@ -18,7 +18,7 @@ from urllib.parse import quote
 
 import requests
 
-VERSION = "V191-H162-GITHUB-AUTH-DIAGNOSTIC"
+VERSION = "V191-H250-R11-DIAG"
 _PROBE_PREFIX = "data/.h162_auth_probe_"
 _TIMEOUT = (3, 12)
 
@@ -102,6 +102,66 @@ def _base(config: Mapping) -> str:
     return "https://api.github.com/repos/" + quote(str(config["owner"]), safe="") + "/" + quote(str(config["repo"]), safe="")
 
 
+def _denial_detail(response: Any) -> str:
+    """Only fixed classifications and numeric allowlisted headers leave this function.
+    Never render a response body, arbitrary header, or credential. No automatic retry.
+    """
+    from datetime import datetime, timezone, timedelta
+    code = int(getattr(response, "status_code", 0))
+    try:
+        obj = response.json()
+        msg = str(obj.get("message", "")).lower() if isinstance(obj, dict) else ""
+    except Exception:
+        msg = ""
+    try:
+        h = {str(k).lower(): str(v) for k, v in response.headers.items()}
+    except Exception:
+        h = {}
+    def number(name):
+        v = h.get(name, "")
+        return int(v) if re.fullmatch(r"[0-9]{1,12}", v) else None
+    remain = number("x-ratelimit-remaining")
+    reset = number("x-ratelimit-reset")
+    retry = number("retry-after")
+    if code == 401:
+        reason = "AUTH_INVALID：認證未通過，核對生效 Token"
+    elif code in (403, 429) and remain == 0:
+        reason = "PRIMARY_RATE_LIMIT：主要 API 配額耗盡"
+    elif code in (403, 429) and ("secondary rate limit" in msg or "abuse detection" in msg):
+        reason = "SECONDARY_RATE_LIMIT：短時間請求／寫入限制"
+    elif code in (403, 429) and (retry is not None or code == 429 or "rate limit" in msg):
+        reason = "RATE_LIMIT：服務要求暫停請求"
+    elif code == 403 and ("resource not accessible" in msg or "insufficient permission" in msg or "permission denied" in msg or "must have push access" in msg):
+        reason = "PERMISSION_DENIED：生效憑證未獲此操作權限"
+    elif code in (403, 409, 422) and any(x in msg for x in ("repository rule", "protected branch", "branch protection", "rule violation", "gh013")):
+        reason = "REPOSITORY_RULE：儲存庫規則或分支限制"
+    elif code == 403 and ("saml" in msg or "sso" in msg):
+        reason = "SSO_REQUIRED：需核對組織授權"
+    elif code == 403:
+        reason = "FORBIDDEN_UNCLASSIFIED：拒絕原因未明，不可直接判定權限不足"
+    elif code == 404:
+        reason = "NOT_FOUND：路徑不可見或不存在"
+    elif code == 409:
+        reason = "CONFLICT：版本衝突"
+    elif code == 422:
+        reason = "VALIDATION_FAILED：請求驗證未通過"
+    else:
+        reason = "HTTP_ERROR：遠端操作未通過"
+    parts = [reason]
+    if remain is not None:
+        parts.append(f"API剩餘 {remain}")
+    if retry is not None:
+        parts.append(f"Retry-After {retry} 秒")
+    if reset is not None:
+        try:
+            parts.append("配額重置（台灣時間）" + datetime.fromtimestamp(reset, timezone.utc).astimezone(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S"))
+        except (ValueError, OSError, OverflowError):
+            pass
+    if reason.startswith(("PRIMARY_RATE_LIMIT", "SECONDARY_RATE_LIMIT", "RATE_LIMIT")):
+        parts.append("暫停重試，依限流時間恢復；未提供時間時至少等待1分鐘")
+    return "｜".join(parts)
+
+
 def _result_item(label: str, status: int | str, detail: str) -> dict[str, str]:
     return {"檢查": label, "HTTP": str(status), "結果": detail}
 
@@ -126,8 +186,8 @@ def run_readonly_probe(*, secrets: Mapping | None = None, environ: Mapping | Non
             code = int(getattr(response, "status_code", 0))
             if code == 200:
                 text = "可讀取"
-            elif code in (401, 403):
-                text = "認證或儲存庫授權遭拒；請核對 Streamlit 生效憑證與 Fine-grained Token"
+            elif code in (401, 403, 429):
+                text = _denial_detail(response)
             elif code == 404:
                 text = "儲存庫／分支不存在或目前憑證不可見"
             else:
@@ -184,7 +244,7 @@ def run_write_probe(*, secrets: Mapping | None = None, environ: Mapping | None =
             created = put_code in (200, 201)
             steps.append(_result_item("小型測試檔建立", put_code,
                                      "已接受，將回讀驗證並清除" if created else
-                                     "Contents 寫入失敗，未變更推薦紀錄"))
+                                     "Contents 寫入失敗，未變更推薦紀錄｜" + _denial_detail(put)))
         except Exception as exc:
             steps.append(_result_item("小型測試檔建立", "ERR", "連線例外：" + type(exc).__name__))
         if created:
@@ -200,7 +260,7 @@ def run_write_probe(*, secrets: Mapping | None = None, environ: Mapping | None =
                     except Exception:
                         verified = False
                 steps.append(_result_item("測試檔遠端回讀", status,
-                                          "內容完全一致" if verified else "內容或 SHA 未驗證，不可宣稱寫入成功"))
+                                          "內容完全一致" if verified else ("內容或 SHA 未驗證，不可宣稱寫入成功" + ("｜" + _denial_detail(check) if status != 200 else ""))))
             except Exception as exc:
                 steps.append(_result_item("測試檔遠端回讀", "ERR", "連線例外：" + type(exc).__name__))
     finally:
@@ -227,7 +287,7 @@ def run_write_probe(*, secrets: Mapping | None = None, environ: Mapping | None =
                         check = transport.get(url, headers=headers, params={"ref": "runtime-data"}, timeout=_TIMEOUT)
                         removed = int(getattr(check, "status_code", 0)) == 404
                     steps.append(_result_item("測試檔清除回讀", "200" if removed else "FAILED",
-                                              "已確認不存在" if removed else "未確認清除，需人工檢查專用探針路徑"))
+                                              "已確認不存在" if removed else ("未確認清除，需人工檢查專用探針路徑" + ("｜" + _denial_detail(delete) if int(getattr(delete, "status_code", 0)) not in (200, 204) else ""))))
                 except Exception as exc:
                     cleanup_error = type(exc).__name__
                     steps.append(_result_item("測試檔清除回讀", "ERR", "清除例外：" + cleanup_error))
