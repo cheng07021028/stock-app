@@ -1,0 +1,327 @@
+{
+  "godpick_auto_scheduler.py": {
+    "blob": "4e1e77b4dfe45c94b6aa6b845a511b45db1dbb81",
+    "steps": [
+      [
+        248,
+        [
+          [
+            "def _h243_due_allowed(status, job, slot, now):\n    # Bound same-slot warning retries, while a new scheduled slot is always due.\n    row = (status.get(\"jobs\") or {}).get(job) or {}\n    if not isinstance(row, dict) or not _h243_retry_warning(job, row):\n        return True\n    if not _h243_same_due_warning(row, slot.strftime(\"%Y-%m-%d %H:%M\")):\n        return True\n    last = _parse_status_datetime(row.get(\"last_run_at\"))\n    return last is None or (now-last).total_seconds() >= 20*60",
+            "def _h248_plan(status, job, slot, now, cfg=None):\n    from godpick_h248_retry_policy import decision, slot_record\n    row = (status.get(\"jobs\") or {}).get(job) or {}\n    prior = slot_record(row, slot)\n    ready = False\n    if prior and prior.get(\"code\")==\"WAIT_DEPENDENCY\" and cfg is not None:\n        jc = (cfg.get(\"jobs\") or {}).get(job) or {}\n        # Re-evaluate blocked dependencies against the same authoritative state.\n        # The original execution gates still run immediately before each job.\n        ready, _ = _dependency_check(jc, status, now)\n        if ready:\n            ready, _ = _recommendation_final_gate(cfg, status, now, job, recommendation_slot=slot)\n    return decision(job, row, slot, now, dependency_ready=ready)\n\n\ndef _h243_due_allowed(status, job, slot, now, cfg=None):\n    # Shared by actual Worker, Page17 wakeup preview and next-run table.\n    return _h248_plan(status, job, slot, now, cfg)[\"allow\"]\n\n\ndef _h248_retry_candidates(cfg, status, now):\n    if not cfg.get(\"enabled\") or (cfg.get(\"weekdays_only\", True) and now.weekday() >= 5):\n        return []\n    out=[]\n    for job in _ordered_job_keys(cfg):\n        jc=(cfg.get(\"jobs\") or {}).get(job) or {}\n        if not jc.get(\"enabled\"): continue\n        for slot in _due_slots(jc, now, int(cfg.get(\"grace_minutes\",35)), catch_up_missed_same_day=bool(cfg.get(\"catch_up_missed_same_day\",True))):\n            if not _already_done(status,_run_key(job,slot)) and _h248_plan(status,job,slot,now,cfg)[\"retry\"]:\n                out.append(job)\n                break\n    return out"
+          ],
+          [
+            "    attempts=max(1,retry_count+1); delay=int(global_cfg.get(\"retry_delay_seconds\",20) or 20)",
+            "    # H248: scheduled retries are spaced across wakes, not repeated expensive\n    # calls inside a single wake. Keep manual retry settings as an upper bound.\n    from godpick_h248_retry_policy import immediate_retry_allowed\n    attempts=1 if global_cfg.get(\"_h248_single_attempt\") else max(1,retry_count+1)\n    delay=int(global_cfg.get(\"retry_delay_seconds\",20) or 20)"
+          ],
+          [
+            "        if last.get(\"ok\"): break\n        if n<attempts:",
+            "        if last.get(\"ok\") or not immediate_retry_allowed(job,last): break\n        if n<attempts:"
+          ],
+          [
+            "manual_batch_mode:str=\"\") -> dict[str,Any]:\n    now=(now or now_tw()).astimezone(TZ); cfg=load_settings(); status=load_status(); history=load_history()",
+            "manual_batch_mode:str=\"\", retry_only:bool=False) -> dict[str,Any]:\n    from godpick_h248_retry_policy import record_result\n    if retry_only and (force_all_enabled or temporary_enable_jobs or strict_same_run or manual_batch_mode or selected_jobs is not None or execution_order_override):\n        raise ValueError(\"H248 selective retry cannot combine with force or override\")\n    now=(now or now_tw()).astimezone(TZ); cfg=load_settings(); status=load_status(); history=load_history()"
+          ],
+          [
+            "    enabled_order=[job for job in _ordered_job_keys(cfg) if bool(((cfg.get(\"jobs\") or {}).get(job) or {}).get(\"enabled\",False)) and (not selected_jobs or job in selected_jobs)]",
+            "    # H248: decide only after the existing lock. An empty selective plan must\n    # never fall through to the original 'all enabled' behavior.\n    if retry_only:\n        selected_jobs=_h248_retry_candidates(cfg,status,now)\n    enabled_order=[job for job in _ordered_job_keys(cfg) if bool(((cfg.get(\"jobs\") or {}).get(job) or {}).get(\"enabled\",False)) and (not (selected_jobs or retry_only) or job in (selected_jobs or []))]"
+          ],
+          [
+            "_h243_due_allowed(status,_job,_slot,now)) for _slot in _slots)",
+            "_h243_due_allowed(status,_job,_slot,now,cfg)) for _slot in _slots)"
+          ],
+          [
+            "            if selected_jobs and job not in selected_jobs: continue\n            if not bool(job_cfg.get(\"enabled\",False)): continue",
+            "            if (selected_jobs or retry_only) and job not in (selected_jobs or []): continue\n            if not bool(job_cfg.get(\"enabled\",False)): continue"
+          ],
+          [
+            "_h243_due_allowed(status,job,slot,now)): continue",
+            "_h243_due_allowed(status,job,slot,now,cfg)): continue"
+          ],
+          [
+            "                    result=_execute_one(job,job_cfg,cfg)",
+            "                    result=_execute_one(job,job_cfg,{**cfg,\"_h248_single_attempt\":not force_all_enabled})"
+          ],
+          [
+            "                executed.append(row); history.append({k:v for k,v in row.items() if k != \"details\"})\n                js=status[\"jobs\"].setdefault(job,{})",
+            "                js=status[\"jobs\"].setdefault(job,{})\n                record_result(job,js,result,row,slot,force=force_all_enabled,simulate=simulate)\n                if not simulate:\n                    row[\"h248_diagnostic\"]=dict(js.get(\"h248_diagnostic\") or {})\n                executed.append(row); history.append({k:v for k,v in row.items() if k != \"details\"})"
+          ],
+          [
+            "        status[\"last_wakeup_result\"]=\"COMPLETED\" if overall else \"COMPLETED_WITH_FAILURE\"",
+            "        if retry_only:\n            from godpick_h248_retry_policy import retry_receipt\n            status[\"last_h248_retry_batch\"]=retry_receipt(batch_id,planned_order,executed,summary,now_text())\n            overall=bool(status[\"last_h248_retry_batch\"][\"all_success\"])\n        status[\"last_wakeup_result\"]=\"COMPLETED\" if overall else \"COMPLETED_WITH_FAILURE\""
+          ],
+          [
+            "        if not simulate:\n            active=status.get(\"active_run\") if isinstance(status.get(\"active_run\"),dict) else {}\n            remaining=",
+            "        if retry_only and not executed:\n            status[\"last_wakeup_message\"]=\"H248：本輪沒有符合安全條件的到期補跑；未執行任何工作。\"\n        if not simulate:\n            active=status.get(\"active_run\") if isinstance(status.get(\"active_run\"),dict) else {}\n            remaining="
+          ],
+          [
+            "_h243_due_allowed(status,job,slot,now) for slot in slots)",
+            "_h243_due_allowed(status,job,slot,now,cfg) for slot in slots)"
+          ],
+          [
+            "_h243_due_allowed(status,job,latest_past,now) and (catch_up",
+            "_h243_due_allowed(status,job,latest_past,now,cfg) and (catch_up"
+          ],
+          [
+            "        rows.append({\n            \"設定順位\": configured_order.index(job)+1,",
+            "        from godpick_h248_retry_policy import display\n        _h248_due=bool(cfg.get(\"enabled\") and jc.get(\"enabled\") and trading_day_today and latest_past and not _already_done(status,_run_key(job,latest_past)) and (catch_up or now<=latest_past+timedelta(minutes=grace)))\n        _h248_plan_row=_h248_plan(status,job,latest_past,now,cfg) if latest_past else {}\n        _h248_cols=display(job,js,latest_past,now,dependency_ready=_h248_plan_row.get(\"reason\")==\"DEPENDENCY_READY\",due=_h248_due)\n        if _h248_due and not _h248_plan_row.get(\"allow\") and not (live_active and job in active_planned):\n            due_state=\"H248｜\"+_h248_cols[\"H248補跑資格\"]\n        rows.append({\n            \"設定順位\": configured_order.index(job)+1,"
+          ],
+          [
+            "\"最後狀態\":js.get(\"last_status\",\"尚未執行\"),\"最後成功\":js.get(\"last_success_at\",\"\"),\"最後訊息\":js.get(\"last_message\",\"\")",
+            "\"最後狀態\":js.get(\"last_status\",\"尚未執行\"),\"最後成功\":js.get(\"last_success_at\",\"\"),\"最後訊息\":js.get(\"last_message\",\"\"),**_h248_cols"
+          ]
+        ]
+      ],
+      [
+        249,
+        [
+          [
+            "                    result=_execute_one(job,job_cfg,{**cfg,\"_h248_single_attempt\":not force_all_enabled})",
+            "                    from godpick_h249_queue import guarded_execute\n                    result=guarded_execute(job,slot,force_all_enabled,batch_id,status,\n                        lambda: _execute_one(job,job_cfg,{**cfg,\"_h248_single_attempt\":not force_all_enabled}))"
+          ]
+        ]
+      ],
+      [
+        251,
+        [
+          [
+            "def load_settings(*, refresh_remote: bool = False) -> dict[str, Any]:\n    # Actions restores runtime-data before headless execution.  Page17 may stay\n    # alive for days, so an explicit remote refresh is available for the UI.\n    local=_read_local(SETTINGS_FILE,{})\n    if refresh_remote:\n        local = _refresh_small_json_from_github(SETTINGS_FILE, local, clock_fields=(\"updated_at\",))\n    if isinstance(local,dict) and local:\n        return normalize_settings(local)\n    try:\n        from godpick_persistence_service import load_named_json_permanent\n        payload,_=load_named_json_permanent(SETTINGS_FILE, {})\n        if isinstance(payload,dict) and payload: return normalize_settings(payload)\n    except Exception: pass\n    return normalize_settings(local)",
+            "def load_settings(*, refresh_remote: bool = False) -> dict[str, Any]:\n    from godpick_h250r1_settings import load_authority\n    return load_authority(normalize_settings,refresh_remote=refresh_remote)"
+          ],
+          [
+            "def save_settings(settings: dict[str, Any]) -> tuple[bool,str]:\n    payload=normalize_settings(settings); payload[\"updated_at\"]=now_text()\n    try:\n        from godpick_durability_service import persist_json_permanent\n        ok, msg = persist_json_permanent(SETTINGS_FILE,payload,reason=\"V191-H39 central auto scheduler settings/rank order\")\n        # H39: local readback is mandatory.  A green UI must never be shown if\n        # the exact execution_order written by the form cannot be read back.\n        local = _read_local(SETTINGS_FILE, {})\n        local_cfg = normalize_settings(local) if isinstance(local, dict) else normalize_settings({})\n        expected_order = list(payload.get(\"execution_order\") or [])\n        actual_order = list(local_cfg.get(\"execution_order\") or [])\n        if actual_order != expected_order:\n            return False, (\n                f\"排程順位回讀驗證失敗：預期={expected_order}｜實際={actual_order}｜{msg}\"\n            )\n        order_text = \",\".join(str(x) for x in actual_order)\n        return bool(ok), f\"{msg}｜H39順位回讀驗證成功：{order_text}\"\n    except Exception as exc:\n        return False,f\"排程永久保存失敗：{exc}\"",
+            "def save_settings(settings: dict[str, Any]) -> tuple[bool,str]:\n    from godpick_h250r1_settings import save_authority\n    return save_authority(settings,normalize_settings)"
+          ],
+          [
+            "    SETTINGS_FILE,STATUS_FILE,HISTORY_FILE,",
+            "    SETTINGS_FILE,\"godpick_auto_scheduler_settings_sync_state.json\",STATUS_FILE,HISTORY_FILE,"
+          ]
+        ]
+      ]
+    ]
+  },
+  "pages/17_系統健康檢查.py": {
+    "blob": "1ee0f4b64fab8460f56ddb3940772f025eaa03f8",
+    "steps": [
+      [
+        244,
+        [
+          [
+            "# H168: independent read-only Actions truth while the worker's local",
+            "from godpick_h244_dispatch_truth import read_run as _h244_read_run, describe as _h244_describe, taipei_now as _h244_now, ACTIVE as _H244_ACTIVE, mode_label as _h244_mode\n\n@st.cache_data(ttl=25, show_spinner=False)\ndef _h244_cached_run(token, owner, repo, run_id):\n    return _h244_read_run(token=token, owner=owner, repo=repo, run_id=run_id)\n\n# H168: independent read-only Actions truth while the worker's local"
+          ],
+          [
+            "\"事件\": x.get(\"event\"), \"排隊/執行開始UTC\": x.get(\"created_at_utc\"),",
+            "\"事件\": x.get(\"event\"), \"批次模式\": x.get(\"display_title\"), \"排隊/執行開始UTC\": x.get(\"created_at_utc\"),"
+          ],
+          [
+            "\"GitHub 並行群組只保留有限待處理項目，取消不代表業務工作完成。\"",
+            "\"取消不代表業務工作完成；H244 採最多100筆等待的序列佇列。\""
+          ],
+          [
+            "                _ok, _msg = dispatch_auto_scheduler_wakeup(\n                    token=_token, owner=_owner, repo=_repo, branch=_branch,\n                    wakeup_source=wake_source, manual_job=manual_job,\n                )\n                st.session_state[\"h159_worker_dispatch\"] = {\n                    \"ok\": bool(_ok), \"manual_job\": manual_job,\n                    \"time\": time.strftime(\"%Y-%m-%d %H:%M:%S\"), \"message\": str(_msg),\n                }",
+            "                _receipts = st.session_state.setdefault(\"h244_receipts\", {})\n                _old = _receipts.get(manual_job or \"due_only\", {})\n                if _old.get(\"ok\") and _old.get(\"run_id\"):\n                    _run = _h244_read_run(token=_token, owner=_owner, repo=_repo, run_id=_old[\"run_id\"])\n                    if _run.get(\"available\") and _run.get(\"status\") in _H244_ACTIVE:\n                        st.info(f\"本模式已有 Run {_old['run_id']} 排隊／執行中，不重複派送。\")\n                        return\n                _receipt = {}\n                _ok, _msg = dispatch_auto_scheduler_wakeup(\n                    token=_token, owner=_owner, repo=_repo, branch=_branch,\n                    wakeup_source=wake_source, manual_job=manual_job, receipt=_receipt,\n                )\n                _record = {\"ok\": bool(_ok), \"manual_job\": manual_job,\n                           \"time\": _h244_now(), \"message\": str(_msg), **_receipt}\n                _receipts[manual_job or \"due_only\"] = _record\n                st.session_state[\"h159_worker_dispatch\"] = _record"
+          ],
+          [
+            "st.info(str(_msg) + \"｜僅確認派送成功，不代表14項已完成；請以下方遠端批次履歷和最後訊息為準。\")",
+            "st.info(str(_msg) + \"｜僅確認派送，請看下方本筆 Run ID 專區；不是完成回報。\")"
+          ],
+          [
+            "            st.caption(\"最近 Worker 派送：\" + str(_h159_last_dispatch.get(\"time\")) + \"｜\" + (\n                \"已受理，待遠端確認\" if _h159_last_dispatch.get(\"ok\") else \"派送失敗\"\n            ))",
+            "            st.caption(\"最近 Worker 派送：\" + str(_h159_last_dispatch.get(\"time\")) + \"｜\" + _h244_mode(_h159_last_dispatch.get(\"manual_job\") or \"\") + \"｜Run \" + str(_h159_last_dispatch.get(\"run_id\") or \"未取得\"))"
+          ],
+          [
+            "            st.markdown(\"#### 即時排程狀態 / 成功失敗訊息\")",
+            "            st.markdown(\"#### H244｜本次人工派送（依 Run ID，不混入例行排程）\")\n            for _receipt in st.session_state.get(\"h244_receipts\", {}).values():\n                try:\n                    _rid = _receipt.get(\"run_id\")\n                    _token = str(st.secrets.get(\"GITHUB_TOKEN\", \"\") or \"\").strip()\n                    _owner = str(st.secrets.get(\"GITHUB_REPO_OWNER\", \"cheng07021028\") or \"cheng07021028\").strip()\n                    _repo = str(st.secrets.get(\"GITHUB_REPO_NAME\", \"stock-app\") or \"stock-app\").strip()\n                    _run = _h244_cached_run(_token, _owner, _repo, _rid) if _rid else {}\n                    _level, _detail = _h244_describe(_receipt, _run, _live_status)\n                    getattr(st, _level)(_detail)\n                    if _run.get(\"url\"):\n                        st.markdown(f\"[查看本筆 GitHub Run {_rid}]({_run['url']})\")\n                except Exception as _exc:\n                    st.warning(\"本筆 Run 查詢未確認：\" + type(_exc).__name__)\n            _latest_manual = (_live_status.get(\"last_manual_batch\") or {}) if isinstance(_live_status, dict) else {}\n            if _latest_manual:\n                _ms = _latest_manual.get(\"summary\") or {}\n                st.caption(f\"遠端最近手動批次（重啟後仍可查）：{_latest_manual.get('batch_id')}｜{_latest_manual.get('batch_mode')}｜成功 {_ms.get('success',0)}／警示 {_ms.get('warning',0)}／失敗 {_ms.get('failed',0)}／阻擋 {_ms.get('blocked',0)}\")\n            st.markdown(\"#### 即時排程狀態 / 成功失敗訊息（全域，非本次人工派送）\")"
+          ],
+          [
+            "            _ok, _msg = dispatch_auto_scheduler_wakeup(\n                token=_token, owner=_owner, repo=_repo, branch=_branch,\n                wakeup_source=\"page17_h156_\" + _manual_job,\n                manual_job=_manual_job,\n            )\n            st.session_state[\"h156_last_dispatch\"] = {\n                \"ok\": bool(_ok), \"mode\": _manual_job,\n                \"time\": time.strftime(\"%Y-%m-%d %H:%M:%S\"), \"message\": str(_msg),\n            }",
+            "            _receipts = st.session_state.setdefault(\"h244_receipts\", {})\n            _old = _receipts.get(_manual_job, {})\n            if _old.get(\"ok\") and _old.get(\"run_id\"):\n                _run = _h244_read_run(token=_token, owner=_owner, repo=_repo, run_id=_old[\"run_id\"])\n                if _run.get(\"available\") and _run.get(\"status\") in _H244_ACTIVE:\n                    st.info(f\"本模式已有 Run {_old['run_id']} 排隊／執行中，不重複派送。\")\n                    return\n            _receipt = {}\n            _ok, _msg = dispatch_auto_scheduler_wakeup(\n                token=_token, owner=_owner, repo=_repo, branch=_branch,\n                wakeup_source=\"page17_h156_\" + _manual_job,\n                manual_job=_manual_job, receipt=_receipt,\n            )\n            _record = {\"ok\": bool(_ok), \"mode\": _manual_job, \"manual_job\": _manual_job,\n                       \"time\": _h244_now(), \"message\": str(_msg), **_receipt}\n            _receipts[_manual_job] = _record\n            st.session_state[\"h156_last_dispatch\"] = _record"
+          ],
+          [
+            "st.caption(f\"本頁最近派送：{_dispatch_state.get('time')}｜{_dispatch_state.get('mode')}｜{'已受理，待 worker 執行' if _dispatch_state.get('ok') else '派送失敗'}\")",
+            "st.caption(f\"本頁最近派送：{_dispatch_state.get('time')}｜{_dispatch_state.get('mode')}｜Run {_dispatch_state.get('run_id') or '未取得'}｜{'已受理，請看 H244 本次人工派送' if _dispatch_state.get('ok') else '派送失敗'}\")"
+          ]
+        ]
+      ],
+      [
+        248,
+        [
+          [
+            "            if _next_rows:\n                st.dataframe(pd.DataFrame(_next_rows), use_container_width=True, hide_index=True, height=480)",
+            "            if _next_rows:\n                st.dataframe(pd.DataFrame(_next_rows), use_container_width=True, hide_index=True, height=480)\n            st.markdown(\"#### H248｜智慧診斷與選擇性補跑\")\n            _h248_eligible=[r.get(\"工作ID\") for r in _next_rows if r.get(\"H248可選擇補跑\")]\n            _h248_busy=bool(not _h168_fragment_live.get(\"available\") or _h168_fragment_live.get(\"running\",0) or _h168_fragment_live.get(\"queued\",0))\n            _h248_wait=time.time()-float(st.session_state.get(\"_h248_dispatch_epoch\",0) or 0)<120\n            st.caption(\"目前安全可補跑：\"+str(len(_h248_eligible))+\" 項｜每正式時段最多3次實際呼叫、間隔20分鐘；新正式時段照常執行。資料待補證及封存未確認不重跑股神。\")\n            if _h248_busy: st.caption(\"GitHub Worker 忙碌或狀態未知，暫不重送。\")\n            if st.button(\"H248｜僅補跑符合條件的到期失敗／待續工作\",key=\"h248_retry_due_btn\",disabled=not _h248_eligible or _h248_busy or _h248_wait,use_container_width=True):\n                st.session_state[\"_h248_dispatch_epoch\"]=time.time()\n                _h159_dispatch_central(manual_job=\"h248_retry_due\",wake_source=\"page17_h248_retry_due\")\n                st.caption(\"Worker 接手後會重新檢查正式時段、歷史結果及冷卻上限；空計畫不等於全模組成功。\")\n            _h248_batch=_live_status.get(\"last_h248_retry_batch\") or {}\n            if isinstance(_h248_batch,dict) and _h248_batch.get(\"batch_id\"):\n                st.caption(\"最近選擇性補跑（遠端狀態）：\"+str(_h248_batch.get(\"batch_id\"))+\"｜\"+str(_h248_batch.get(\"status\"))+\"｜\"+str(_h248_batch.get(\"summary\")))"
+          ],
+          [
+            "                st.success(\"目前沒有待補跑工作；中央排程等待下一個正式時段。\")",
+            "                st.info(\"目前沒有符合到期執行條件的工作；可能仍有待補證、冷卻或人工查核項目，請看 H248 診斷欄。\")"
+          ]
+        ]
+      ],
+      [
+        249,
+        [
+          [
+            "    from godpick_scheduler_wakeup_service import dispatch_scheduler_wakeup as dispatch_auto_scheduler_wakeup",
+            "    from godpick_h249_queue import dispatch_page17 as dispatch_auto_scheduler_wakeup"
+          ],
+          [
+            "            st.markdown(\"#### H248｜智慧診斷與選擇性補跑\")",
+            "            st.markdown(\"#### H249｜永久派工佇列與中斷復原\")\n            with st.expander(\"遠端永久派工回執（最近兩個台灣日期）\", expanded=False):\n                from godpick_h249_queue import queue_view\n                _h249_cache=st.session_state.get(\"_h249_queue_cache\") or {}\n                if st.button(\"更新永久派工清單\",key=\"h249_refresh_queue\") or time.time()-float(_h249_cache.get(\"at\",0))>=60:\n                    try:\n                        _h249_rows,_h249_error=queue_view(str(st.secrets.get(\"GITHUB_TOKEN\", \"\") or \"\"),str(st.secrets.get(\"GITHUB_REPO_OWNER\", \"cheng07021028\") or \"cheng07021028\"),str(st.secrets.get(\"GITHUB_REPO_NAME\", \"stock-app\") or \"stock-app\"))\n                    except Exception as _h249_exc:\n                        _h249_rows,_h249_error=[],type(_h249_exc).__name__\n                    _h249_cache={\"at\":time.time(),\"rows\":_h249_rows,\"error\":_h249_error}\n                    st.session_state[\"_h249_queue_cache\"]=_h249_cache\n                if _h249_cache.get(\"error\"):\n                    st.warning(_h249_cache[\"error\"])\n                elif _h249_cache.get(\"rows\"):\n                    st.dataframe(pd.DataFrame(_h249_cache[\"rows\"]),use_container_width=True,hide_index=True)\n                else:\n                    st.caption(\"最近兩日無已確認的永久派工紀錄。\")\n                st.caption(\"QUEUED：已永久受理；CLAIMED：已認領；REVIEW_REQUIRED：先前工作已開始，須核對副作用，禁止自動重播；EXECUTION_RECORDED：等待遠端驗證；VERIFIED：本批次遠端工作回執已核對；INCOMPLETE：未通過；EXPIRED：逾期未執行。\")\n                st.caption(\"正式時段工作維持優先；例行Worker空閒時接手一筆永久派工。已開始但結果不明的推薦寫入不會被盲目重播。\")\n            st.markdown(\"#### H248｜智慧診斷與選擇性補跑\")"
+          ]
+        ]
+      ],
+      [
+        251,
+        [
+          [
+            "        with st.form(\"v191_central_scheduler_form\", clear_on_submit=False):",
+            "        # H250-R1: bind form to the verified configuration displayed at entry.\n        _h250r1_hash=str(_auto_cfg.get(\"_h250r1_base_hash\") or \"\")\n        _h250r1_old_hash=st.session_state.get(\"_h250r1_form_base\")\n        _h250r1_changed=_h250r1_old_hash is not None and _h250r1_old_hash!=_h250r1_hash\n        if _h250r1_changed:\n            for _h250r1_job in AUTO_JOB_LABELS:\n                for _h250r1_prefix in (\"v191_rank_\",\"v191_en_\",\"v191_times_\"):\n                    st.session_state.pop(_h250r1_prefix+_h250r1_job,None)\n            st.session_state.pop(\"_v191_rank_cfg_sig\",None)\n            st.session_state.pop(\"_v191_rank_force_order\",None)\n        st.session_state[\"_h250r1_form_base\"]=_h250r1_hash\n        st.caption(\"H250-R1 排程權威：\"+str(_auto_cfg.get(\"_h250r1_authority\") or \"未確認\")+\"｜最後設定：\"+str(_auto_cfg.get(\"updated_at\") or \"—\"))\n        if _h250r1_changed:\n            st.warning(\"遠端設定已更新；表單已重新載入，請核對所有欄位後再保存。\")\n        with st.form(\"v191_central_scheduler_form_\"+(_h250r1_hash or \"unverified\"), clear_on_submit=False):"
+          ],
+          [
+            "        if _save_auto:\n            if callable(resolve_auto_execution_rank_edits):",
+            "        if _save_auto and (_h250r1_changed or not _h250r1_hash):\n            st.error(\"H250-R1 表單版本已變更或權威未確認；未保存。請重新核對設定。\")\n            _save_auto=False\n        if _save_auto:\n            if callable(resolve_auto_execution_rank_edits):"
+          ],
+          [
+            "                st.error(\"V191-H39 排程永久保存未確認；本機/遠端任一權威失敗都不會假裝保存成功。\")\n                st.caption(_msg)",
+            "                st.error(\"H250-R1 排程設定保存未確認：\"+str(_msg))\n                st.caption(\"若為 HTTP 401/403，請在 H162 核對 Streamlit Secrets 的 Contents: Read and write；若為版本衝突，重新載入後再編輯。不要反覆強制保存。\")"
+          ],
+          [
+            "value=int(_auto_cfg.get(\"retry_count\", 2) or 2), step=1)",
+            "value=int(_auto_cfg.get(\"retry_count\", 2)), step=1)"
+          ]
+        ]
+      ]
+    ]
+  },
+  "tools/run_godpick_auto_scheduler_v191.py": {
+    "blob": "2754449c19f59e90aadb6d3769bcee64e6e6cb0b",
+    "steps": [
+      [
+        248,
+        [
+          [
+            "    if manual_job in H156_MANUAL_BATCH_MODES:",
+            "    if manual_job == \"h248_retry_due\":\n        # Reuse actual configured slots, not force keys or temporary enables.\n        return run_due_jobs(retry_only=True)\n    if manual_job in H156_MANUAL_BATCH_MODES:"
+          ]
+        ]
+      ],
+      [
+        249,
+        [
+          [
+            "def run_worker_dispatch(manual_job: str):",
+            "def _run_worker_dispatch_original(manual_job: str):"
+          ],
+          [
+            "if __name__ == \"__main__\":",
+            "def run_worker_dispatch(manual_job: str):\n    from godpick_h249_queue import worker_dispatch\n    return worker_dispatch(str(manual_job or \"\").strip(),_run_worker_dispatch_original)\n\n\nif __name__ == \"__main__\":"
+          ]
+        ]
+      ]
+    ]
+  },
+  "tools/h159_manual_verdict.py": {
+    "blob": "73c9b96c7479048f56f60e60a22b074ac5834987",
+    "steps": [
+      [
+        248,
+        [
+          [
+            "    if manual_job in {\"full_refresh_and_recommend\", \"market_refresh_and_recommend\"}:",
+            "    if manual_job == \"h248_retry_due\":\n        from godpick_h248_retry_policy import verify_retry_receipt\n        return verify_retry_receipt(status.get(\"last_h248_retry_batch\"),run_id,str(os.environ.get(\"GITHUB_RUN_ATTEMPT\") or status.get(\"last_wakeup_attempt\") or \"1\"))\n    if manual_job in {\"full_refresh_and_recommend\", \"market_refresh_and_recommend\"}:"
+          ]
+        ]
+      ]
+    ]
+  },
+  "godpick_scheduler_wakeup_service.py": {
+    "blob": "5938c7e20e21937b6fcd831ef63134501964cc9f",
+    "steps": [
+      [
+        244,
+        [
+          [
+            "    http_post: Callable[..., Any] | None = None,",
+            "    http_post: Callable[..., Any] | None = None,\n    receipt: dict | None = None,"
+          ],
+          [
+            "    token = str(token or \"\").strip()",
+            "    if receipt is not None:\n        receipt.clear()\n    token = str(token or \"\").strip()"
+          ],
+          [
+            "\"X-GitHub-Api-Version\": \"2022-11-28\",",
+            "\"X-GitHub-Api-Version\": \"2026-03-10\" if receipt is not None else \"2022-11-28\","
+          ],
+          [
+            "        if code == 204:\n            if manual_job:",
+            "        if code in (200, 204):\n            run_id = \"\"\n            if code == 200:\n                try:\n                    candidate = str(response.json().get(\"workflow_run_id\") or \"\")\n                    run_id = candidate if candidate.isdigit() else \"\"\n                except Exception:\n                    pass\n            if receipt is not None:\n                receipt.update({\"run_id\": run_id, \"http_status\": code})\n            if run_id:\n                return True, f\"已受理 {'手動工作 ' + manual_job if manual_job else '到期工作'}｜Run {run_id}；尚未完成驗收。\"\n            if manual_job:"
+          ],
+          [
+            "return False, f\"Page17 自動補跑喚醒失敗：{type(exc).__name__}: {exc}\"",
+            "return False, f\"Page17 自動補跑喚醒失敗：{type(exc).__name__}；遠端是否受理未知，請先查 Actions，勿直接重送。\""
+          ]
+        ]
+      ]
+    ]
+  },
+  ".github/workflows/godpick_auto_scheduler_v191.yml": {
+    "blob": "5750ba95ff2821610581c7882eaaab2fd139f5f7",
+    "steps": [
+      [
+        244,
+        [
+          [
+            "name: GodPick V191 Central Auto Scheduler\n",
+            "name: GodPick V191 Central Auto Scheduler\nrun-name: \"Central | ${{ inputs.manual_job || 'due_only' }} | ${{ inputs.wakeup_source || github.event_name }}\"\n"
+          ],
+          [
+            "  group: godpick-v191-central-auto-scheduler\n  cancel-in-progress: false",
+            "  group: godpick-v191-central-auto-scheduler\n  cancel-in-progress: false\n  queue: max # H244: preserve pending manual and routine requests, still serialize writes"
+          ],
+          [
+            "echo \"- wake source: ${{ github.event.inputs.wakeup_source || github.event_name }}\"",
+            "echo \"- wake source: $GODPICK_WAKEUP_SOURCE\""
+          ]
+        ]
+      ],
+      [
+        249,
+        [
+          [
+            "permissions:\n  contents: write",
+            "permissions:\n  contents: write\n  actions: read # H249 verify exact previous attempt terminal state"
+          ],
+          [
+            "      - name: H243 terminal wake receipt (separate from job success)",
+            "      - name: H249 finalize durable request from exact remote batch evidence\n        id: h249_finalize\n        if: always() && steps.checkout.outcome == 'success' && steps.deps.outcome == 'success'\n        continue-on-error: true\n        env:\n          H249_VERIFY: ${{ steps.verify.outcome }}\n        run: python godpick_h249_queue.py\n\n      - name: H243 terminal wake receipt (separate from job success)"
+          ],
+          [
+            "        run: python tools/h159_manual_verdict.py",
+            "        run: python tools/h159_manual_verdict.py\n\n      - name: H249 explicit durable dispatch verdict (routine wakes unaffected)\n        if: ${{ always() && startsWith(github.event.inputs.wakeup_source || '', 'h249_') && steps.h249_finalize.outcome != 'success' }}\n        run: |\n          echo '::error::H249 exact durable request receipt not verified'\n          exit 1"
+          ]
+        ]
+      ]
+    ]
+  },
+  "godpick_h244_dispatch_truth.py": {
+    "blob": "5a2d2b6d0699b6ff2cdc54254eabd40b663190e9",
+    "steps": [
+      [
+        248,
+        [
+          [
+            "'market_refresh_and_recommend': '核心6項', '': '僅到期工作'",
+            "'market_refresh_and_recommend': '核心6項', 'h248_retry_due': 'H248選擇性補跑', '': '僅到期工作'"
+          ],
+          [
+            "    if mode in MANUAL_MODES and str(batch.get('batch_id')) == rid + '.' + attempt and batch.get('batch_mode') == mode:",
+            "    if mode == 'h248_retry_due':\n        batch = status.get('last_h248_retry_batch') or {}\n        if str(batch.get('batch_id')) == rid + '.' + attempt:\n            summary = batch.get('summary') or {}\n            valid = {'all_success': batch.get('all_success') is True}\n    elif mode in MANUAL_MODES and str(batch.get('batch_id')) == rid + '.' + attempt and batch.get('batch_mode') == mode:"
+          ],
+          [
+            "    if mode in MANUAL_MODES and not valid.get('all_success'):",
+            "    if (mode in MANUAL_MODES or mode == 'h248_retry_due') and not valid.get('all_success'):"
+          ]
+        ]
+      ]
+    ]
+  }
+}

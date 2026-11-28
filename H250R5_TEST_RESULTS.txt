@@ -1,0 +1,52 @@
+test_apply_backup (test_h250r5_builder.Builder.test_apply_backup) ... ok
+test_duplicate_anchor (test_h250r5_builder.Builder.test_duplicate_anchor) ... ok
+test_exact_recovery (test_h250r5_builder.Builder.test_exact_recovery) ... ok
+test_missing_anchor (test_h250r5_builder.Builder.test_missing_anchor) ... ok
+test_overlay_unicode (test_h250r5_builder.Builder.test_overlay_unicode) ... ok
+test_reject_changed_after_prepare (test_h250r5_builder.Builder.test_reject_changed_after_prepare) ... ok
+test_unique_anchor (test_h250r5_builder.Builder.test_unique_anchor) ... ok
+test_disabled_rec_not_executed (test_h250r5_manual.ActualScheduler.test_disabled_rec_not_executed) ... skipped '完整專案未提供；部署準備工作必須執行'
+test_failure_not_green (test_h250r5_manual.ActualScheduler.test_failure_not_green) ... skipped '完整專案未提供；部署準備工作必須執行'
+test_no_jobs_no_call (test_h250r5_manual.ActualScheduler.test_no_jobs_no_call) ... skipped '完整專案未提供；部署準備工作必須執行'
+test_rec_blocked_missing_core (test_h250r5_manual.ActualScheduler.test_rec_blocked_missing_core) ... skipped '完整專案未提供；部署準備工作必須執行'
+test_rec_last_and_all_fourteen (test_h250r5_manual.ActualScheduler.test_rec_last_and_all_fourteen) ... skipped '完整專案未提供；部署準備工作必須執行'
+test_weekend_master_off_enabled_only (test_h250r5_manual.ActualScheduler.test_weekend_master_off_enabled_only) ... skipped '完整專案未提供；部署準備工作必須執行'
+test_active (test_h250r5_manual.Dispatch.test_active) ... ok
+test_bad_schema (test_h250r5_manual.Dispatch.test_bad_schema) ... ok
+test_completed_not_active (test_h250r5_manual.Dispatch.test_completed_not_active) ... ok
+test_http_block (test_h250r5_manual.Dispatch.test_http_block) ... ok
+test_routine_not_active (test_h250r5_manual.Dispatch.test_routine_not_active) ... ok
+test_token_missing (test_h250r5_manual.Dispatch.test_token_missing) ... ok
+test_all_in_saved_order (test_h250r5_manual.Scope.test_all_in_saved_order) ... ok
+test_duplicate_order_dedup (test_h250r5_manual.Scope.test_duplicate_order_dedup) ... ok
+test_empty (test_h250r5_manual.Scope.test_empty) ... ok
+test_exact_enabled_ignores_master (test_h250r5_manual.Scope.test_exact_enabled_ignores_master) ... ok
+test_missing_job (test_h250r5_manual.Scope.test_missing_job) ... ok
+test_no_config (test_h250r5_manual.Scope.test_no_config) ... ok
+test_no_config_mutation (test_h250r5_manual.Scope.test_no_config_mutation) ... ok
+test_not_boolean (test_h250r5_manual.Scope.test_not_boolean) ... ok
+test_r1_authority_unavailable (test_h250r5_manual.Scope.test_r1_authority_unavailable) ... ok
+test_raw_disabled_conflict (test_h250r5_manual.Scope.test_raw_disabled_conflict) ... ok
+test_raw_incomplete (test_h250r5_manual.Scope.test_raw_incomplete) ... ok
+test_rec_disabled (test_h250r5_manual.Scope.test_rec_disabled) ... ok
+test_restored_pair (test_h250r5_manual.Scope.test_restored_pair) ... ok
+test_all_verified (test_h250r5_manual.Verdict.test_all_verified) ... ok
+test_disabled_rec_not_needed (test_h250r5_manual.Verdict.test_disabled_rec_not_needed) ... ok
+test_duplicate_history (test_h250r5_manual.Verdict.test_duplicate_history) ... ok
+test_failed_row (test_h250r5_manual.Verdict.test_failed_row) ... ok
+test_force_key_scope (test_h250r5_manual.Verdict.test_force_key_scope) ... ok
+test_in_progress (test_h250r5_manual.Verdict.test_in_progress) ... ok
+test_missing_history (test_h250r5_manual.Verdict.test_missing_history) ... ok
+test_missing_row (test_h250r5_manual.Verdict.test_missing_row) ... ok
+test_partial_history (test_h250r5_manual.Verdict.test_partial_history) ... ok
+test_warning (test_h250r5_manual.Verdict.test_warning) ... ok
+test_wrong_attempt (test_h250r5_manual.Verdict.test_wrong_attempt) ... ok
+test_wrong_id (test_h250r5_manual.Verdict.test_wrong_id) ... ok
+test_wrong_mode (test_h250r5_manual.Verdict.test_wrong_mode) ... ok
+test_wrong_order (test_h250r5_manual.Verdict.test_wrong_order) ... ok
+test_zero_not_success (test_h250r5_manual.Verdict.test_zero_not_success) ... ok
+
+----------------------------------------------------------------------
+Ran 47 tests in 0.011s
+
+OK (skipped=6)
