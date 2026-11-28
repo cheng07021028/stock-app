@@ -1,0 +1,227 @@
+# -*- coding: utf-8 -*-
+"""R6 observational progress. Never grants trading authority or changes schedule state."""
+from __future__ import annotations
+import base64
+import json
+import os
+import re
+import time
+from datetime import datetime, timezone
+import requests
+
+MODE = 'force_enabled_jobs'
+WORKFLOW = '.github/workflows/godpick_auto_scheduler_v191.yml'
+ACTIVE = {'queued','pending','requested','waiting','in_progress'}
+RESULTS = {'SUCCESS','WARNING','FAILED','BLOCKED'}
+
+def part(v): return bool(re.fullmatch(r'[A-Za-z0-9_.-]{1,100}', str(v or '')))
+def number(v): return bool(re.fullmatch(r'[1-9][0-9]{0,19}', str(v or '')))
+def path_for(run, attempt):
+    if not number(run) or not number(attempt): raise ValueError('invalid identity')
+    return f'data/h250r6/progress/{run}.{attempt}.json'
+
+def now(): return datetime.now(timezone.utc).isoformat(timespec='seconds')
+def obj(v): return v if isinstance(v,dict) else {}
+def arr(v): return v if isinstance(v,list) else []
+
+class API:
+    def __init__(self, token, owner, repo, http=None):
+        if not token or not part(owner) or not part(repo): raise ValueError('GitHub configuration unavailable')
+        self.base=f'https://api.github.com/repos/{owner}/{repo}'
+        self.headers={'Accept':'application/vnd.github+json','Authorization':'Bearer '+token,'X-GitHub-Api-Version':'2022-11-28'}
+        self.http=http or requests
+    def get(self, path, **kw):
+        r=self.http.get(self.base+path,headers=self.headers,timeout=(2,5),**kw)
+        if r.status_code!=200: return None, f'HTTP {r.status_code}'
+        d=r.json()
+        return (d,'') if isinstance(d,dict) else (None,'invalid response')
+    def read_json(self,path):
+        d,msg=self.get('/contents/'+path,params={'ref':'runtime-data'})
+        if d is None:return None,msg
+        if d.get('encoding')!='base64':return None,'invalid encoding'
+        raw=base64.b64decode(d.get('content',''))
+        if len(raw)>2_000_000:return None,'response too large'
+        v=json.loads(raw)
+        return (v,'') if isinstance(v,dict) else (None,'invalid document')
+    def write(self,path,value,sha):
+        body={'message':'H250-R6 manual progress '+value['batch_id'],'branch':'runtime-data','content':base64.b64encode(json.dumps(value,ensure_ascii=False,separators=(',',':'),allow_nan=False).encode()).decode()}
+        if sha:body['sha']=sha
+        r=self.http.put(self.base+'/contents/'+path,headers=self.headers,json=body,timeout=(2,5))
+        if r.status_code not in (200,201):raise RuntimeError(f'HTTP {r.status_code}')
+        new=obj(r.json().get('content')).get('sha')
+        if not re.fullmatch(r'[0-9a-f]{40}',str(new or '')):raise RuntimeError('write confirmation unavailable')
+        return new
+
+class ProgressPublisher:
+    """A single writer for one run attempt. On conflict/timeout stop telemetry only."""
+    def __init__(self, api, run, attempt, labels):
+        self.api=api; self.path=path_for(run,attempt); self.labels=set(labels); self.sha=None; self.enabled=True
+        self.doc={'version':'H250-R6','batch_id':f'{run}.{attempt}','mode':MODE,'plan':[],'rows':{},'phase':'NOT_STARTED','updated_at':now(),'seq':0}
+    @classmethod
+    def worker(cls,labels):
+        if os.getenv('GITHUB_ACTIONS')!='true':return None
+        try:return cls(API(os.getenv('GITHUB_TOKEN'),os.getenv('GITHUB_REPO_OWNER'),os.getenv('GITHUB_REPO_NAME')),os.getenv('GITHUB_RUN_ID'),os.getenv('GITHUB_RUN_ATTEMPT','1'),labels)
+        except Exception as exc:
+            print('H250-R6 telemetry unavailable: '+type(exc).__name__,flush=True);return None
+    def __call__(self,event):
+        if not self.enabled or event.get('simulate'):return
+        try:
+            kind=event.get('event');job=event.get('job');doc=self.doc; rows=doc['rows']
+            if kind=='run_start':
+                plan=event.get('pending_jobs')
+                if doc['phase']!='NOT_STARTED' or not isinstance(plan,list) or not plan or len(plan)!=len(set(plan)) or not set(plan)<=self.labels:raise ValueError('invalid plan')
+                doc['plan']=list(plan);doc['phase']='EXECUTING'
+            elif kind=='job_start':
+                if doc['phase']!='EXECUTING' or job not in doc['plan'] or job in rows:raise ValueError('invalid start')
+                rows[job]={'status':'RUNNING','started_at':str(event.get('started_at',''))[:40]}
+            elif kind=='job_complete':
+                if doc['phase']!='EXECUTING' or obj(rows.get(job)).get('status')!='RUNNING' or event.get('status') not in RESULTS:raise ValueError('invalid result')
+                rows[job]['status']=event['status'];rows[job]['finished_at']=str(event.get('finished_at',''))[:40]
+                duration=event.get('duration_seconds')
+                if type(duration) in (int,float) and 0<=duration<86400:rows[job]['seconds']=round(duration,1)
+                # Provider messages can contain credentials. Do not copy raw messages to a public telemetry file.
+            elif kind=='run_complete':
+                if doc['phase']!='EXECUTING':raise ValueError('invalid end')
+                doc['phase']='BUSINESS_RETURNED'
+            else:return
+            doc['seq']+=1;doc['updated_at']=now();self.sha=self.api.write(self.path,doc,self.sha)
+        except Exception as exc:
+            self.enabled=False;print('H250-R6 telemetry stopped (business continues): '+type(exc).__name__,flush=True)
+
+def matches_run(d,run):
+    return str(d.get('id'))==str(run) and d.get('path')==WORKFLOW and d.get('event')=='workflow_dispatch' and ('| '+MODE+' |') in str(d.get('display_title') or d.get('name') or '') and number(d.get('run_attempt'))
+
+def snapshot(api,run):
+    try:
+        if not number(run):return {'available':False,'error':'invalid Run ID'}
+        d,msg=api.get('/actions/runs/'+str(run))
+        if d is None or not matches_run(d,run):return {'available':False,'error':msg or 'Run identity mismatch'}
+        attempt=str(d['run_attempt']); phase=''; progress=None; error=''
+        # Pending jobs are not started. No unnecessary contents request until running.
+        if d.get('status') in {'in_progress','completed'}:
+            try:
+                j,_=api.get(f'/actions/runs/{run}/attempts/{attempt}/jobs',params={'per_page':20})
+                for job in arr(obj(j).get('jobs')):
+                    for step in arr(obj(job).get('steps')):
+                        if obj(step).get('status')=='in_progress':phase=str(step.get('name',''))[:150];break
+                    if phase:break
+            except Exception:pass
+            try:progress,error=api.read_json(path_for(run,attempt))
+            except Exception as exc:error=type(exc).__name__
+        return {'available':True,'run_id':str(run),'attempt':attempt,'status':d.get('status'),'conclusion':d.get('conclusion'),'phase':phase,'progress':progress,'progress_error':error}
+    except Exception as exc:return {'available':False,'error':type(exc).__name__}
+
+def valid_plan(p,labels):
+    return isinstance(p,list) and bool(p) and all(isinstance(k,str) and k in labels for k in p) and len(set(p))==len(p) and 'godpick_recommendation' not in p[:-1]
+
+def model(snap,status,preview,labels):
+    """Only identical Run+Attempt can supply progress. Preview is never actual plan."""
+    snap=obj(snap);status=obj(status); rid=str(snap.get('run_id') or ''); att=str(snap.get('attempt') or ''); ident=rid+'.'+att
+    plan=list(preview) if valid_plan(preview,labels) else []; origin='設定預覽'; rows={}; batch=None
+    known=bool(snap.get('available') and number(rid) and number(att)); state=snap.get('status') if known else 'unknown'
+    p=obj(snap.get('progress'))
+    if known and p.get('batch_id')==ident and p.get('mode')==MODE and p.get('version')=='H250-R6' and valid_plan(p.get('plan'),labels):
+        plan=p['plan'];origin='本輪遠端進度';rows={k:obj(v) for k,v in obj(p.get('rows')).items() if k in plan and obj(v).get('status') in RESULTS|{'RUNNING'}}
+    for candidate in [status.get('last_force_enabled_batch'),status.get('last_manual_batch')]:
+        b=obj(candidate)
+        if known and b.get('batch_id')==ident and b.get('batch_mode')==MODE and valid_plan(b.get('planned_jobs'),labels):
+            results=arr(obj(b.get('validation')).get('job_results'))
+            if all(isinstance(r,dict) for r in results) and [r.get('job') for r in results]==b['planned_jobs'] and all(r.get('status') in RESULTS and str(r.get('run_key') or '').startswith(r['job']+'|FORCE|') and str(r.get('run_key') or '').endswith('|'+ident) for r in results):
+                batch=b;plan=b['planned_jobs'];origin='本輪遠端終端回執';rows={r['job']:{**rows.get(r['job'],{}),**r} for r in results};break
+    counts={k:sum(v.get('status')==k for v in rows.values()) for k in RESULTS}; finished=sum(counts.values())
+    all_ok=bool(batch and state=='completed' and snap.get('conclusion')=='success' and obj(batch.get('validation')).get('all_success') is True and counts['SUCCESS']==len(plan) and len(plan)>0 and obj(batch.get('summary')).get('executed')==len(plan) and obj(batch.get('summary')).get('success')==len(plan) and obj(batch.get('summary')).get('in_progress') is False and all(obj(batch.get('summary')).get(k)==0 for k in ('warning','failed','blocked')))
+    if state in ACTIVE-{'in_progress'}: title='排隊中：等待中央 Worker，不代表已執行'
+    elif state=='in_progress':title='執行中：'+(snap.get('phase') or ('逐項回報中' if rows else '等待本輪進度'))
+    elif state=='completed':title='全部工作已通過遠端驗收' if all_ok else ('批次已結束，存在警示／失敗或未取得完整遠端驗收' if snap.get('conclusion')=='success' else '批次未通過：'+str(snap.get('conclusion') or 'unknown'))
+    else:title='尚無可確認的本輪狀態'
+    return {'title':title,'plan':plan,'origin':origin,'rows':rows,'counts':counts,'finished':finished,'all_ok':all_ok,'state':state,'batch':batch,'updated':p.get('updated_at') if origin=='本輪遠端進度' else obj(batch).get('finished_at')}
+
+def credentials(st):
+    return (str(st.secrets.get('GITHUB_TOKEN','') or '').strip(),str(st.secrets.get('GITHUB_REPO_OWNER','cheng07021028') or '').strip(),str(st.secrets.get('GITHUB_REPO_NAME','stock-app') or '').strip())
+
+def get_snapshot(st,api,run):
+    cache=st.session_state.get('_r6_poll') or {}; t=time.monotonic()
+    if cache.get('run')==run and t-cache.get('at',-1000)<12:return cache['value']
+    v=snapshot(api,run);st.session_state['_r6_poll']={'run':run,'at':t,'value':v};return v
+
+def render_panel(st,config,labels,dispatch,plan_enabled,active_manual):
+    """Own fragment: button and progress update together, not just after page rerun."""
+    def body():
+        st.markdown('#### H250-R6｜手動執行即時戰情中心')
+        try:plan=plan_enabled(config,labels)
+        except Exception:plan=[]
+        st.caption(f'已保存設定預覽：{len(plan)} 項；忽略排程時間、日期及總開關，07固定最後並保留R5前置條件。實際計畫以Worker回報為準。')
+        receipt=obj(st.session_state.get('_r5_receipt'));rid=str(receipt.get('run_id') or '');api=None;probe=None;probe_msg='';snap={};status=obj(st.session_state.get('_r6_runtime_status'))
+        try:
+            token,owner,repo=credentials(st);api=API(token,owner,repo)
+            cached=obj(st.session_state.get('_r6_active_probe'));t=time.monotonic()
+            if t-cached.get('at',-1000)>=15:
+                probe,probe_msg=active_manual(token=token,owner=owner,repo=repo)
+                st.session_state['_r6_active_probe']={'at':t,'run':probe,'msg':probe_msg}
+            else:probe,probe_msg=cached.get('run'),cached.get('msg','')
+            if number(probe) and not number(rid) and not receipt:
+                if str(probe)!=rid:
+                    rid=str(probe);receipt={'ok':True,'run_id':rid,'manual_job':MODE,'message':'重新辨識活動人工批次'};st.session_state['_r5_receipt']=receipt
+            if not number(rid) and not receipt:
+                b=obj(status.get('last_force_enabled_batch'));v=str(b.get('batch_id') or '').split('.')
+                if len(v)==2 and number(v[0]) and number(v[1]):rid=v[0]
+            if number(rid):snap=get_snapshot(st,api,rid)
+        except Exception as exc:probe=None;probe_msg=type(exc).__name__
+        m=model(snap,status,plan,labels)
+        if number(rid):
+            st.markdown(f'[本次 GitHub Run {rid}](https://github.com/{owner}/{repo}/actions/runs/{rid})' if api else f'Run {rid}')
+            if m['all_ok']:st.success(m['title'])
+            elif m['state']=='completed' or m['state']=='unknown':st.warning(m['title'])
+            else:st.info(m['title'])
+            st.caption(f"Attempt {snap.get('attempt','待確認')}｜{m['origin']}｜最後回報 {m['updated'] or '尚未取得'}")
+            total=len(m['plan']);done=m['finished'];st.progress(min(1.,done/max(1,total)),text=f'{done} / {total} 項已返回結果（非全部成功）')
+            cols=st.columns(5)
+            for c,(label,val) in zip(cols,[('成功',m['counts']['SUCCESS']),('警示',m['counts']['WARNING']),('失敗',m['counts']['FAILED']),('阻擋',m['counts']['BLOCKED']),('未返回',max(0,total-done))]):c.metric(label,val)
+            with st.expander('本次逐項工作進度與結果',expanded=True):
+                table=[]
+                for i,k in enumerate(m['plan'],1):
+                    row=m['rows'].get(k,{});s=row.get('status','未回報' if m['state']!='completed' else '未取得結果')
+                    table.append({'順位':i,'工作':labels.get(k,k),'狀態':s,'秒數':row.get('seconds','—'),'訊息':str(row.get('message') or '')[:500]})
+                if table:st.dataframe(table,hide_index=True,use_container_width=True)
+            if snap.get('progress_error') and not m['batch']:st.caption('尚未取得R6逐項遠端回報：'+str(snap['progress_error'])+'。舊Worker或尚未開始時屬正常；不推測進度。')
+        else:
+            if receipt.get('ok') or receipt.get('uncertain'):st.warning('派送狀態未取得確切Run ID；請查Actions，不會以其他批次冒充本次。')
+            else:st.caption('目前未選取人工批次。')
+        cool=time.time()-float(st.session_state.get('_r5_click_epoch',0) or 0)<120
+        unknown_receipt=bool((receipt.get('ok') or receipt.get('uncertain')) and not number(receipt.get('run_id')))
+        busy=bool(number(probe) or m['state'] in ACTIVE)
+        disabled=bool(not plan or cool or probe is None or busy or unknown_receipt or (number(rid) and not snap.get('available')) or not callable(dispatch))
+        if busy:
+            st.info('已有人工批次排隊／執行中，已鎖定重複派送。'+(f' 另有活動 Run {probe}。' if number(probe) and str(probe)!=rid else ''))
+            if number(probe) and str(probe)!=rid and st.button('切換查看目前活動人工批次',key='h250r6_follow_active'):
+                st.session_state['_r5_receipt']={'ok':True,'run_id':str(probe),'manual_job':MODE,'message':'使用者選擇活動Run'};st.rerun()
+        elif probe is None:st.warning('活動批次未能查核，暫停派送：'+str(probe_msg))
+        elif cool:st.caption('120秒防連點尚未結束。')
+        if unknown_receipt and probe=='':
+            if st.button('已人工查核 Actions，解除未識別派送鎖定',key='h250r6_ack_unknown'):
+                st.session_state.pop('_r5_receipt',None);st.rerun()
+        with st.expander('查看本次設定預計執行順序',expanded=False):
+            for i,k in enumerate(plan,1):st.write(f'{i:02d}｜{labels.get(k,k)}')
+        if st.button(f'🚀 手動強制執行全部已啟用工作（{len(plan)}項）',key='h250r5_force_enabled',type='primary',disabled=disabled,use_container_width=True):
+            st.session_state['_r5_click_epoch']=time.time();st.session_state['_v191_h19_autocatchup_try_epoch']=time.time()
+            try:
+                branch=str(st.secrets.get('GITHUB_CODE_BRANCH','main') or 'main').strip()
+                if branch!='main':raise ValueError('nonmain')
+                active,msg=active_manual(token=token,owner=owner,repo=repo)
+                if active is None:st.warning('未派送：'+msg);return
+                if active:st.session_state['_r5_receipt']={'ok':True,'run_id':active,'manual_job':MODE,'message':msg}
+                else:
+                    details={};ok,msg=dispatch(token=token,owner=owner,repo=repo,branch=branch,wakeup_source='page17_h250r5_force_enabled',manual_job=MODE,receipt=details)
+                    # Any ambiguous response is held until user confirms Actions; never auto-resend.
+                    st.session_state['_r5_receipt']={'ok':bool(ok),'manual_job':MODE,'message':str(msg),**details}
+                    if not ok:st.session_state['_r5_receipt']['uncertain']=True;st.error(str(msg))
+                    else:st.info('派送已受理，尚未驗收。')
+                st.session_state.pop('_r6_active_probe',None);st.session_state.pop('_r6_poll',None)
+                st.rerun()
+            except Exception as exc:
+                st.session_state['_r5_receipt']={'ok':False,'uncertain':True,'manual_job':MODE,'message':type(exc).__name__}
+                st.error('派送未確認：'+type(exc).__name__+'；請查Actions，不要直接重送。')
+        st.caption('人工進度每15秒更新；下方原有即時排程區是例行排程與共用Worker資訊，非本次手動進度。')
+    fragment=getattr(st,'fragment',None)
+    if callable(fragment):fragment(run_every='15s')(body)()
+    else:body()

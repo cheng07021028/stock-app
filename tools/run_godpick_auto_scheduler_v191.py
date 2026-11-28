@@ -17,7 +17,8 @@ def run_worker_dispatch(manual_job: str):
         _prior=os.environ.get("GODPICK_PAGE17_FULL_REFRESH")
         os.environ["GODPICK_PAGE17_FULL_REFRESH"]="1"
         try:
-            return run_due_jobs(force_all_enabled=True,strict_same_run=True,manual_batch_mode=manual_job)
+            from godpick_h250r6_monitor import ProgressPublisher
+            return run_due_jobs(force_all_enabled=True,strict_same_run=True,manual_batch_mode=manual_job,progress_callback=ProgressPublisher.worker(JOB_LABELS))
         finally:
             if _prior is None: os.environ.pop("GODPICK_PAGE17_FULL_REFRESH",None)
             else: os.environ["GODPICK_PAGE17_FULL_REFRESH"]=_prior

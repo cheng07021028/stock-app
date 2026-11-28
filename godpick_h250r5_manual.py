@@ -139,3 +139,18 @@ def render_status(st,status,labels):
         st.caption(f"批次 {batch.get('batch_id')}｜計畫 {len(batch.get('planned_jobs') or [])}｜成功 {summary.get('success',0)}／警示 {summary.get('warning',0)}／失敗 {summary.get('failed',0)}／阻擋 {summary.get('blocked',0)}；最終以該 Run 的遠端驗收為準。")
         if valid.get('job_results'):
             st.dataframe([{'工作':labels.get(r['job'],r['job']),'狀態':r['status'],'訊息':r['message']} for r in valid['job_results']],hide_index=True,use_container_width=True)
+
+# R6: keep R5 business validation and dispatch functions unchanged.
+_r5_legacy_render_status = render_status
+_r5_legacy_render_button = render_button
+
+def render_button(st, config, labels, dispatch):
+    from godpick_h250r6_monitor import render_panel
+    render_panel(st, config, labels, dispatch, plan_enabled, active_manual)
+
+def render_status(st, status, labels):
+    # Page17's existing 8-second fragment supplies the terminal authority to
+    # the independent 15-second R6 panel; never modify the source object.
+    st.session_state['_r6_runtime_status'] = status if isinstance(status, dict) else {}
+    st.caption('上方 H250-R6 戰情中心獨立追蹤手動 Run；本區為原有例行排程資訊。')
+    _r5_legacy_render_status(st, status, labels)
