@@ -215,7 +215,7 @@ LATEST_PRICE_PNL_FIX_VERSION = "record_v179_official_market_snapshot_price_fix_v
 RECORD_AUTHORITY_COMPAT_VERSION = "record_v181_authority_restore_nameerror_compat_20260809"
 RECORD_INTEGRITY_FIX_VERSION = "record_v178_record_identity_perf_separation_v1_20260807"
 NORMALIZED_RECORD_CACHE_FILE_V165 = "data/godpick_records_normalized_v165.pkl"
-NORMALIZED_RECORD_CACHE_VERSION_V165 = "v178_integrity_20260807"
+NORMALIZED_RECORD_CACHE_VERSION_V165 = "v178_integrity_r9_20261128"
 RECORD_FIX_VERSION = "record_prelaunch_grade_read_v2_verified_20260425"
 MARKET_TREND_V38_LINK_VERSION = "record_market_trend_v76_practical_entry_fields_20260430"
 
@@ -1881,7 +1881,7 @@ def _record_integrity_summary_v178(df: pd.DataFrame) -> dict[str, Any]:
 
 
 _NORMALIZED_RECORD_ATTR_V157 = "godpick_record_columns_normalized_version"
-_NORMALIZED_RECORD_VERSION_V157 = "v178_integrity_normalize"
+_NORMALIZED_RECORD_VERSION_V157 = "v178_integrity_normalize_r9"
 _NORMALIZED_RECORD_REQUIRED_V157 = ("record_id", "股票代號", "股票名稱", "推薦日期", "目前狀態")
 
 
@@ -2078,6 +2078,7 @@ def _ensure_godpick_record_columns(df: pd.DataFrame) -> pd.DataFrame:
     ordered_cols = _dedupe_keep_order_v73([c for c in (UNIFIED_RECOMMEND_DISPLAY_COLUMNS or GODPICK_RECORD_COLUMNS) if c in x.columns] + [c for c in GODPICK_RECORD_COLUMNS if c in x.columns])
     if callable(filter_effective_columns):
         ordered_cols = filter_effective_columns(ordered_cols)
+    ordered_cols += [c for c in _R9_COLUMNS if c in x.columns and c not in ordered_cols]
     x = x.loc[:, ~pd.Index(x.columns).duplicated()].copy()
     out_v157 = x[ordered_cols].copy()
     return _mark_normalized_records_v157(out_v157)
@@ -5818,6 +5819,8 @@ def _build_export_bytes(df: pd.DataFrame, tables: dict[str, pd.DataFrame]) -> by
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         _ensure_godpick_record_columns(df).to_excel(writer, sheet_name="推薦紀錄", index=False)
+        from godpick_h250r9_evidence import summary_frame
+        summary_frame(df).to_excel(writer, sheet_name="官方原價核實統計", index=False)
         tables["mode"].to_excel(writer, sheet_name="模式分析", index=False)
         tables["category"].to_excel(writer, sheet_name="類別分析", index=False)
         tables["grade"].to_excel(writer, sheet_name="等級分析", index=False)
@@ -6786,6 +6789,11 @@ def main():
         {"label": "平均20日績效%", "value": "-" if pd.isna(avg_20) else f"{avg_20:.2f}%", "delta": "-" if pd.isna(avg_real) else f"平均實際 {avg_real:.2f}%", "delta_class": "pro-kpi-delta-flat"},
     ])
 
+    with st.expander("H250-R9｜官方原價績效證據", expanded=False):
+        if st.toggle("顯示核實績效（與10同口徑）",value=False,key=_k("r9_evidence_summary")):
+            from godpick_h250r9_evidence import render_summary
+            render_summary(st,live_df)
+    st.caption("原有系統報酬、模式分析及權重建議為舊口徑參考；R9官方原價核實統計獨立顯示，不冒充含息或實際成交。")
     with st.expander("v113 資料完整度檢查 / 欄位訊息診斷", expanded=False):
         if st.toggle("啟動本區運算 / 顯示", value=False, key=_k("lazy_v113_diag")):
             st.caption("V113 已把診斷分成主檔必備、策略說明、K線驗證、價格追蹤、績效成熟。3/5/10/20日績效若推薦時間尚未滿期，會顯示待追蹤，不再誤判成系統錯誤。")
@@ -7596,6 +7604,11 @@ try:
 except Exception:
     pass
 
+
+from godpick_h250r9_evidence import EVIDENCE_COLUMNS as _R9_COLUMNS
+for _c in _R9_COLUMNS:
+    if _c not in GODPICK_RECORD_COLUMNS:
+        GODPICK_RECORD_COLUMNS.append(_c)
 
 if __name__ == "__main__":
     main()

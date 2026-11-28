@@ -754,7 +754,10 @@ def task_auto_recommendation(cfg: dict[str, Any] | None = None) -> dict[str, Any
         ok=bool(result.get("ok"))
         msg=str(result.get("message") or ("07股神推薦模組自動執行完成" if ok else "07股神推薦模組自動執行失敗"))
         if ok and not result["h138_auto_seal"].get("confirmed"):
-            msg += "｜H138主管決策遠端封存尚未確認（與Page07掃描成功分開）"
+            if result["h138_auto_seal"].get("eod_status") == "CLOSED_WEEKEND":
+                msg += "｜H138週末休市：無當日官方盤後可封存（掃描與封存分開；不冒充已確認）"
+            else:
+                msg += "｜H138主管決策遠端封存尚未確認（與Page07掃描成功分開）"
 
         return _report(
             ok, msg, details=result,

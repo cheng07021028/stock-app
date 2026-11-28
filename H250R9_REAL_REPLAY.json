@@ -1,0 +1,117 @@
+{
+  "recommend_list_performance": {
+    "r8_replay_patches": 1603,
+    "r8_diagnostics": {
+      "IDENTITY_PENDING": 47,
+      "CALENDAR_GAP": 276,
+      "READY": 1603,
+      "QUOTE_PENDING": 459,
+      "ADJUSTED_SYMBOLS_ATTEMPTED": 0,
+      "ADJUSTED_PROVIDER_DEFERRED": 1603,
+      "ADJUSTED_PENDING": 1603,
+      "DEFERRED": 0
+    },
+    "r9_replay_patches": 2307,
+    "r9_diagnostics": {
+      "CLOSED_PUBLICATION_RESOLVED": 262,
+      "OFFICIAL_MARKET_RESOLVED": 508,
+      "QUOTE_PENDING": 31,
+      "IDENTITY_PENDING": 47,
+      "READY": 2307,
+      "ADJUSTED_SYMBOLS_ATTEMPTED": 0,
+      "ADJUSTED_PROVIDER_DEFERRED": 2307,
+      "ADJUSTED_PENDING": 2307,
+      "DEFERRED": 0
+    },
+    "r9_gap_breakdown": {
+      "CLOSED_REFERENCE_PRICE_UNCORROBORATED": 14,
+      "MISSING_OR_INVALID_RECOMMEND_DATE": 47,
+      "MISSING_ANCHOR_QUOTE:TPEX:2026-05": 1,
+      "STOCK_QUOTE_MISSING:TPEX:2026-11": 11,
+      "MISSING_ANCHOR_QUOTE:TPEX:2026-06": 1,
+      "MISSING_ANCHOR_QUOTE:TPEX:2026-07": 4
+    },
+    "r9_repeated_patches": 0,
+    "calculation_seconds": 0.144
+  },
+  "recommend_list_n_day": {
+    "r8_replay_patches": 1612,
+    "r8_diagnostics": {
+      "IDENTITY_PENDING": 47,
+      "CALENDAR_GAP": 276,
+      "READY": 1612,
+      "QUOTE_PENDING": 450,
+      "DEFERRED": 0
+    },
+    "r9_replay_patches": 2318,
+    "r9_diagnostics": {
+      "CLOSED_PUBLICATION_RESOLVED": 262,
+      "OFFICIAL_MARKET_RESOLVED": 508,
+      "QUOTE_PENDING": 24,
+      "IDENTITY_PENDING": 47,
+      "READY": 2314,
+      "DEFERRED": 0
+    },
+    "r9_gap_breakdown": {
+      "CLOSED_REFERENCE_PRICE_UNCORROBORATED": 14,
+      "MISSING_OR_INVALID_RECOMMEND_DATE": 47,
+      "MISSING_ANCHOR_QUOTE:TPEX:2026-05": 1,
+      "STOCK_QUOTE_MISSING:TPEX:2026-05": 2,
+      "MISSING_ANCHOR_QUOTE:TPEX:2026-06": 1,
+      "MISSING_ANCHOR_QUOTE:TPEX:2026-07": 4,
+      "STOCK_QUOTE_MISSING:TPEX:2026-10": 2
+    },
+    "r9_repeated_patches": 0,
+    "calculation_seconds": 0.838
+  },
+  "recommend_list_hits": {
+    "r8_replay_patches": 1589,
+    "r8_diagnostics": {
+      "IDENTITY_PENDING": 47,
+      "CALENDAR_GAP": 276,
+      "READY": 1589,
+      "QUOTE_PENDING": 473,
+      "DEFERRED": 0
+    },
+    "r9_replay_patches": 2279,
+    "r9_diagnostics": {
+      "CLOSED_PUBLICATION_RESOLVED": 262,
+      "OFFICIAL_MARKET_RESOLVED": 508,
+      "QUOTE_PENDING": 59,
+      "IDENTITY_PENDING": 47,
+      "READY": 2279,
+      "DEFERRED": 0
+    },
+    "r9_gap_breakdown": {
+      "CLOSED_REFERENCE_PRICE_UNCORROBORATED": 14,
+      "MISSING_OR_INVALID_RECOMMEND_DATE": 47,
+      "STOCK_QUOTE_MISSING:TWSE:2026-09": 4,
+      "STOCK_QUOTE_MISSING:TPEX:2026-08": 12,
+      "STOCK_QUOTE_MISSING:TWSE:2026-08": 5,
+      "MISSING_ANCHOR_QUOTE:TPEX:2026-05": 1,
+      "STOCK_QUOTE_MISSING:TPEX:2026-07": 5,
+      "STOCK_QUOTE_MISSING:TWSE:2026-10": 3,
+      "STOCK_QUOTE_MISSING:TPEX:2026-05": 2,
+      "STOCK_QUOTE_MISSING:TPEX:2026-09": 4,
+      "STOCK_QUOTE_MISSING:TPEX:2026-10": 4,
+      "MISSING_ANCHOR_QUOTE:TPEX:2026-06": 1,
+      "MISSING_ANCHOR_QUOTE:TPEX:2026-07": 4
+    },
+    "r9_repeated_patches": 0,
+    "calculation_seconds": 0.291
+  },
+  "verified_period_samples": {
+    "1": 2318,
+    "3": 2311,
+    "5": 2308,
+    "10": 2306,
+    "20": 2288
+  },
+  "source_counts": {
+    "08": 2385,
+    "10": 2336,
+    "common": 2336,
+    "explicit_dates": 2338
+  },
+  "archive_latest": "2026-11-27"
+}

@@ -190,8 +190,19 @@ def _id_hash(rid): return hashlib.sha256(rid.encode()).hexdigest()
 def _merge(old, patch):
     # Preserve all canonical columns omitted by the editor/other modules.
     out=dict(old)
+    # R9 evidence is written only through the exact-ID archive engine's CAS.
+    # Legacy editors/08 quote updaters may submit an old projected dataframe;
+    # they must not erase or replace already confirmed proof fields.
+    from godpick_h250r9_evidence import EVIDENCE_COLUMNS
+    owned=set(EVIDENCE_COLUMNS)
+    if p._safe_str(old.get('H250R7_觸價證據')):
+        owned.update(('作戰追蹤狀態','作戰追蹤資料源','作戰命中摘要','作戰追蹤更新時間'))
+        for name in ('進場點命中','突破價命中','停損價觸發','第一壓力命中'):
+            owned.update((name,name+'日期'))
+        for lab in ('隔日','3日','5日','10日'):
+            owned.update((lab+'最高漲幅%',lab+'最低回撤%'))
     for k,v in patch.items():
-        if k in ('匯入自選','刪除'): continue
+        if k in owned or k in ('匯入自選','刪除'): continue
         if k in ('推薦日期','date','股票代號','code','推薦模式','mode') and not p._safe_str(v): continue
         if v is not None or k not in out: out[k]=v
     out['record_id']=old['record_id']

@@ -1,0 +1,9 @@
+Compile: 864 Python files, 0 errors
+H250-R6 telemetry stopped (business continues): RuntimeError
+H250-R6 telemetry stopped (business continues): ValueError
+----------------------------------------------------------------------
+Ran 128 tests in 1.348s
+
+OK (skipped=6)
+.........................................                                [100%]
+41 passed, 426 warnings in 7.64s

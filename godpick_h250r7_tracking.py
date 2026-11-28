@@ -300,7 +300,7 @@ def adjusted_delta(r,a,ident,provider):
     except (KeyError,TypeError,ValueError,ZeroDivisionError,OverflowError):return {},'PROVIDER_ENDPOINT_MISSING'
 
 
-def build_extended_plan(rows,a,kind,limit,cfg,fetch=None):
+def _build_extended_plan_r8(rows,a,kind,limit,cfg,fetch=None):
     """All-row local scan; optional bounded adjusted-source repair.
     One atomic save per task; no success from missing/corrupt provider data.
     """
@@ -349,9 +349,41 @@ def build_extended_plan(rows,a,kind,limit,cfg,fetch=None):
     return patches,dict(stats),dict(gaps)
 
 
+
+def build_extended_plan(rows,a,kind,limit,cfg,fetch=None):
+    # R9: preserve canonical ID/date/market; route only calculations to verified
+    # official anchor/market. Keep all R8 proof and commit protections.
+    from godpick_h250r9_evidence import resolve,MAP,encode
+    projected=[];maps={};extra=Counter();gaps=Counter();ids=Counter(text(r.get('record_id')) for r in rows)
+    for r in rows:
+        rid=text(r.get('record_id'))
+        if ids[rid]!=1 or not identity(r,a.cal.now):projected.append(r);continue
+        effective,mapping,state=resolve(r,a)
+        if state in ('AMBIGUOUS_OFFICIAL_MARKET','CLOSED_REFERENCE_PRICE_UNCORROBORATED','CLOSED_ANCHOR_QUOTE_PENDING','NOT_DUE'):
+            extra['NOT_DUE' if state=='NOT_DUE' else 'QUOTE_PENDING']+=1
+            if state!='NOT_DUE':gaps[state]+=1
+            continue
+        projected.append(effective)
+        if mapping:
+            maps[rid]=mapping
+            if mapping['publication_closed']:extra['CLOSED_PUBLICATION_RESOLVED']+=1
+            if mapping['original'][1]!=mapping['effective'][1]:extra['OFFICIAL_MARKET_RESOLVED']+=1
+    patches,stats,g=_build_extended_plan_r8(projected,a,kind,limit,cfg,fetch)
+    for rid,d in patches.items():
+        if rid in maps:d[MAP]=encode(maps[rid])
+    # If a previously mapped identity becomes canonical, a new verified patch
+    # must explicitly retire the obsolete mapping. No authority identity changes.
+    for r in rows:
+        rid=text(r.get('record_id'))
+        if rid in patches and rid not in maps and text(r.get(MAP)):patches[rid][MAP]=''
+    extra.update(stats);gaps.update(g)
+    return patches,dict(extra),dict(gaps)
+
+
 def exact_commit(rows,patch,sig,h,p):
     if not patch:return None
-    allowed={RAW_NOW,RAW_DATE,RAW_PRICE,RAW_PROOF,NPROOF,*N_COLS,HIT_PROOF,ADJ_VALUE,ADJ_PROOF,'作戰追蹤狀態','作戰追蹤資料源','作戰命中摘要','作戰追蹤更新時間'}
+    from godpick_h250r9_evidence import MAP
+    allowed={MAP,RAW_NOW,RAW_DATE,RAW_PRICE,RAW_PROOF,NPROOF,*N_COLS,HIT_PROOF,ADJ_VALUE,ADJ_PROOF,'作戰追蹤狀態','作戰追蹤資料源','作戰命中摘要','作戰追蹤更新時間'}
     for name in ('進場點命中','突破價命中','停損價觸發','第一壓力命中'):
         allowed.update((name,name+'日期'))
     for lab in ('隔日','3日','5日','10日'):
@@ -364,7 +396,7 @@ def exact_commit(rows,patch,sig,h,p):
         by={text(r.get('record_id')):r for r in base}
         if len(by)!=len(base) or not set(patch)<=set(by):raise ValueError('H241_ID_CHANGED')
         final=[dict(r,**patch[text(r.get('record_id'))]) if text(r.get('record_id')) in patch else r for r in base]
-        return h._commit(base,head,sha,final,set(),'H250R8 history-only verified performance metrics')
+        return h._commit(base,head,sha,final,set(),'H250R9 history-only verified performance metrics')
 
 
 def task(kind,cfg=None,*,root=ROOT):
@@ -376,7 +408,7 @@ def task(kind,cfg=None,*,root=ROOT):
         import godpick_persistence_service as p
         rows,msgs,_=h.ensure()
         if p.records_authority_verification_h240().get('status')!='VERIFIED' or not isinstance(rows,list) or not rows:
-            return _report(False,'R8 '+title+'：08歷史權威未核實或無歷史；禁止回寫',details={'outcome':'AUTHORITY_PENDING'},started=t)
+            return _report(False,'R9 '+title+'：08歷史權威未核實或無歷史；禁止回寫',details={'outcome':'AUTHORITY_PENDING'},started=t)
         rows=copy.deepcopy(rows);sig=p.records_authority_signature()
         a=load_archive(root)
         limit=archive_limit(cfg,kind)
@@ -388,16 +420,19 @@ def task(kind,cfg=None,*,root=ROOT):
         if kind==TASKS[0]:stats['ADJUSTED_NEW_CONFIRMED']=sum(ADJ_PROOF in d for d in patches.values()) if ok else 0
         outcome=('PARTIAL_SAVED' if pending else 'VERIFIED_SAVED') if ok and patches else 'NO_NEW_DUE' if ok and not pending else 'EVIDENCE_PENDING' if ok else 'REMOTE_PENDING'
         details={'outcome':outcome,'authority_count':len(rows),'latest_official_day':a.latest,'confirmed':confirmed,'diagnostics':stats,'gap_breakdown':gaps,'archive_limit':limit,'sync_messages':report.messages() if report else []}
-        msg=f'R8 {title}｜08權威 {len(rows)} 筆／官方至 {a.latest}／永久確認 {confirmed} 筆／'+('、'.join(f'{k} {v}' for k,v in stats.items()) or '無新資料')
+        msg=f'R9 {title}｜08權威 {len(rows)} 筆／官方至 {a.latest}／永久確認 {confirmed} 筆／'+('、'.join(f'{k} {v}' for k,v in stats.items()) or '無新資料')
         if not ok:msg+='｜遠端未確認，不計成功'
         elif not patches and not pending:msg+='｜無新到期工作，正常略過'
         elif pending:msg+='｜剩餘可寫 '+str(stats.get('DEFERRED',0))+' 筆；證據缺口仍保留，不冒充全數完成'
         if gaps:msg+='｜缺口明細：'+ '、'.join(f'{k} {v}' for k,v in sorted(gaps.items(),key=lambda kv:(-kv[1],kv[0]))[:4])
         result=_report(ok,msg,details=details,changed_files=['godpick_records.json'] if confirmed else [],started=t,warning=bool(ok and pending))
-        result['retry_pending']=bool(ok and stats.get('DEFERRED',0))
+        # Continue only when a successful adjusted repair made measurable progress
+        # and more symbols remain. Source failures alone do not trigger a loop.
+        result['retry_pending']=bool(ok and (stats.get('DEFERRED',0) or
+            (kind==TASKS[0] and stats.get('ADJUSTED_NEW_CONFIRMED',0)>0 and stats.get('ADJUSTED_PROVIDER_DEFERRED',0)>0)))
         return result
     except Exception as exc:
-        return _report(False,'R8 '+title+'：'+type(exc).__name__+'｜'+str(exc)[:220]+'；未確認不算成功',started=t)
+        return _report(False,'R9 '+title+'：'+type(exc).__name__+'｜'+str(exc)[:220]+'；未確認不算成功',started=t)
 
 
 def install_handlers(module):

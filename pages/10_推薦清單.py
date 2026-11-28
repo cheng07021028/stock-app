@@ -1952,7 +1952,7 @@ def _recommend_sources_signature_v171() -> str:
             parts.append(f"{name}:{stat.st_mtime_ns}:{stat.st_size}")
         except Exception:
             parts.append(f"{name}:missing")
-    return "|".join(parts)
+    return "R9|"+"|".join(parts)
 
 
 def _load_records_cached(force: bool = False) -> pd.DataFrame:
@@ -2005,7 +2005,7 @@ def _load_records_cached(force: bool = False) -> pd.DataFrame:
                     _safe_str(row.get("正式推薦分區")),
                 ])
             merged["_merge_key"] = merged.apply(_merge_key, axis=1)
-            merged = merged.drop_duplicates(subset=["_merge_key"], keep="last").drop(columns=["_merge_key"], errors="ignore")
+            merged = merged.drop_duplicates(subset=["_merge_key"], keep="first").drop(columns=["_merge_key"], errors="ignore")
         else:
             merged = pd.DataFrame(columns=GODPICK_RECORD_COLUMNS)
         st.session_state[_k("records_df")] = _ensure_record_columns(merged).copy()
@@ -2023,7 +2023,8 @@ def _filter_df(df: pd.DataFrame, start_date: date, end_date: date, mode: str, st
     if df is None or df.empty:
         return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS)
     work = df.copy()
-    work["推薦日期_dt"] = pd.to_datetime(work["推薦日期"], errors="coerce").dt.date
+    from godpick_h250r9_evidence import publication_dates
+    work["推薦日期_dt"] = publication_dates(work["推薦日期"]).dt.date
     if start_date:
         work = work[work["推薦日期_dt"] >= start_date]
     if end_date:
@@ -2638,6 +2639,8 @@ def _to_excel_bytes(df: pd.DataFrame) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         _ensure_record_columns(df).to_excel(writer, sheet_name="推薦清單", index=False)
+        from godpick_h250r9_evidence import summary_frame
+        summary_frame(df).to_excel(writer, sheet_name="官方原價核實統計", index=False)
     return output.getvalue()
 
 
@@ -2659,7 +2662,12 @@ def _render_v50_performance_tracker(df: pd.DataFrame, title: str = "V98 推薦�
     x = df.copy()
     x = x.loc[:, ~x.columns.duplicated()].copy()
     perf_base_cols = ["推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%"]
-    current_perf_cols = ["目前損益幅%", "損益幅%", "即時追蹤報酬%", "目前追蹤報酬%", "實際報酬%", "平均目前績效%"]
+    from godpick_h250r9_evidence import verified_frame
+    _verified = verified_frame(x)
+    for _c in perf_base_cols:
+        x[_c] = _verified[_c]
+
+    current_perf_cols = ["目前損益幅%", "損益幅%", "即時追蹤報酬%", "目前追蹤報酬%", "平均目前績效%"]
 
     def _num_col(col: str) -> pd.Series:
         if col not in x.columns:
@@ -2733,7 +2741,7 @@ def _render_v50_performance_tracker(df: pd.DataFrame, title: str = "V98 推薦�
                 kpi_payload.append({
                     "label": f"{col.replace('%','')} 勝率",
                     "value": _fmt_pct(wr),
-                    "delta": f"正式樣本 {n}｜平均 {_fmt_pct(avg, 2)}" if n > 0 else "正式樣本 0｜尚未到期或尚未回補",
+                    "delta": f"原價核實樣本 {n}｜平均 {_fmt_pct(avg, 2)}" if n > 0 else "原價核實樣本 0｜尚未到期或證據不足",
                     "delta_class": "pro-kpi-delta-flat",
                 })
 
@@ -2783,7 +2791,7 @@ def _render_v50_performance_tracker(df: pd.DataFrame, title: str = "V98 推薦�
         elif period_valid_n == 0 and current_valid_n > 0:
             st.info("V99：目前只有即時損益可用，尚無正式 1/3/5/10/20 日到期績效；請按上方或側邊「正式N日績效回補」產生正式績效。")
         else:
-            st.caption("V98：正式 N 日績效優先；尚未到期時才使用即時損益作暫行統計，不把空白績效偽裝成 0%。")
+            st.caption("R9：N日勝率只採已保存官方原價證據；即時與混合暫行統計仍為舊參考值，不是含息或實際成交績效。")
 
         def _row_effective_perf(g: pd.DataFrame) -> pd.Series:
             # 每列優先取最長可用 N 日績效，再退回即時損益。
@@ -2911,84 +2919,17 @@ def main():
         if reload_btn:
             _load_records_cached(force=True)
         df = _load_records_cached(force=False)
-        batch_n = st.number_input("每次更新筆數", min_value=5, max_value=200, value=80, step=5, key=_k("perf_update_batch_size"))
-        batch_stock_n = st.number_input("單批股票上限", min_value=5, max_value=60, value=30, step=5, key=_k("perf_update_stock_limit_v77"))
+        from godpick_h250r9_evidence import dispatch_one
+        st.caption("R9：手動追蹤由中央 Worker 單項執行，沿用已保存排程工作選項；不重跑07、不改寫本輪快照。")
         if st.button("🧮 更新推薦後績效", use_container_width=True):
-            with st.spinner("V77：快速防卡更新推薦後績效中，只更新缺資料 / 過期資料..."):
-                summary = update_recommendation_perf_fast_v77(
-                    json_files=["godpick_recommend_list.json", "godpick_records.json", "godpick_latest_recommendations.json"],
-                    max_records=int(batch_n),
-                    batch_limit=int(batch_stock_n),
-                    max_workers=12,
-                    stale_minutes=60,
-                )
-                try:
-                    _load_records_cached(force=True)
-                    df = _load_records_cached(force=False)
-                    st.session_state[_k("records_df")] = df
-                except Exception as _v77_reload_e:
-                    st.warning(f"V77 已更新 JSON，但重新載入畫面資料失敗：{_v77_reload_e}")
-
-            st.success(
-                f"V77 已完成快速績效更新：候選 {summary.get('candidates', 0)} 筆，"
-                f"成功 {summary.get('success', 0)} 筆，失敗 {summary.get('fail', 0)} 筆；"
-                f"更新檔案：{', '.join(summary.get('updated_files', [])) or '無'}。"
-            )
-            if summary.get("messages"):
-                st.info("；".join(summary.get("messages", [])))
-            if summary.get("fail", 0):
-                st.warning("部分股票線上抓取失敗，V77 已略過並保留原資料，不會拖住整批。")
-            st.rerun()
-
+            dispatch_one(st, "recommend_list_performance")
         if st.button("📅 正式N日績效回補", use_container_width=True):
-            with st.spinner("V98：正式 N 日績效回補中，只補已到期且缺欄位的資料..."):
-                formal_df, formal_summary = _update_formal_n_day_metrics_v98(df, max_rows=int(batch_n), show_progress=True)
-                ok, msgs = _sync_records(formal_df)
-                st.session_state[_k("records_df")] = formal_df
-                _load_records_cached(force=True)
-            if ok:
-                st.success(
-                    f"V98 正式N日績效回補完成：待回補 {formal_summary.get('candidates', 0)} 筆，"
-                    f"本次處理 {formal_summary.get('processed', 0)} 筆，成功 {formal_summary.get('success', 0)} 筆，"
-                    f"不足/略過 {formal_summary.get('fail', 0)} 筆，剩餘 {formal_summary.get('remaining', 0)} 筆。"
-                )
-            else:
-                st.warning(
-                    f"V98 已在畫面資料中完成回補，但 GitHub/Firestore 寫回未成功；"
-                    f"本次處理 {formal_summary.get('processed', 0)} 筆。"
-                )
-            if msgs:
-                st.info("；".join(msgs))
-            if formal_summary.get("time_guard"):
-                st.warning("本次觸發時間防呆，請再按一次『正式N日績效回補』繼續補剩餘資料。")
-            st.rerun()
-
+            dispatch_one(st, "recommend_list_n_day")
         if st.button("🎯 更新隔日命中追蹤", use_container_width=True):
-            with st.spinner("V101：更新進場點 / 突破價 / 停損價 / 壓力價命中追蹤中..."):
-                hit_df, hit_summary = _update_night_hit_tracking_v101(
-                    df,
-                    max_rows=int(batch_stock_n),
-                    show_progress=True,
-                )
-                if int(hit_summary.get("success", 0) or 0) > 0:
-                    ok, msgs = _sync_records(hit_df)
-                    st.session_state[_k("records_df")] = hit_df
-                    _load_records_cached(force=True)
-                else:
-                    ok, msgs = False, ["H188沒有任何已核實的隔日命中結果，跳過遠端同步，不修改原始紀錄"]
-            if ok:
-                st.success(
-                    f"V101 隔日命中追蹤完成：處理 {hit_summary.get('processed', 0)} 筆，"
-                    f"成功 {hit_summary.get('success', 0)} 筆，失敗/不足 {hit_summary.get('fail', 0)} 筆。"
-                )
-            elif int(hit_summary.get("success", 0) or 0) == 0:
-                st.warning(f"H188隔日命中尚無可驗證更新，未寫入歷史；缺推薦日期 {hit_summary.get('missing_recommendation_date',0)} 筆，請先由原始推薦快照補證。")
-            else:
-                st.warning("V101 已完成畫面資料更新，但寫回 GitHub/Firestore 未完全成功。")
-            all_msgs = (hit_summary.get("messages") or []) + (msgs or [])
-            if all_msgs:
-                st.info("；".join([str(m) for m in all_msgs[:8]]))
-            st.rerun()
+            dispatch_one(st, "recommend_list_hits")
+        _r9_receipt = st.session_state.get('_r9_page10_dispatch', {})
+        if str(_r9_receipt.get('run_id','')).isdigit():
+            st.caption("最近單項派送 Run " + str(_r9_receipt['run_id']) + "；完成狀態請至17查核。")
         load_msg = _safe_str(st.session_state.get(_k("load_msg"), ""))
         if load_msg:
             st.caption(load_msg)
@@ -3003,7 +2944,8 @@ def main():
 
     mode_options = ["全部"] + sorted([x for x in df["推薦模式"].dropna().astype(str).unique().tolist() if x])
     status_options = ["全部"] + sorted([x for x in df["目前狀態"].dropna().astype(str).unique().tolist() if x])
-    rec_dates = pd.to_datetime(df["推薦日期"], errors="coerce").dropna()
+    from godpick_h250r9_evidence import publication_dates, render_summary, verified_frame
+    rec_dates = publication_dates(df["推薦日期"]).dropna()
     min_d = rec_dates.min().date() if not rec_dates.empty else (date.today() - timedelta(days=30))
     max_d = rec_dates.max().date() if not rec_dates.empty else date.today()
 
@@ -3031,13 +2973,13 @@ def main():
     with k4:
         st.metric("達停損筆數", int(filtered_df["是否達停損"].fillna(False).sum()) if not filtered_df.empty else 0)
     with k5:
-        avg20 = pd.to_numeric(filtered_df.get("推薦後20日%"), errors="coerce").dropna().mean() if not filtered_df.empty and "推薦後20日%" in filtered_df.columns else None
+        avg20 = verified_frame(filtered_df)["推薦後20日%"].mean() if not filtered_df.empty else None
         if avg20 is None or pd.isna(avg20):
             fb_col = next((c for c in ["目前損益幅%", "損益幅%", "即時追蹤報酬%", "目前追蹤報酬%"] if c in filtered_df.columns and pd.to_numeric(filtered_df[c], errors="coerce").notna().sum() > 0), None)
             avg_fb = pd.to_numeric(filtered_df.get(fb_col), errors="coerce").dropna().mean() if fb_col else None
             st.metric("平均目前績效%", format_number(avg_fb, 2) if avg_fb is not None and pd.notna(avg_fb) else "—")
         else:
-            st.metric("平均推薦後20日%", format_number(avg20, 2))
+            st.metric("官方原價平均20日%", format_number(avg20, 2))
 
     _render_night_battle_tracker(filtered_df)
 
@@ -3049,67 +2991,32 @@ def main():
 
     _render_v50_performance_tracker(filtered_df, "V50 推薦後績效追蹤總控｜10_推薦清單")
 
-    # >>> V99_MAIN_FORMAL_BACKFILL_BUTTON
-    # v99 修正：v98 只把正式 N 日回補放在 sidebar，使用者容易看不到，
-    # 導致畫面一直維持「正式樣本 0」。此區直接放在績效總控下方，
-    # 且只處理既有推薦清單，不重跑 7_股神推薦、不重新推薦。
-    try:
-        formal_candidates_v99 = sum(1 for _, _r in df.iterrows() if _row_needs_formal_n_day_update_v98(dict(_r)))
-    except Exception:
-        formal_candidates_v99 = 0
-    if formal_candidates_v99 > 0:
-        st.warning(
-            f"偵測到 {formal_candidates_v99} 筆推薦紀錄尚未產生正式 N 日績效。"
-            "請按下方按鈕回補，回補後 1/3/5/10/20 日勝率才會從暫行績效改成正式績效。"
-        )
-    else:
-        st.info("目前沒有待回補的正式 N 日績效候選；若仍顯示正式樣本 0，代表篩選區間尚未到期或歷史K線來源不足。")
-
-    b1, b2, b3 = st.columns([1.2, 1.2, 2])
+    # H250-R9: distinguish missing proof from not-yet-mature periods.
+    from godpick_h250r9_evidence import dispatch_one
+    _r9_history = df[df["資料來源"].astype(str)=="股神推薦紀錄"] if "資料來源" in df else df
+    _r9_proof = verified_frame(_r9_history)
+    _r9_undated = _r9_history[publication_dates(_r9_history["推薦日期"]).isna()]
+    _r9_no_proof = int((~_r9_proof.notna().any(axis=1)).sum())
+    st.caption(f"R9：歷史權威視圖 {len(_r9_history)} 筆；尚無任何N日證據 {_r9_no_proof} 筆（含未到期與證據不足）；缺原始日期 {len(_r9_undated)} 筆。")
+    with st.expander("R9｜官方原價績效與原始日期隔離診斷", expanded=False):
+        render_summary(st, _r9_history)
+        if not _r9_undated.empty:
+            st.dataframe(_r9_undated[[c for c in ["record_id","股票代號","股票名稱","市場別","推薦日期","推薦模式"] if c in _r9_undated]], hide_index=True,use_container_width=True)
+            st.caption("無原始日期資料保留，不計入到期勝率；不由更新時間推算推薦日。")
+        if st.button("準備完整歷史匯出（含無日期）",key=_k("r9_full_export")):
+            st.session_state[_k("r9_full_export_bytes")] = _to_excel_bytes(_r9_history)
+        if st.session_state.get(_k("r9_full_export_bytes")):
+            st.download_button("下載完整歷史證據 Excel",data=st.session_state[_k("r9_full_export_bytes")],file_name="R9_history.xlsx",mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",key=_k("r9_full_download"))
+    b1,b2,b3=st.columns([1.2,1.2,2])
     with b1:
-        run_formal_backfill_main_v99 = st.button(
-            "📅 正式N日績效回補",
-            key=_k("formal_backfill_main_v99"),
-            use_container_width=True,
-            type="primary",
-            disabled=(formal_candidates_v99 <= 0),
-        )
+        if st.button("📅 正式N日績效回補",key=_k("formal_backfill_main_v99"),use_container_width=True,type="primary"):
+            dispatch_one(st,"recommend_list_n_day")
     with b2:
-        run_formal_backfill_force_v99 = st.button(
-            "🔁 強制重新檢查正式績效",
-            key=_k("formal_backfill_force_main_v99"),
-            use_container_width=True,
-        )
+        if st.button("🔁 強制重新檢查正式績效",key=_k("formal_backfill_force_main_v99"),use_container_width=True):
+            dispatch_one(st,"recommend_list_n_day")
     with b3:
-        st.caption("v99：此按鈕只回補 10_推薦清單既有資料並寫回 GitHub/Firestore，不會重跑股神推薦。")
+        st.caption("中央單項驗證：重算可核實期間，不重跑股神推薦；派送成功不等於永久保存成功。")
 
-    if run_formal_backfill_main_v99 or run_formal_backfill_force_v99:
-        with st.spinner("V99：正式 N 日績效回補中，只補已到期且缺欄位的資料..."):
-            formal_df, formal_summary = _update_formal_n_day_metrics_v98(
-                df,
-                max_rows=int(st.session_state.get(_k("perf_update_batch_size"), 80)),
-                show_progress=True,
-            )
-            ok, msgs = _sync_records(formal_df)
-            st.session_state[_k("records_df")] = formal_df
-            _load_records_cached(force=True)
-        if ok:
-            st.success(
-                f"V99 正式N日績效回補完成：待回補 {formal_summary.get('candidates', 0)} 筆，"
-                f"本次處理 {formal_summary.get('processed', 0)} 筆，成功 {formal_summary.get('success', 0)} 筆，"
-                f"不足/略過 {formal_summary.get('fail', 0)} 筆，剩餘 {formal_summary.get('remaining', 0)} 筆。"
-            )
-        else:
-            st.warning(
-                f"V99 已在畫面資料中完成回補，但 GitHub/Firestore 寫回未成功；"
-                f"本次處理 {formal_summary.get('processed', 0)} 筆。"
-            )
-        if msgs:
-            st.info("；".join(msgs))
-        if formal_summary.get("time_guard"):
-            st.warning("本次觸發時間防呆，請再按一次『正式N日績效回補』繼續補剩餘資料。")
-        st.rerun()
-    # <<< V99_MAIN_FORMAL_BACKFILL_BUTTON
 
     render_pro_section("推薦清單明細")
     # v15 欄位統一：推薦清單明細使用與 7/8/12 一致的欄位順序。
@@ -3118,6 +3025,7 @@ def main():
         show_cols = filter_effective_columns(show_cols)
     if not show_cols:
         show_cols = list(filtered_df.columns)
+    show_cols += [c for c in _R9_VISIBLE if c in filtered_df.columns and c not in show_cols]
     existing_cols = []
     for c in show_cols:
         if c in filtered_df.columns and c not in existing_cols:
@@ -3210,6 +3118,12 @@ try:
 except Exception:
     pass
 
+
+# H250-R9: keep official evidence available in the same history and exports.
+from godpick_h250r9_evidence import EVIDENCE_COLUMNS as _R9_COLUMNS, VISIBLE_COLUMNS as _R9_VISIBLE
+for _c in _R9_COLUMNS:
+    if _c not in GODPICK_RECORD_COLUMNS:
+        GODPICK_RECORD_COLUMNS.append(_c)
 
 if __name__ == "__main__":
     main()
