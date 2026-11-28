@@ -1,4 +1,5 @@
 name: GodPick V191 Central Auto Scheduler
+run-name: "Central | ${{ inputs.manual_job || 'due_only' }} | ${{ inputs.wakeup_source || github.event_name }}"
 
 on:
   # V191-H33: keep BOTH wake paths.
@@ -15,7 +16,7 @@ on:
         required: false
         default: "manual_dispatch"
       manual_job:
-        description: "Optional single central job to force-run (H71 manual authority)"
+        description: "Manual mode: force_enabled_jobs (saved enabled jobs), full_refresh_and_recommend, market_refresh_and_recommend, or single job; blank = due only"
         required: false
         default: ""
 
@@ -25,6 +26,7 @@ permissions:
 concurrency:
   group: godpick-v191-central-auto-scheduler
   cancel-in-progress: false
+  queue: max # H244: preserve pending manual and routine requests, still serialize writes
 
 jobs:
   scheduler:
@@ -134,7 +136,7 @@ jobs:
           {
             echo "## V191-H33 Central Scheduler Wake"
             echo "- event: ${{ github.event_name }}"
-            echo "- wake source: ${{ github.event.inputs.wakeup_source || github.event_name }}"
+            echo "- wake source: $GODPICK_WAKEUP_SOURCE"
             echo "- run id: ${{ github.run_id }}"
             echo "- checkout: ${{ steps.checkout.outcome }}"
             echo "- python: ${{ steps.python.outcome }}"
