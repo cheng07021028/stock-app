@@ -13,6 +13,8 @@ MAP='H250R9_行情身分證據'
 MAP_VERSION='H250R9_OFFICIAL_ANCHOR_V1'
 EVIDENCE_COLUMNS=[MAP,'官方原價目前報酬%','官方原價行情日期','官方原價收盤價','H250R7_原價即時證據',
                   *['官方原價'+c for c in COLS],'H250R7_N日原價證據','H250R7_觸價證據','還原候選目前報酬%','H250R8_還原候選證據']
+from godpick_h250r10_recovery import FIELDS as _R10_FIELDS
+EVIDENCE_COLUMNS.extend(_R10_FIELDS)
 VISIBLE_COLUMNS=[c for c in EVIDENCE_COLUMNS if not c.startswith('H250')]
 
 def decode(v):
@@ -107,6 +109,15 @@ def summary_frame(df):
 def render_summary(st,df):
     st.caption('H250-R9｜官方原價 N 日證據統計（非含息／非成交；以已保存身分及公式證據核對，非即時重抓）。舊績效保留供比較，不作正式樣本。')
     st.dataframe(summary_frame(df),hide_index=True,use_container_width=True)
+    from godpick_h250r10_recovery import diagnostics_table, queue_from_rows, diagnostic_details
+    st.caption("H250-R10｜歷史缺口診斷（已保存狀態，非即時全數核實；不影響原始歷史資料）。")
+    st.dataframe(diagnostics_table(df),hide_index=True,use_container_width=True)
+    with st.expander("歷史身分與行情待證明細",expanded=False):
+        detail=diagnostic_details(df)
+        st.dataframe(detail,hide_index=True,use_container_width=True)
+    queue=queue_from_rows(df.to_dict("records"))
+    if queue:
+        st.download_button("下載官方行情精確補證清單",pd.DataFrame(queue,columns=["market","day","code","reason"]).to_csv(index=False,encoding="utf-8-sig").encode("utf-8-sig"),file_name="H250R10_GapQueue.csv",mime="text/csv",key="h250r10_gap_queue")
 
 def dispatch_one(st,kind):
     """Only send one job to the existing serialized Worker; no local write."""

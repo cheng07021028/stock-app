@@ -58,8 +58,8 @@ def safe_tracking_message(job,message):
     if job not in ('recommend_list_performance','recommend_list_n_day','recommend_list_hits'):
         return ''
     text=str(message or '')
-    if not re.match(r'^R[789] (?:推薦後績效|正式N日績效|隔日命中追蹤)｜',text):return ''
-    labels={'IDENTITY_PENDING':'原始身分待證','CALENDAR_GAP':'交易日曆缺口','QUOTE_PENDING':'行情待證','ADJUSTED_PENDING':'還原價待證','DEFERRED':'待分批','CLOSED_PUBLICATION_RESOLVED':'休市推薦已對應','OFFICIAL_MARKET_RESOLVED':'市場已對應','ADJUSTED_NEW_CONFIRMED':'新增還原確認'}
+    if not re.match(r'^R(?:[789]|10) (?:推薦後績效|正式N日績效|隔日命中追蹤)｜',text):return ''
+    labels={'IDENTITY_PENDING':'原始身分待證','CALENDAR_GAP':'交易日曆缺口','QUOTE_PENDING':'行情待證','ADJUSTED_PENDING':'還原價待證','DEFERRED':'待分批','CLOSED_PUBLICATION_RESOLVED':'休市推薦已對應','OFFICIAL_MARKET_RESOLVED':'市場已對應','ADJUSTED_NEW_CONFIRMED':'新增還原確認','ADJUSTED_CORROBORATED':'還原已核對','ADJUSTED_PROVIDER_DEFERRED':'還原待查詢','ADJUSTED_COOLDOWN':'還原冷卻','ADJUSTED_ATTEMPT_FAILED':'還原查詢未證','DIAGNOSTICS_CONFIRMED':'診斷已保存','WORK_VERIFIED':'執行已確認','ADJUSTED_RATE_LIMITED':'來源限流'}
     result=[]
     for pat,label in [(r'08權威 (\d{1,7}) 筆','歷史'),(r'永久確認 (\d{1,7}) 筆','永久確認')]:
         m=re.search(pat,text)
@@ -150,11 +150,13 @@ def model(snap,status,preview,labels):
                 batch=b;plan=b['planned_jobs'];origin='本輪遠端終端回執';rows={r['job']:{**rows.get(r['job'],{}),**r} for r in results};break
     counts={k:sum(v.get('status')==k for v in rows.values()) for k in RESULTS}; finished=sum(counts.values())
     all_ok=bool(batch and state=='completed' and snap.get('conclusion')=='success' and obj(batch.get('validation')).get('all_success') is True and counts['SUCCESS']==len(plan) and len(plan)>0 and obj(batch.get('summary')).get('executed')==len(plan) and obj(batch.get('summary')).get('success')==len(plan) and obj(batch.get('summary')).get('in_progress') is False and all(obj(batch.get('summary')).get(k)==0 for k in ('warning','failed','blocked')))
+    quality_pending=bool(batch and state=='completed' and snap.get('conclusion') in ('failure','success') and finished==len(plan)>0 and counts['WARNING']>0 and counts['FAILED']==counts['BLOCKED']==0 and obj(batch.get('summary')).get('in_progress') is False and obj(batch.get('summary')).get('executed')==len(plan) and all(obj(batch.get('summary')).get(k.lower())==v for k,v in counts.items()))
     if state in ACTIVE-{'in_progress'}: title='排隊中：等待中央 Worker，不代表已執行'
     elif state=='in_progress':title='執行中：'+(snap.get('phase') or ('逐項回報中' if rows else '等待本輪進度'))
+    elif quality_pending:title='本輪工作皆已返回，品質證據仍待補；嚴格批次驗收未通過（非全部執行失敗）'
     elif state=='completed':title='全部工作已通過遠端驗收' if all_ok else ('批次已結束，存在警示／失敗或未取得完整遠端驗收' if snap.get('conclusion')=='success' else '批次未通過：'+str(snap.get('conclusion') or 'unknown'))
     else:title='尚無可確認的本輪狀態'
-    return {'title':title,'plan':plan,'origin':origin,'rows':rows,'counts':counts,'finished':finished,'all_ok':all_ok,'state':state,'batch':batch,'updated':p.get('updated_at') if origin=='本輪遠端進度' else obj(batch).get('finished_at')}
+    return {'title':title,'plan':plan,'origin':origin,'rows':rows,'counts':counts,'finished':finished,'all_ok':all_ok,'quality_pending':quality_pending,'state':state,'batch':batch,'updated':p.get('updated_at') if origin=='本輪遠端進度' else obj(batch).get('finished_at')}
 
 def credentials(st):
     return (str(st.secrets.get('GITHUB_TOKEN','') or '').strip(),str(st.secrets.get('GITHUB_REPO_OWNER','cheng07021028') or '').strip(),str(st.secrets.get('GITHUB_REPO_NAME','stock-app') or '').strip())

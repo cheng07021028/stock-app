@@ -1,0 +1,96 @@
+{
+  "recommend_list_performance": {
+    "stats": {
+      "CLOSED_PUBLICATION_RESOLVED": 262,
+      "OFFICIAL_MARKET_RESOLVED": 508,
+      "QUOTE_PENDING": 31,
+      "IDENTITY_PENDING": 47,
+      "READY": 2307,
+      "DEFERRED": 0,
+      "ADJUSTED_NO_PROOF": 2307,
+      "ADJUSTED_SYMBOLS_ATTEMPTED": 0,
+      "ADJUSTED_PROVIDER_DEFERRED": 2307,
+      "ADJUSTED_PENDING": 2307,
+      "METRICS_PLANNED": 2307,
+      "DIAGNOSTICS_PLANNED": 2385
+    },
+    "gaps": {
+      "CLOSED_REFERENCE_PRICE_UNCORROBORATED": 14,
+      "MISSING_OR_INVALID_RECOMMEND_DATE": 47,
+      "MISSING_ANCHOR_QUOTE:TPEX:2026-05": 1,
+      "STOCK_QUOTE_MISSING:TPEX:2026-11": 11,
+      "MISSING_ANCHOR_QUOTE:TPEX:2026-06": 1,
+      "MISSING_ANCHOR_QUOTE:TPEX:2026-07": 4
+    },
+    "planned_total": 2385,
+    "repeat_patches": 0,
+    "calculation_seconds": 0.337
+  },
+  "recommend_list_n_day": {
+    "stats": {
+      "CLOSED_PUBLICATION_RESOLVED": 262,
+      "OFFICIAL_MARKET_RESOLVED": 508,
+      "QUOTE_PENDING": 24,
+      "IDENTITY_PENDING": 47,
+      "READY": 2314,
+      "DEFERRED": 0,
+      "ADJUSTED_SYMBOLS_ATTEMPTED": 0,
+      "METRICS_PLANNED": 2318,
+      "DIAGNOSTICS_PLANNED": 2385
+    },
+    "gaps": {
+      "CLOSED_REFERENCE_PRICE_UNCORROBORATED": 14,
+      "MISSING_OR_INVALID_RECOMMEND_DATE": 47,
+      "MISSING_ANCHOR_QUOTE:TPEX:2026-05": 1,
+      "STOCK_QUOTE_MISSING:TPEX:2026-05": 2,
+      "MISSING_ANCHOR_QUOTE:TPEX:2026-06": 1,
+      "MISSING_ANCHOR_QUOTE:TPEX:2026-07": 4,
+      "STOCK_QUOTE_MISSING:TPEX:2026-10": 2
+    },
+    "planned_total": 2385,
+    "repeat_patches": 0,
+    "calculation_seconds": 1.858
+  },
+  "recommend_list_hits": {
+    "stats": {
+      "CLOSED_PUBLICATION_RESOLVED": 262,
+      "OFFICIAL_MARKET_RESOLVED": 508,
+      "QUOTE_PENDING": 59,
+      "IDENTITY_PENDING": 47,
+      "READY": 2279,
+      "DEFERRED": 0,
+      "ADJUSTED_SYMBOLS_ATTEMPTED": 0,
+      "METRICS_PLANNED": 2279,
+      "DIAGNOSTICS_PLANNED": 2385
+    },
+    "gaps": {
+      "CLOSED_REFERENCE_PRICE_UNCORROBORATED": 14,
+      "MISSING_OR_INVALID_RECOMMEND_DATE": 47,
+      "STOCK_QUOTE_MISSING:TWSE:2026-09": 4,
+      "STOCK_QUOTE_MISSING:TPEX:2026-08": 12,
+      "STOCK_QUOTE_MISSING:TWSE:2026-08": 5,
+      "MISSING_ANCHOR_QUOTE:TPEX:2026-05": 1,
+      "STOCK_QUOTE_MISSING:TPEX:2026-07": 5,
+      "STOCK_QUOTE_MISSING:TWSE:2026-10": 3,
+      "STOCK_QUOTE_MISSING:TPEX:2026-05": 2,
+      "STOCK_QUOTE_MISSING:TPEX:2026-09": 4,
+      "STOCK_QUOTE_MISSING:TPEX:2026-10": 4,
+      "MISSING_ANCHOR_QUOTE:TPEX:2026-06": 1,
+      "MISSING_ANCHOR_QUOTE:TPEX:2026-07": 4
+    },
+    "planned_total": 2385,
+    "repeat_patches": 0,
+    "calculation_seconds": 0.653
+  },
+  "unique_stock_day_targets": 716,
+  "unique_market_day_targets": 176,
+  "records": 2385,
+  "archive_latest": "2026-11-27",
+  "verified_period_samples": {
+    "1": 2318,
+    "3": 2311,
+    "5": 2308,
+    "10": 2306,
+    "20": 2288
+  }
+}

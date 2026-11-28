@@ -1,0 +1,42 @@
+{
+  "version": "V191-H250-R10",
+  "source_zip_sha256": "6d185b47e93e491dff98964533517b7f65e512e3b8d74aafef54357cb6992cc2",
+  "r9_zip_sha256": "c6d0e7ff566bd14a90f99c0062b892f4b431966c5d47ec0672aae36fb353ecf3",
+  "production_files": [
+    "godpick_h250r7_tracking.py",
+    "godpick_h250r9_evidence.py",
+    "godpick_h250r6_monitor.py",
+    "godpick_h250r10_recovery.py",
+    "tools/h250r10_gap_repair.py"
+  ],
+  "files": {
+    "godpick_h250r7_tracking.py": {
+      "previous_sha256": "80e2443942a6fde93451ab160efbdc4a72c62ae4af8872abf9e23606b76d24fc",
+      "new_sha256": "784ec0d6ef457c4d5cfb9f34a29cf47b0172e3d3c96f62737f244ff66437ba0e"
+    },
+    "godpick_h250r9_evidence.py": {
+      "previous_sha256": "9926097f6d5d78007947521c58acf6eb3125aeec8a9d85c744aad322f458a4b8",
+      "new_sha256": "e31da1dfdb8822aa066ca09efe9574f69c6a177872d6d9daff0a685e3f4bd66e"
+    },
+    "godpick_h250r6_monitor.py": {
+      "previous_sha256": "c2d112c060c54867731fbc226c03f19266f3a44d9f823f4d82f45a61b72ab8dc",
+      "new_sha256": "a084ce033e17bcb12505af955e48b83bc6c952f15e1934b2b40f49b6ce5be42b"
+    },
+    "godpick_h250r10_recovery.py": {
+      "previous_sha256": null,
+      "new_sha256": "0228a7d5033aa0b04145ec88173aca51006c50250566614f3372c4850ed9ca49"
+    },
+    "tools/h250r10_gap_repair.py": {
+      "previous_sha256": null,
+      "new_sha256": "eae3c6f0b75af3e47c5675ee9a34c9dc09982470f7329eb08bf8e9ebd9a58dc5"
+    },
+    "tests/test_h250r10_recovery.py": {
+      "previous_sha256": null,
+      "new_sha256": "dcdb043dc281196f11877811fc2973faac80701a82ca016b84deb19356a8a867"
+    }
+  },
+  "compiled_python_files": 867,
+  "tests_passed": 232,
+  "tests_skipped": 6,
+  "production_deployed": false
+}

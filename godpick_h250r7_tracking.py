@@ -383,7 +383,8 @@ def build_extended_plan(rows,a,kind,limit,cfg,fetch=None):
 def exact_commit(rows,patch,sig,h,p):
     if not patch:return None
     from godpick_h250r9_evidence import MAP
-    allowed={MAP,RAW_NOW,RAW_DATE,RAW_PRICE,RAW_PROOF,NPROOF,*N_COLS,HIT_PROOF,ADJ_VALUE,ADJ_PROOF,'作戰追蹤狀態','作戰追蹤資料源','作戰命中摘要','作戰追蹤更新時間'}
+    from godpick_h250r10_recovery import FIELDS
+    allowed={*FIELDS,MAP,RAW_NOW,RAW_DATE,RAW_PRICE,RAW_PROOF,NPROOF,*N_COLS,HIT_PROOF,ADJ_VALUE,ADJ_PROOF,'作戰追蹤狀態','作戰追蹤資料源','作戰命中摘要','作戰追蹤更新時間'}
     for name in ('進場點命中','突破價命中','停損價觸發','第一壓力命中'):
         allowed.update((name,name+'日期'))
     for lab in ('隔日','3日','5日','10日'):
@@ -396,10 +397,10 @@ def exact_commit(rows,patch,sig,h,p):
         by={text(r.get('record_id')):r for r in base}
         if len(by)!=len(base) or not set(patch)<=set(by):raise ValueError('H241_ID_CHANGED')
         final=[dict(r,**patch[text(r.get('record_id'))]) if text(r.get('record_id')) in patch else r for r in base]
-        return h._commit(base,head,sha,final,set(),'H250R9 history-only verified performance metrics')
+        return h._commit(base,head,sha,final,set(),'H250R10 history-only verified metrics and diagnostics' if any(set(d)&set(FIELDS) for d in patch.values()) else 'H250R9 history-only verified performance metrics')
 
 
-def task(kind,cfg=None,*,root=ROOT):
+def task(kind,cfg=None,*,root=ROOT,r10=False):
     """Return scheduler contract. No source list/snapshot writes, no Page07 rerun."""
     from godpick_auto_update_tasks import _report
     t=time.perf_counter();cfg=cfg or {};title={TASKS[0]:'推薦後績效',TASKS[1]:'正式N日績效',TASKS[2]:'隔日命中追蹤'}[kind]
@@ -408,31 +409,41 @@ def task(kind,cfg=None,*,root=ROOT):
         import godpick_persistence_service as p
         rows,msgs,_=h.ensure()
         if p.records_authority_verification_h240().get('status')!='VERIFIED' or not isinstance(rows,list) or not rows:
-            return _report(False,'R9 '+title+'：08歷史權威未核實或無歷史；禁止回寫',details={'outcome':'AUTHORITY_PENDING'},started=t)
+            return _report(False,('R10 ' if r10 else 'R9 ')+title+'：08歷史權威未核實或無歷史；禁止回寫',details={'outcome':'AUTHORITY_PENDING'},started=t)
         rows=copy.deepcopy(rows);sig=p.records_authority_signature()
         a=load_archive(root)
         limit=archive_limit(cfg,kind)
-        patches,stats,gaps=build_extended_plan(rows,a,kind,limit,cfg)
+        if r10:
+            from godpick_h250r10_recovery import plan as plan_r10, FIELDS
+            patches,stats,gaps=plan_r10(rows,a,kind,limit,cfg)
+        else:
+            patches,stats,gaps=build_extended_plan(rows,a,kind,limit,cfg)
         pending=sum(stats.get(k,0) for k in ('IDENTITY_PENDING','CALENDAR_GAP','QUOTE_PENDING','BASE_PENDING','PLAN_PENDING','ADJUSTED_PENDING','DEFERRED'))
         report=exact_commit(rows,patches,sig,h,p)
         ok=not patches or bool(report and report.local_ok and report.github_ok and report.permanent_ok)
-        confirmed=len(patches) if ok else 0
+        confirmed=(stats.get('METRICS_PLANNED',0) if r10 else len(patches)) if ok else 0
+        if r10:
+            stats['DIAGNOSTICS_CONFIRMED']=stats.get('DIAGNOSTICS_PLANNED',0) if ok else 0
+            stats['WRITE_CONFIRMED']=len(patches) if ok else 0
+            stats['WORK_VERIFIED']=int(ok)
         if kind==TASKS[0]:stats['ADJUSTED_NEW_CONFIRMED']=sum(ADJ_PROOF in d for d in patches.values()) if ok else 0
         outcome=('PARTIAL_SAVED' if pending else 'VERIFIED_SAVED') if ok and patches else 'NO_NEW_DUE' if ok and not pending else 'EVIDENCE_PENDING' if ok else 'REMOTE_PENDING'
         details={'outcome':outcome,'authority_count':len(rows),'latest_official_day':a.latest,'confirmed':confirmed,'diagnostics':stats,'gap_breakdown':gaps,'archive_limit':limit,'sync_messages':report.messages() if report else []}
-        msg=f'R9 {title}｜08權威 {len(rows)} 筆／官方至 {a.latest}／永久確認 {confirmed} 筆／'+('、'.join(f'{k} {v}' for k,v in stats.items()) or '無新資料')
+        if r10:
+            details.update(execution_outcome='REMOTE_CONFIRMED' if ok and patches else 'NO_CHANGE' if ok else 'REMOTE_UNCONFIRMED', evidence_outcome='EVIDENCE_PENDING' if pending else 'ALL_DUE_VERIFIED', quality_gate_unchanged=True)
+        msg=f'{"R10" if r10 else "R9"} {title}｜08權威 {len(rows)} 筆／官方至 {a.latest}／永久確認 {confirmed} 筆／'+('、'.join(f'{k} {v}' for k,v in stats.items()) or '無新資料')
         if not ok:msg+='｜遠端未確認，不計成功'
         elif not patches and not pending:msg+='｜無新到期工作，正常略過'
         elif pending:msg+='｜剩餘可寫 '+str(stats.get('DEFERRED',0))+' 筆；證據缺口仍保留，不冒充全數完成'
         if gaps:msg+='｜缺口明細：'+ '、'.join(f'{k} {v}' for k,v in sorted(gaps.items(),key=lambda kv:(-kv[1],kv[0]))[:4])
-        result=_report(ok,msg,details=details,changed_files=['godpick_records.json'] if confirmed else [],started=t,warning=bool(ok and pending))
+        result=_report(ok,msg,details=details,changed_files=['godpick_records.json'] if ok and patches else [],started=t,warning=bool(ok and pending))
         # Continue only when a successful adjusted repair made measurable progress
         # and more symbols remain. Source failures alone do not trigger a loop.
         result['retry_pending']=bool(ok and (stats.get('DEFERRED',0) or
-            (kind==TASKS[0] and stats.get('ADJUSTED_NEW_CONFIRMED',0)>0 and stats.get('ADJUSTED_PROVIDER_DEFERRED',0)>0)))
+            (kind==TASKS[0] and (stats.get('ADJUSTED_SYMBOLS_ATTEMPTED',0)>0 if r10 else stats.get('ADJUSTED_NEW_CONFIRMED',0)>0) and stats.get('ADJUSTED_PROVIDER_DEFERRED',0)>0 and not stats.get('ADJUSTED_RATE_LIMITED',0))))
         return result
     except Exception as exc:
-        return _report(False,'R9 '+title+'：'+type(exc).__name__+'｜'+str(exc)[:220]+'；未確認不算成功',started=t)
+        return _report(False,('R10 ' if r10 else 'R9 ')+title+'：'+type(exc).__name__+'｜'+str(exc)[:220]+'；未確認不算成功',started=t)
 
 
 def install_handlers(module):
@@ -442,7 +453,7 @@ def install_handlers(module):
     mapping=module.TASK_HANDLERS
     if not all(callable(mapping.get(k)) for k in TASKS):raise RuntimeError('R7 central task contract mismatch')
     def bind(k):
-        def call(cfg=None):return task(k,cfg)
+        def call(cfg=None):return task(k,cfg,r10=True)
         call.__name__='h250r7_'+k
         return call
     mapping.update({k:bind(k) for k in TASKS})

@@ -1,0 +1,15 @@
+Full Python compile: 867/867 PASS
+Unit tests: 147 run, 141 passed, 6 skipped
+H250-R6 telemetry stopped (business continues): RuntimeError
+H250-R6 telemetry stopped (business continues): ValueError
+----------------------------------------------------------------------
+Ran 147 tests in 1.596s
+
+OK (skipped=6)
+
+Pytest (H241/H243/H250R2/H190):
+........................................................................ [ 79%]
+...................                                                      [100%]
+91 passed, 434 warnings in 8.12s
+
+Real replay: 2385 rows, 3 tasks, unchanged repeat patches=0, identity/legacy metrics preserved. Provider network disabled.
